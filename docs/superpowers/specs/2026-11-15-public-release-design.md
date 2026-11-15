@@ -1,11 +1,11 @@
 # chta — Public source, releases และการอัปเดต
 
-สถานะ: แบบเสนอสำหรับตรวจ ก่อนเริ่มทำระบบ release/updater
+สถานะ: แบบเสนอสำหรับระบบ release/updater; source repository เริ่มเป็น private ตามคำสั่งล่าสุดของเจ้าของ
 วันที่: 2026-11-15
 
 ## สิ่งที่ผู้ใช้กำหนด
 
-- Source และ GitHub Releases เป็น public
+- เป้าหมายเดิมคือ Source และ GitHub Releases เป็น public; คำสั่งล่าสุดให้เริ่ม source ที่ `usero2/chta` เป็น private ก่อน ห้ามเปลี่ยนเป็น public จนกว่าเจ้าของจะสั่ง
 - `roadmaps/` อยู่เฉพาะในเครื่อง ห้ามนำขึ้น remote
 - เป้าหมายแพลตฟอร์มอ้างอิง Gridcraft และคง Android ของ chta
 - Windows ต้องมีตัวเลือกดาวน์โหลดไฟล์เดียว `chta.exe`
@@ -128,4 +128,4 @@ Android ปัจจุบันใช้ debug signing สำหรับ relea
 
 ## สถานะปัจจุบัน
 
-เป็นเอกสารแบบและ checklist ยังไม่ได้สร้าง CI/updater, public repository, remote push หรือ GitHub Release การเพิ่มเลขเวอร์ชันท้าย Profile เป็นงาน UI แยกที่ผู้ใช้สั่งโดยตรง
+สร้าง `https://github.com/usero2/chta` แบบ private และอัปโหลด source snapshot สะอาดจาก `source-workspace/` แล้ว ไม่รวม roadmaps และประวัติเดิม ระบบ CI/updater และ GitHub Release ยังไม่ได้ดำเนินการ การเปิด repository เป็น public ต้องรอคำสั่งเจ้าของ ส่วนเลขเวอร์ชันท้าย Profile อยู่ใน build 31 แล้ว
