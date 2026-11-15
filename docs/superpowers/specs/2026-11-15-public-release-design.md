@@ -9,6 +9,7 @@
 - `roadmaps/` อยู่เฉพาะในเครื่อง ห้ามนำขึ้น remote
 - เป้าหมายแพลตฟอร์มอ้างอิง Gridcraft และคง Android ของ chta
 - Windows ต้องมีตัวเลือกดาวน์โหลดไฟล์เดียว `chta.exe`
+- เจ้าของเลือก MIT License สำหรับ source ของ chta; dependencies คง license ของแต่ละโครงการ
 - แอปตรวจเวอร์ชันใหม่จาก GitHub Releases ได้ และแสดงเวอร์ชันที่ติดตั้งท้ายหน้า Profile
 - ความสามารถหลักต้องเหมือนกันทุกแพลตฟอร์ม การทำ package สำเร็จอย่างเดียวไม่ถือว่ารองรับแล้ว
 
@@ -71,7 +72,8 @@ private-workspace/            logs, captures, รายงานตรวจ, �
 - [ ] ตรวจ secrets และข้อมูลส่วนตัวทั้งข้อความ/ภาพ/เอกสาร/ไฟล์บีบอัด; เก็บรายงานแบบ redact นอก public tree
 - [ ] ตรวจเอกสารที่อาจอ้าง DID จริง, device serial, local IP, screenshots และข้อมูลจาก roadmaps; ย้ายรายงานภายในหรือแทนด้วยข้อมูลจำลอง
 - [ ] ไม่ export `roadmaps/`, `.git/`, `.worktrees/`, `.superpowers/`, logs, build outputs, credentials และ private evidence; คัดเลือก `docs/superpowers/` เป็นรายไฟล์
-- [ ] ตรวจ LICENSE ของ project และ third-party notices ก่อนเผยแพร่; เจ้าของต้องเลือก license ก่อน public ครั้งแรก
+- [x] เจ้าของเลือก MIT และเพิ่ม LICENSE ของ project แล้ว
+- [ ] ตรวจ third-party notices ก่อนเผยแพร่ไฟล์ติดตั้ง
 - [ ] สร้าง Git history ใหม่จาก snapshot สะอาด และตรวจ `git ls-tree`/source ZIP รวมไฟล์ที่ GitHub สร้างจาก tag
 - [ ] build จาก clean checkout ที่ไม่มี roadmaps ได้ครบ; artifact scan ต้องยืนยันว่าไม่มีข้อมูลส่วนตัวแทรกมา
 - [ ] ส่งมอบเส้นทางพัฒนาใหม่ให้ชัด: หลังเริ่ม public history ใช้ `chta-public` เป็น source หลัก เก็บ repo เดิมเป็น local archive ไม่ merge history เดิมกลับมา

@@ -2,7 +2,7 @@
 
 Peer-to-peer chat for Web, Windows and Android. Send encrypted messages, share files and create private groups. The interface uses Flutter, with a shared Rust core compiled for browsers and native apps.
 
-[Try the Web app](https://chta.app/chat/) · [Getting started](https://chta.app/#start) · [Build from source](#build-and-run)
+[Try the Web app](https://chta.app/chat/) · [Releases](https://github.com/usero2/chta/releases) · [Getting started](https://chta.app/#start) · [MIT License](LICENSE)
 
 > This repository now contains an experimental identity, contact, WebRTC, and Noise-encrypted 1:1 path. It has not been independently audited and is not production-ready.
 
@@ -15,6 +15,23 @@ Peer-to-peer chat for Web, Windows and Android. Send encrypted messages, share f
 | <img src="docs/images/mobile-contacts.png" alt="Mobile contacts with a profile, contact QR and friend list" width="300"> | <img src="docs/images/mobile-profile.png" alt="Mobile profile with an avatar, display name, identity switching and app version" width="300"> |
 
 Captured from the Web app at desktop and phone sizes using sample identities and local conversation data. No personal conversations are included.
+
+## Platforms
+
+Windows x64, Android ARM64 and Web have preview builds. The other desktop targets below are planned; they do not have working chta packages yet.
+
+| Platform | Architecture | Status and intended distribution |
+| --- | --- | --- |
+| Web | Supported desktop and mobile browsers | Preview · [Open chat](https://chta.app/chat/), Rust/WASM |
+| Windows | x64 | Preview · single-file `chta.exe`; portable ZIP and MSI planned |
+| Windows | ARM64 | Planned · single EXE, portable ZIP and MSI |
+| macOS | Apple Silicon and Intel | Planned · universal DMG |
+| Linux | x86_64 and ARM64 | Planned · AppImage, DEB, RPM, Flatpak, Arch package and TAR |
+| Linux | RISC-V 64-bit | Planned · DEB, RPM and TAR; requires additional runtime work |
+| FreeBSD | x86_64 and ARM64 | Planned · TAR; requires additional runtime work |
+| Android | ARM64 | Preview · APK |
+
+See the [release distribution plan](docs/superpowers/specs/2026-11-15-public-release-design.md) for the target matrix and acceptance checks. Packages will be listed in [GitHub Releases](https://github.com/usero2/chta/releases) when published. The repository is currently private, so GitHub access is required.
 
 ## Current capabilities
 
@@ -145,3 +162,7 @@ python -m unittest scripts.test_dev_server -v
 The layout and interactions were informed by an earlier chat prototype. Its backend, storage and private configuration are not included in this repository.
 
 See [the migration record](docs/migrations/mine-chat-note-webchat.md) for the exact mapping.
+
+## License
+
+chta is licensed under the [MIT License](LICENSE). Third-party dependencies retain their own licenses.
