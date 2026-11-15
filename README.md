@@ -1,10 +1,20 @@
 # chta
 
-`chta` is a peer-to-peer chat application for Web, Desktop and Android. Flutter owns the shared UI while the Rust core runs as WASM in browsers, a native DLL on Windows, and an ARM64 shared library on Android. Existing `did:cht:` identities, package IDs and storage paths remain compatible with earlier versions.
+Peer-to-peer chat for Web, Windows and Android. Send encrypted messages, share files and create private groups. The interface uses Flutter, with a shared Rust core compiled for browsers and native apps.
 
-Build 25 adds [direct large files, resume, progress and incoming notifications](docs/direct-large-files.md).
+[Try the Web app](https://chta.app/chat/) · [Getting started](https://chta.app/#start) · [Build from source](#build-and-run)
 
 > This repository now contains an experimental identity, contact, WebRTC, and Noise-encrypted 1:1 path. It has not been independently audited and is not production-ready.
+
+## A look around
+
+![Desktop chat showing Markdown notes in a sample conversation](docs/images/desktop-chat.png)
+
+| Contacts and QR sharing | Profile and identities |
+| --- | --- |
+| <img src="docs/images/mobile-contacts.png" alt="Mobile contacts with a profile, contact QR and friend list" width="300"> | <img src="docs/images/mobile-profile.png" alt="Mobile profile with an avatar, display name, identity switching and app version" width="300"> |
+
+Captured from the Web app at desktop and phone sizes using sample identities and local conversation data. No personal conversations are included.
 
 ## Current capabilities
 
@@ -132,6 +142,6 @@ python -m unittest scripts.test_dev_server -v
 
 ## Reference project
 
-The visual structure and interaction model were adapted from the Web Chat surface in `the reference chat project`. That project is a read-only reference; its Android/Ktor backend, Room storage, PIN session, cleartext LAN assumptions, and private configuration are not part of `cht`.
+The layout and interactions were informed by an earlier chat prototype. Its backend, storage and private configuration are not included in this repository.
 
 See [the migration record](docs/migrations/mine-chat-note-webchat.md) for the exact mapping.
