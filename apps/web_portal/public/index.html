@@ -15,7 +15,7 @@
     <a class="brand" href="/" aria-label="chta home"><img src="/brand.png" alt="" width="40" height="40"><span>chta<span class="brand-period">.</span></span></a>
     <nav aria-label="Main navigation">
       <a class="nav-guide" href="#start">Get started</a>
-      <a class="nav-guide" href="#connections">Connections</a>
+      <a class="nav-guide" href="#platforms">Platforms</a>
       <a href="https://github.com/usero2/chta">GitHub</a>
       <a class="nav-download" href="https://github.com/usero2/chta/releases">Downloads</a>
       <a class="nav-app" href="/chat/">Open chat <span aria-hidden="true">↗</span></a>
@@ -40,6 +40,69 @@
         <p class="note-heading">Keep the 24 words you receive when you create an identity.</p>
         <p>They are how you restore it on another device or after losing browser data. Keep them private and somewhere you can find them.</p>
       </aside>
+    </section>
+
+    <section class="screenshots wrap" aria-labelledby="screenshots-title">
+      <div class="section-intro">
+        <p class="section-label">Inside the app</p>
+        <h2 id="screenshots-title">Your chats, contacts, and identity.</h2>
+      </div>
+      <div class="screenshot-gallery">
+        <figure class="screenshot-desktop">
+          <a href="/screenshots/desktop-chat.png" aria-label="View the desktop chat screenshot">
+            <img src="/screenshots/desktop-chat.png" alt="chta chat at desktop size, showing Markdown notes and the conversation list" width="1280" height="820" loading="lazy">
+          </a>
+          <figcaption>Chats with Markdown</figcaption>
+        </figure>
+        <div class="screenshot-phones">
+          <figure>
+            <a href="/screenshots/mobile-contacts.png" aria-label="View the mobile Contacts screenshot">
+              <img src="/screenshots/mobile-contacts.png" alt="chta Contacts at phone size, with a profile, contact QR, and friend list" width="390" height="1000" loading="lazy">
+            </a>
+            <figcaption>Contacts and QR</figcaption>
+          </figure>
+          <figure>
+            <a href="/screenshots/mobile-profile.png" aria-label="View the mobile Profile screenshot">
+              <img src="/screenshots/mobile-profile.png" alt="chta Profile at phone size, with an avatar, display name, identity switching, and app version" width="390" height="1000" loading="lazy">
+            </a>
+            <figcaption>Profile and identities</figcaption>
+          </figure>
+        </div>
+      </div>
+      <p class="screenshot-note">Web app preview at desktop and phone sizes. All accounts and messages shown are sample data.</p>
+    </section>
+
+    <section class="privacy-section" id="privacy" aria-labelledby="privacy-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <p class="section-label">Private by design</p>
+          <h2 id="privacy-title">Your conversations stay with you.</h2>
+        </div>
+        <div class="privacy-points">
+          <article><h3>Messages and files are end-to-end encrypted</h3><p>Content is encrypted between the devices in a conversation. Relays forward encrypted data without being able to read your messages or files.</p></article>
+          <article><h3>No central chat archive</h3><p>Your history and cached media stay on your devices. The discovery seed does not store chat or file content.</p></article>
+          <article><h3>No ads or app analytics</h3><p>No advertising or analytics trackers are built into the app. You do not need an email address or phone number to create an identity.</p></article>
+        </div>
+        <p class="privacy-note">The seed uses temporary connection metadata to find peers and limit abuse. Peers and network providers can still see IP addresses.</p>
+      </div>
+    </section>
+
+    <section class="platform-section wrap" id="platforms" aria-labelledby="platforms-title">
+      <div class="section-intro">
+        <p class="section-label">Choose your platform</p>
+        <h2 id="platforms-title">Choose where to chat.</h2>
+        <p>On macOS or Linux, you can use the Web app today. Native desktop packages for these platforms are planned.</p>
+      </div>
+      <div class="platform-list">
+        <article class="platform-row"><div><h3>Web</h3><p>Desktop and mobile browsers</p></div><a class="platform-action" href="/chat/">Open chat <span aria-hidden="true">↗</span></a></article>
+        <article class="platform-row"><div><h3>Windows</h3><p>x64 preview · single-file desktop app</p></div><a class="platform-action" href="https://github.com/usero2/chta/releases">Releases <span aria-hidden="true">↗</span></a></article>
+        <article class="platform-row"><div><h3>Android</h3><p>ARM64 preview · APK</p></div><a class="platform-action" href="https://github.com/usero2/chta/releases">Releases <span aria-hidden="true">↗</span></a></article>
+        <article class="platform-row"><div><h3>macOS</h3><p>Apple Silicon and Intel</p></div><span class="platform-status">Planned</span></article>
+        <article class="platform-row"><div><h3>Linux</h3><p>x86_64, ARM64, and RISC-V</p></div><span class="platform-status">Planned</span></article>
+        <article class="platform-row"><div><h3>FreeBSD</h3><p>x86_64 and ARM64</p></div><span class="platform-status">Planned</span></article>
+        <article class="platform-row"><div><h3>Windows on ARM</h3><p>ARM64 native desktop app</p></div><span class="platform-status">Planned</span></article>
+      </div>
+      <p class="platform-note">Downloads are shared through GitHub Releases. GitHub access is required while the repository is private.</p>
     </section>
 
     <section class="guide-section" id="start" aria-labelledby="start-title">
@@ -87,6 +150,7 @@
       <a href="https://github.com/usero2/chta">GitHub</a>
       <a href="https://github.com/usero2/chta/releases">Releases</a>
       <a href="https://github.com/usero2/chta/blob/main/LICENSE">MIT License</a>
+      <a href="#privacy">Privacy</a>
       <a href="/chat/">Open chat <span aria-hidden="true">↗</span></a>
     </div>
   </footer>
