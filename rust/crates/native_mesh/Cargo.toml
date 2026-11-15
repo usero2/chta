@@ -1,0 +1,18 @@
+[package]
+name = "cht-mesh"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]
+
+[dependencies]
+futures = "0.3.31"
+libp2p = { version = "0.57.1", default-features = false, features = ["identify", "macros", "mdns", "noise", "ping", "relay", "tcp", "tokio", "yamux"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio-tungstenite = "0.28"

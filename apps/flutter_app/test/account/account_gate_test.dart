@@ -1,0 +1,474 @@
+import 'dart:convert';
+
+import 'package:cht/account/account_controller.dart';
+import 'package:cht/account/account_models.dart';
+import 'package:cht/app.dart';
+import 'package:cht/chat/chat_controller.dart';
+import 'package:cht/chat/chat_models.dart';
+import 'package:cht/chat/peer_history.dart';
+import 'package:cht/chat/peer_history_store.dart';
+import 'package:cht/core/core_bridge.dart';
+import 'package:cht/profile/profile_controller.dart';
+import 'package:cht/profile/profile_avatar.dart';
+import 'package:cht/profile/profile_store.dart';
+import 'package:cht/routing/app_router.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as image;
+
+void main() {
+  testWidgets(
+    'contacts and chat show the local profile and signed friend avatar',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bytes = image.encodeJpg(image.Image(width: 48, height: 48));
+      final avatar = base64Encode(bytes);
+      final profileStore = _ProfileTestStore()
+        ..value = StoredProfile(name: 'My profile name', avatar: bytes);
+      final profile = ProfileController(profileStore);
+      await profile.load();
+      final bridge = _AccountTestBridge(hasExistingIdentity: true);
+      bridge.savedContacts = [bridge.savedContacts.single.withAvatar(avatar)];
+      final router = AppRouter(initialPath: '/contacts');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          profileController: profile,
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('My profile name'), findsOneWidget);
+      expect(
+        tester
+            .widget<ProfileAvatar>(find.byKey(const Key('my-contact-avatar')))
+            .bytes,
+        bytes,
+      );
+      expect(
+        tester
+            .widget<ProfileAvatar>(
+              find.byKey(const Key('friend-avatar-did:cht:alice')),
+            )
+            .avatarBase64,
+        avatar,
+      );
+      expect(bridge.cardAvatar, profile.contactAvatar);
+      await tester.ensureVisible(
+        find.byKey(const Key('chat-contact-did:cht:alice')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('chat-contact-did:cht:alice')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ProfileAvatar>(find.byKey(const Key('chat-peer-avatar')))
+            .avatarBase64,
+        avatar,
+      );
+      expect(
+        tester
+            .widget<ProfileAvatar>(
+              find.byKey(const Key('conversation-avatar-did:cht:alice')),
+            )
+            .avatarBase64,
+        avatar,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('generated phrase fills the 24 editable recovery fields', (
+    tester,
+  ) async {
+    final bridge = _AccountTestBridge();
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        router: AppRouter(initialPath: '/identity'),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('create-identity')));
+    await tester.pump();
+
+    expect(_fieldValue(tester, 1), 'first1');
+    expect(_fieldValue(tester, 24), 'first24');
+    expect(find.text('Paste 24 words'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('random-recovery-phrase')));
+    await tester.pump();
+
+    expect(_fieldValue(tester, 1), 'second1');
+    expect(_fieldValue(tester, 24), 'second24');
+
+    await tester.tap(find.byKey(const Key('back-from-create-identity')));
+    await tester.pump();
+
+    expect(find.byKey(const Key('create-identity')), findsOneWidget);
+    expect(bridge.discardedPendingIdentity, isTrue);
+  });
+
+  testWidgets('restore identity uses 24 word fields', (tester) async {
+    final bridge = _AccountTestBridge();
+    final phrase = List.generate(24, (index) => 'word${index + 1}').join(' ');
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        router: AppRouter(initialPath: '/identity'),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('restore-recovery-1')), findsOneWidget);
+    expect(find.byKey(const Key('restore-recovery-24')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const Key('restore-phrase-paste')),
+      phrase,
+    );
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('restore-recovery-1')))
+          .controller!
+          .text,
+      'word1',
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('restore-recovery-24')))
+          .controller!
+          .text,
+      'word24',
+    );
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('restore-identity')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('restore-identity')));
+    await tester.pump();
+    expect(bridge.restoredPhrase, phrase);
+  });
+
+  testWidgets('contacts route shows a friend and opens secure chat', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _AccountTestBridge(hasExistingIdentity: true);
+    final router = AppRouter(initialPath: '/contacts');
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        router: router,
+        peerHistoryStore: _HistoryTestStore(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Alice'), findsOneWidget);
+    expect(find.textContaining('Signed name: Alice'), findsOneWidget);
+    expect(find.textContaining('Identity verified'), findsOneWidget);
+
+    await tester.ensureVisible(
+      find.byKey(const Key('edit-alias-did:cht:alice')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('edit-alias-did:cht:alice')));
+    await tester.pump();
+    expect(find.text('Edit alias'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const Key('contact-alias-input')),
+      'Work Alice',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.savedContacts.single.alias, 'Work Alice');
+    expect(find.text('Work Alice'), findsOneWidget);
+    expect(find.textContaining('Signed name: Alice'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('chat-contact-did:cht:alice')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(router.path, '/chats/did%3Acht%3Aalice');
+    expect(find.byKey(const Key('secure-chat-shell')), findsOneWidget);
+    expect(find.text('Work Alice'), findsWidgets);
+    expect(find.byKey(const Key('connect-to-chat')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('connect-to-chat')));
+    await tester.pump();
+
+    expect(router.path, '/chats/did%3Acht%3Aalice');
+    expect(find.text('Connect with Work Alice'), findsWidgets);
+    expect(find.byKey(const Key('close-connect-modal')), findsOneWidget);
+  });
+
+  testWidgets(
+    'friend history stays visible offline while switching between rooms',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _AccountTestBridge(hasExistingIdentity: true);
+      final store = _HistoryTestStore();
+      final saved = PeerHistory(store: store);
+      await saved.load('did:cht:current');
+      saved.add(
+        'did:cht:alice',
+        PeerMessage(
+          id: 'persisted',
+          text: 'Saved friend message',
+          incoming: true,
+          status: DeliveryStatus.delivered,
+        ),
+      );
+      await saved.flush();
+      saved.dispose();
+      final router = AppRouter(initialPath: '/chats/did%3Acht%3Aalice');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: store,
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('peer-message-persisted')), findsOneWidget);
+      expect(find.byKey(const Key('conversation-general')), findsOneWidget);
+      expect(
+        find.byKey(const Key('conversation-did:cht:alice')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('conversation-general')));
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats/general');
+      expect(find.byKey(const Key('conversation-general')), findsOneWidget);
+      expect(
+        find.byKey(const Key('conversation-did:cht:alice')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('conversation-did:cht:alice')));
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats/did%3Acht%3Aalice');
+      expect(find.byKey(const Key('peer-message-persisted')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('profile route saves the display name', (tester) async {
+    final bridge = _AccountTestBridge(hasExistingIdentity: true);
+    final store = _ProfileTestStore();
+    final profile = ProfileController(store);
+    await profile.load();
+    final router = AppRouter(initialPath: '/profile');
+
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        profileController: profile,
+        peerHistoryStore: _HistoryTestStore(),
+        router: router,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(router.path, '/profile');
+    expect(find.text('Profile'), findsWidgets);
+    await tester.enterText(find.byKey(const Key('profile-name')), 'Alice CHT');
+    await tester.tap(find.byKey(const Key('save-profile')));
+    await tester.pumpAndSettle();
+
+    expect(profile.name, 'Alice CHT');
+    expect((await store.load()).name, 'Alice CHT');
+  });
+}
+
+String _fieldValue(WidgetTester tester, int number) => tester
+    .widget<TextField>(find.byKey(Key('confirm-recovery-$number')))
+    .controller!
+    .text;
+
+class _ProfileTestStore implements ProfileStore {
+  StoredProfile value = const StoredProfile();
+
+  @override
+  Future<StoredProfile> load() async => value;
+
+  @override
+  Future<void> save(StoredProfile profile) async => value = profile;
+}
+
+class _HistoryTestStore implements PeerHistoryStore {
+  final values = <String, String>{};
+  @override
+  Future<String?> load(String ownerId) async => values[ownerId];
+  @override
+  Future<void> save(String ownerId, String source) async {
+    values[ownerId] = source;
+  }
+}
+
+class _AccountTestBridge implements AppBridge {
+  _AccountTestBridge({this.hasExistingIdentity = false})
+    : savedContacts = [
+        const ContactView(
+          identityId: 'did:cht:alice',
+          displayName: 'Alice',
+          signedName: 'Alice',
+          fingerprint: 'AA11-BB22',
+          verified: true,
+        ),
+      ];
+
+  final bool hasExistingIdentity;
+  List<ContactView> savedContacts;
+  var generation = 0;
+  var discardedPendingIdentity = false;
+  String? restoredPhrase;
+  String? cardAvatar;
+
+  @override
+  Future<bool> hasIdentity() async => hasExistingIdentity;
+
+  @override
+  Future<CreatedIdentityView> createIdentity() async {
+    generation++;
+    final prefix = generation == 1 ? 'first' : 'second';
+    return CreatedIdentityView(
+      mnemonic: List.generate(24, (index) => '$prefix${index + 1}').join(' '),
+      identity: _identity(prefix),
+    );
+  }
+
+  @override
+  Future<void> discardPendingIdentity() async {
+    discardedPendingIdentity = true;
+  }
+
+  IdentityView _identity(String suffix) => IdentityView(
+    id: 'did:cht:$suffix',
+    rootPublicKey: 'root-$suffix',
+    noiseStaticPublicKey: 'noise-$suffix',
+    derivationVersion: 1,
+  );
+
+  @override
+  Future<IdentityView> confirmRecovery(String phrase) async =>
+      _identity('confirmed');
+  @override
+  Future<IdentityView> restoreIdentity(String phrase) async {
+    restoredPhrase = phrase;
+    return _identity('restored');
+  }
+
+  @override
+  Future<IdentityView> identity() async => _identity('current');
+  @override
+  Future<String> contactCard({
+    String displayName = '',
+    String avatar = '',
+  }) async {
+    cardAvatar = avatar;
+    return '{}';
+  }
+
+  @override
+  Future<List<ContactView>> contacts() async => savedContacts;
+  @override
+  Future<ContactView> inspectContactCard(String cardJson) =>
+      throw UnimplementedError();
+  @override
+  Future<List<ContactView>> addContact(
+    String cardJson,
+    String displayName,
+  ) async => const [];
+  @override
+  Future<List<ContactView>> markContactVerified(String identityId) async =>
+      const [];
+
+  @override
+  Future<List<ContactView>> setContactAlias(
+    String identityId,
+    String alias,
+  ) async {
+    savedContacts = [
+      ContactView(
+        identityId: identityId,
+        displayName: alias.isEmpty ? 'Alice' : alias,
+        signedName: 'Alice',
+        alias: alias,
+        fingerprint: 'AA11-BB22',
+        verified: true,
+      ),
+    ];
+    return savedContacts;
+  }
+
+  @override
+  Future<List<ContactView>> removeContact(String identityId) async => const [];
+  @override
+  Future<String> preparePeer(String cardJson, bool initiator) =>
+      throw UnimplementedError();
+  @override
+  Future<String> startPeerHandshake() => throw UnimplementedError();
+  @override
+  Future<Map<String, Object?>> receivePeerHandshake(String frame) =>
+      throw UnimplementedError();
+  @override
+  Future<String> encryptPeerMessage(
+    String messageId,
+    String text, {
+    int? sentAtMilliseconds,
+  }) => throw UnimplementedError();
+  @override
+  Future<Map<String, Object?>> decryptPeerMessage(String frame) =>
+      throw UnimplementedError();
+  @override
+  Future<String> version() async => 'cht-core@test';
+  @override
+  Future<ChatSnapshot> loadSnapshot() async => ChatSnapshot(
+    schemaVersion: 1,
+    conversations: [
+      ConversationView(
+        id: 'general',
+        title: 'General',
+        preview: 'test',
+        updatedAtMilliseconds: 1,
+        messages: const [],
+      ),
+    ],
+  );
+  @override
+  Future<ChatSnapshot> sendText(
+    String conversationId,
+    String text,
+    int sentAtMilliseconds,
+  ) => loadSnapshot();
+}

@@ -1,0 +1,13 @@
+{
+  "tcp_enabled": false,
+  "public_addresses": [],
+  "state_dir": "relay-data",
+  "websocket": {
+    "listen": "127.0.0.1:4002",
+    "public_url": "wss://replace-with-hostname.trycloudflare.com/cht",
+    "bootstrap_urls": [],
+    "max_clients": 64,
+    "bytes_per_minute": 8388608,
+    "allow_loopback": false
+  }
+}

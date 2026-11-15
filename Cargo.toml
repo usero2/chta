@@ -1,0 +1,8 @@
+[workspace]
+members = ["rust/crates/core", "rust/crates/relay_protocol"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"

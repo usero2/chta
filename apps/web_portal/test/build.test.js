@@ -1,0 +1,22 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { build } from '../scripts/build.mjs';
+test('portal packaging copies actual Flutter files only after validating its /chat/ mount',async t=>{
+  const temp=await mkdtemp(join(tmpdir(),'chta-package-'));t.after(()=>rm(temp,{recursive:true,force:true}));
+  const flutterDir=join(temp,'flutter'),outDir=join(temp,'dist');await mkdir(flutterDir);
+  await writeFile(join(flutterDir,'index.html'),'<base href="/">');
+  await assert.rejects(build({flutterDir,outDir}),/chat/);
+  await writeFile(join(flutterDir,'index.html'),'<base href="/chat/">');
+  await assert.rejects(build({flutterDir,outDir}),/incomplete/);
+  await writeFile(join(flutterDir,'main.dart.js'),'real-build-marker');
+  await writeFile(join(flutterDir,'flutter_bootstrap.js'),'bootstrap');
+  await mkdir(join(flutterDir,'wasm'));await writeFile(join(flutterDir,'wasm/cht_core.js'),'rust adapter');await writeFile(join(flutterDir,'wasm/cht_core_bg.wasm'),'rust wasm');
+  await mkdir(join(flutterDir,'canvaskit'));await writeFile(join(flutterDir,'canvaskit/canvaskit.wasm'),'local renderer');
+  await build({flutterDir,outDir});
+  assert.equal(await readFile(join(outDir,'chat/main.dart.js'),'utf8'),'real-build-marker');
+  const home=await readFile(join(outDir,'index.html'),'utf8');assert.match(home,/lang="en"/);assert.match(home,/href="\/chat\/"/);
+  assert.ok((await readFile(join(outDir,'brand.png'))).length>1000);
+});

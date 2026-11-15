@@ -1,0 +1,17 @@
+flutter_launcher_icons:
+  image_path: "../../assets/branding/chta-icon.png"
+  android: true
+  ios: false
+  min_sdk_android: 24
+  adaptive_icon_background: "#111113"
+  adaptive_icon_foreground: "../../assets/branding/chta-icon.png"
+  adaptive_icon_foreground_inset: 16
+  web:
+    generate: true
+    image_path: "../../assets/branding/chta-icon.png"
+    background_color: "#1A1A1A"
+    theme_color: "#9AE585"
+  windows:
+    generate: true
+    image_path: "../../assets/branding/chta-icon.png"
+    icon_size: 256

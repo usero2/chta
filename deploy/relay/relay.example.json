@@ -1,0 +1,19 @@
+{
+  "listen_ip": "0.0.0.0",
+  "port": 4001,
+  "public_addresses": ["/ip4/203.0.113.10/tcp/4001"],
+  "state_dir": "/var/lib/cht-relay",
+  "limits": {
+    "max_connections": 128,
+    "max_connections_per_peer": 4,
+    "max_pending_incoming": 32,
+    "max_pending_outgoing": 16,
+    "max_reservations": 64,
+    "max_reservations_per_peer": 1,
+    "reservation_seconds": 3600,
+    "max_circuits": 32,
+    "max_circuits_per_peer": 4,
+    "circuit_seconds": 300,
+    "circuit_bytes": 8388608
+  }
+}

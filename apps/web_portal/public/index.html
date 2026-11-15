@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5ef">
+  <meta name="description" content="chta is a chat app for verified friends. Start on the web, save your recovery words, and learn how Direct and relay connections work.">
+  <title>chta — chat with people you know</title>
+  <link rel="icon" href="/brand.png" type="image/png">
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="/" aria-label="chta home"><img src="/brand.png" alt="" width="40" height="40"><span>chta<span class="brand-period">.</span></span></a>
+    <nav aria-label="Main navigation">
+      <a href="#start">Get started</a>
+      <a href="#connections">Connections</a>
+      <a class="nav-app" href="/chat/">Open chat <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="kicker">chta / private chat</p>
+        <h1 id="hero-title">Chat with people you know.</h1>
+        <p class="hero-lead">Share messages, photos, videos, audio, and files with friends whose identities you have checked. Start in your browser and bring your identity with you using your recovery words.</p>
+        <div class="hero-actions">
+          <a class="button" href="/chat/">Open chat <span aria-hidden="true">↗</span></a>
+          <a class="quiet-link" href="#start">How to begin <span aria-hidden="true">↓</span></a>
+        </div>
+        <p class="platforms">Available on Web, Windows desktop, and Android.</p>
+      </div>
+      <aside class="hero-note" aria-label="Before you begin">
+        <p class="note-label">Before you begin</p>
+        <p class="note-heading">Keep the 24 words you receive when you create an identity.</p>
+        <p>They are how you restore it on another device or after losing browser data. Keep them private and somewhere you can find them.</p>
+      </aside>
+    </section>
+
+    <section class="guide-section" id="start" aria-labelledby="start-title">
+      <div class="wrap guide-layout">
+        <div class="section-intro">
+          <p class="section-label">Getting started</p>
+          <h2 id="start-title">From first visit to first chat</h2>
+          <p>You and your friend each need an identity. Plan a moment to compare fingerprints through a channel you already trust.</p>
+        </div>
+        <ol class="steps">
+          <li><span class="step-number" aria-hidden="true">01</span><div><h3>Create or restore your identity</h3><p>Open the app and choose <strong>Create new identity</strong>. If you already have one, choose <strong>Restore identity</strong> and enter its 24 word recovery phrase.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">02</span><div><h3>Save your recovery words</h3><p>Write down all 24 words in order and complete the confirmation in the app. Anyone with those words can unlock your identity, so do not send them to a friend.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">03</span><div><h3>Set up your profile</h3><p>Open <strong>Profile</strong> to add a display name and, if you like, a photo. Your friend will see these when you share your contact card.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">04</span><div><h3>Add a verified friend</h3><p>Exchange contact cards in <strong>Contacts</strong>, by QR code or by copying the card. Compare the fingerprint with your friend before you confirm it. If they see a <strong>Review</strong> request, they need to approve you too.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">05</span><div><h3>Open the conversation</h3><p>Choose your friend in <strong>Chats</strong> and keep both apps open while they connect. Type a message or use the attachment button to choose media and files. Messages support Markdown formatting.</p></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="connections wrap" id="connections" aria-labelledby="connections-title">
+      <div class="section-intro">
+        <p class="section-label">Once you're connected</p>
+        <h2 id="connections-title">How a chat connects</h2>
+        <p>Open your friend's chat to send a message. The connection shown in the app tells you how it is reaching them.</p>
+      </div>
+      <div class="connection-list">
+        <article class="connection-row"><div class="connection-name"><span class="connection-mark direct-mark" aria-hidden="true"></span><h3>Direct</h3></div><p>Your devices connect to each other. Both people need to be online for a Direct connection. Some networks block it; keep both apps open and try again if it does not connect.</p></article>
+        <article class="connection-row"><div class="connection-name"><span class="connection-mark relay-mark" aria-hidden="true"></span><h3>Relay</h3></div><p>A reachable public relay can carry encrypted chat when Direct is unavailable. In <strong>Connect</strong>, scan a relay QR code or use a public relay shared in your contact card. A relay route still needs to be reachable.</p></article>
+        <article class="connection-row"><div class="connection-name"><span class="connection-mark file-mark" aria-hidden="true"></span><h3>Files</h3></div><p>Files up to 25 MiB can use the relay. Larger files, up to 10 GiB, wait for Direct and can resume after an interruption. Browser storage limits and available disk space still apply.</p></article>
+      </div>
+      <p class="connection-footnote">The discovery seed helps friends find each other and exchange connection signals. It does not store your messages or files.</p>
+    </section>
+
+    <section class="recovery-section" aria-labelledby="recovery-title">
+      <div class="wrap recovery-inner">
+        <div><p class="section-label">Keep access</p><h2 id="recovery-title">Changing device or browser?</h2></div>
+        <p>Your browser keeps local app data under the site address where you used it. Data from another address will not appear here automatically. Your 24 word recovery phrase restores your identity keys. Contacts and chat history stay on each device, so keep any files you need separately.</p>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer wrap">
+    <a class="brand footer-brand" href="/">chta<span class="brand-period">.</span></a>
+    <p>Chat with verified friends.</p>
+    <a href="/chat/">Open chat <span aria-hidden="true">↗</span></a>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,38 @@
+[Unit]
+Description=cht bounded Circuit Relay v2 server
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cht-relay
+Group=cht-relay
+StateDirectory=cht-relay
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/cht-relay
+LoadCredentialEncrypted=identity-password:/etc/credstore.encrypted/cht-relay-identity-password.cred
+Environment=CHT_RELAY_KEY_PASSWORD_FILE=%d/identity-password
+ExecStart=/usr/local/bin/cht-relay --config /etc/cht-relay/relay.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LimitNOFILE=4096
+TasksMax=128
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+[package]
+name = "cht-relay"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Standalone bounded Circuit Relay v2 service for cht"
+
+# Keep native server dependencies outside the browser/WASM workspace.
+[workspace]
+
+[dependencies]
+argon2 = "0.5.3"
+base64 = "0.22.1"
+chacha20poly1305 = "0.10.1"
+clap = { version = "4.6", features = ["derive"] }
+futures = "0.3.31"
+getrandom = "0.3.4"
+libp2p = { version = "0.57.1", default-features = false, features = ["ed25519", "identify", "macros", "noise", "ping", "relay", "tcp", "tokio", "yamux"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1.9"
+cht-relay-protocol = { path = "../relay_protocol" }
+ed25519-dalek = "3.0.0"
+url = "2.5.8"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+libp2p = { version = "0.57.1", default-features = false, features = ["request-response", "cbor"] }
+tokio = { version = "1.48", features = ["sync"] }

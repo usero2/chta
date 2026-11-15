@@ -1,0 +1,61 @@
+.worktrees/
+.superpowers/
+.playwright-cli/
+/cht-*.png
+
+# Owner-only planning, captures and local evidence
+/roadmaps/
+/logs/
+/captures/
+/screenshots/
+/_private/
+/.local/
+/artifacts/
+/dist/
+**/*.log
+**/*.dmp
+**/*.pcap
+**/*.pcapng
+**/*.har
+
+# Local credentials and signing material; examples may be committed
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+**/.dev.vars
+**/.dev.vars.*
+!**/.dev.vars.example
+**/.wrangler/
+**/key.properties
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/*recovery*phrase*.txt
+**/cht-recovery*.txt
+**/chta-recovery*.txt
+
+# Flutter and Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/build/
+**/.packages
+**/coverage/
+
+# Rust
+target/
+
+# Generated Rust/WASM browser package
+apps/flutter_app/web/wasm/
+
+# Local editor and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
