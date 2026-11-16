@@ -28,6 +28,105 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final connected in [false, true]) {
+    testWidgets(
+      'mobile peer chat opens at latest message (connected=$connected)',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final history = PeerHistory();
+        final account = _FakeAccountBridge()
+          ..savedContacts.add(
+            const ContactView(
+              identityId: 'did:cht:peer',
+              displayName: 'Alice',
+              fingerprint: 'AA11',
+              verified: true,
+            ),
+          );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConnectionPage(
+              accountBridge: account,
+              bridge: _FakeP2pBridge(authenticated: connected),
+              targetContactId: 'did:cht:peer',
+              chatMode: true,
+              peerHistory: history,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        // History may finish loading after the room has already opened.
+        for (var i = 0; i < 40; i++) {
+          history.add(
+            'did:cht:peer',
+            PeerMessage(
+              id: 'history-$i',
+              text: 'History message $i',
+              incoming: true,
+              status: DeliveryStatus.delivered,
+            ),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('peer-message-history-39')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('peer-message-history-0')).hitTestable(),
+          findsNothing,
+        );
+        history.add(
+          'did:cht:peer',
+          PeerMessage(
+            id: 'newest',
+            text: 'New incoming message',
+            incoming: true,
+            status: DeliveryStatus.delivered,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('peer-message-newest')).hitTestable(),
+          findsOneWidget,
+        );
+        final list = find.ancestor(
+          of: find.byKey(const Key('peer-message-newest')),
+          matching: find.byType(ListView),
+        );
+        final scroll = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        await tester.drag(list, const Offset(0, 1100));
+        await tester.pumpAndSettle();
+        final before = scroll.position.pixels;
+        history.add(
+          'did:cht:peer',
+          PeerMessage(
+            id: 'while-reading',
+            text: 'Another incoming message',
+            incoming: true,
+            status: DeliveryStatus.delivered,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          scroll.position.pixels,
+          before,
+          reason: 'Do not interrupt reading older messages',
+        );
+        expect(
+          find.byKey(const Key('peer-message-while-reading')).hitTestable(),
+          findsNothing,
+        );
+        await tester.pumpWidget(const SizedBox());
+        history.dispose();
+      },
+    );
+  }
   testWidgets(
     'idle node accepts verified WebRTC offer without opening a chat page',
     (tester) async {

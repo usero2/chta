@@ -820,10 +820,26 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   Widget _groupChat(String id) {
     final controller = groups, group = groups?.group(id);
     if (controller == null || !controller.ready || group == null) {
-      return Center(
-        child: groupsError == null && controller?.ready != true
-            ? const CircularProgressIndicator()
-            : const Text('Group unavailable'),
+      return SafeArea(
+        child: Column(
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: IconButton(
+                tooltip: 'Back to chats',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => widget.router.go('/chats'),
+              ),
+            ),
+            Expanded(
+              child: Center(
+                child: groupsError == null && controller?.ready != true
+                    ? const CircularProgressIndicator()
+                    : const Text('Group unavailable'),
+              ),
+            ),
+          ],
+        ),
       );
     }
     return LayoutBuilder(
@@ -844,7 +860,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
           progressFor: controller.progressFor,
           onDetails: () => unawaited(_groupDetails(id)),
           onDelete: () => unawaited(_deleteGroupChat(id)),
-          onBack: wide ? null : () => widget.router.go('/chats'),
+          onBack: () => widget.router.go('/chats'),
         );
         if (!wide) return room;
         return Row(
@@ -1007,6 +1023,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
 
   @override
   Widget build(BuildContext context) {
+    final conversationOpen =
+        index == 0 && conversationIdFromRoute(widget.router.path) != null;
     final connectionPage = ConnectionPage(
       key: connectionPageKey,
       onRelayNetworkReady: (network) {
@@ -1033,6 +1051,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       chatController: widget.chatController,
       peerHistory: peerHistory,
       onRoomSelected: (id) => widget.router.go(conversationRoute(id)),
+      onBackToChats: () => widget.router.go('/chats'),
       onCreateGroup: groups?.ready == true
           ? () => unawaited(_createGroup())
           : null,
@@ -1079,6 +1098,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                     initialConversationId: initialConversationId,
                     onConversationSelected: (id) =>
                         widget.router.go(conversationRoute(id)),
+                    onBackToConversations: () => widget.router.go('/chats'),
                     peerConversations: [
                       ...?groups?.conversations,
                       for (final contact in peerHistory.withSavedConversations(
@@ -1146,34 +1166,42 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 ),
               ],
             ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
-        onDestinationSelected: _selectDestination,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            label: 'Chats',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.people_outline),
-            label: 'Contacts',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.hub_outlined),
-            label: 'Connect',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            label: 'Profile',
-          ),
-        ],
-      ),
+      bottomNavigationBar: conversationOpen
+          ? null
+          : NavigationBar(
+              selectedIndex: index,
+              onDestinationSelected: _selectDestination,
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.chat_bubble_outline),
+                  label: 'Chats',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.people_outline),
+                  label: 'Contacts',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.hub_outlined),
+                  label: 'Connect',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.person_outline),
+                  label: 'Profile',
+                ),
+              ],
+            ),
     );
-    return widget.accountController.supportsPinLockPreference
+    return conversationOpen ||
+            widget.accountController.supportsPinLockPreference
         ? PopScope<void>(
             canPop: false,
             onPopInvokedWithResult: (didPop, _) {
-              if (!didPop) unawaited(_closeApp());
+              if (didPop) return;
+              if (conversationOpen) {
+                widget.router.go('/chats');
+              } else {
+                unawaited(_closeApp());
+              }
             },
             child: home,
           )

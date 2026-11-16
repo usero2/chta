@@ -47,106 +47,111 @@ class GroupRoom extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ColoredBox(
     color: const Color(0xFF1A1A1A),
-    child: Column(
-      children: [
-        SizedBox(
-          height: 68,
-          child: Row(
-            children: [
-              if (onBack != null)
-                IconButton(
-                  onPressed: onBack,
-                  tooltip: 'Back to chats',
-                  icon: const Icon(Icons.arrow_back),
+    child: SafeArea(
+      child: Column(
+        children: [
+          SizedBox(
+            height: 68,
+            child: Row(
+              children: [
+                if (onBack != null)
+                  IconButton(
+                    onPressed: onBack,
+                    tooltip: 'Back to chats',
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                const SizedBox(width: 8),
+                const CircleAvatar(
+                  backgroundColor: Color(0xFF3A3A3C),
+                  child: Icon(Icons.groups_outlined),
                 ),
-              const SizedBox(width: 8),
-              const CircleAvatar(
-                backgroundColor: Color(0xFF3A3A3C),
-                child: Icon(Icons.groups_outlined),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      group.name,
-                      key: const Key('group-room-title'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        group.name,
+                        key: const Key('group-room-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    Text(
-                      !enabled
-                          ? disabledReason ??
-                                (group.closed
-                                    ? 'Group closed'
-                                    : 'Waiting for group owner')
-                          : '${group.members.length} members · $onlineCount online',
-                      key: const Key('group-room-status'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: enabled
-                            ? const Color(0xFF8E8E93)
-                            : const Color(0xFFE4B75B),
-                        fontSize: 12,
+                      Text(
+                        !enabled
+                            ? disabledReason ??
+                                  (group.closed
+                                      ? 'Group closed'
+                                      : 'Waiting for group owner')
+                            : '${group.members.length} members · $onlineCount online',
+                        key: const Key('group-room-status'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: enabled
+                              ? const Color(0xFF8E8E93)
+                              : const Color(0xFFE4B75B),
+                          fontSize: 12,
+                        ),
                       ),
+                    ],
+                  ),
+                ),
+                PopupMenuButton<String>(
+                  key: const Key('group-actions-menu'),
+                  tooltip: 'Group actions',
+                  onSelected: (action) {
+                    if (action == 'details') onDetails();
+                    if (action == 'delete') onDelete();
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'details',
+                      child: Text('Group details'),
                     ),
+                    PopupMenuItem(value: 'delete', child: Text('Delete group')),
                   ],
                 ),
-              ),
-              PopupMenuButton<String>(
-                key: const Key('group-actions-menu'),
-                tooltip: 'Group actions',
-                onSelected: (action) {
-                  if (action == 'details') onDetails();
-                  if (action == 'delete') onDelete();
-                },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'details', child: Text('Group details')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete group')),
-                ],
-              ),
-              const SizedBox(width: 4),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: ListView.builder(
-            key: const Key('group-message-list'),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 20),
-            itemCount: messages.length,
-            itemBuilder: (context, index) => _message(messages[index]),
-          ),
-        ),
-        if (error != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            child: Text(
-              error!,
-              style: const TextStyle(color: Colors.redAccent),
+                const SizedBox(width: 4),
+              ],
             ),
           ),
-        IgnorePointer(
-          ignoring: !enabled,
-          child: Opacity(
-            opacity: enabled ? 1 : .5,
-            child: MessageComposer(
-              key: const Key('group-message-composer'),
-              inputKey: const Key('group-message-input'),
-              sendKey: const Key('group-send-message'),
-              onSend: onSend,
-              onSendBatch: onSendBatch,
+          const Divider(height: 1),
+          Expanded(
+            child: ListView.builder(
+              key: const Key('group-message-list'),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 20),
+              itemCount: messages.length,
+              itemBuilder: (context, index) => _message(messages[index]),
             ),
           ),
-        ),
-      ],
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              child: Text(
+                error!,
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            ),
+          IgnorePointer(
+            ignoring: !enabled,
+            child: Opacity(
+              opacity: enabled ? 1 : .5,
+              child: MessageComposer(
+                key: const Key('group-message-composer'),
+                inputKey: const Key('group-message-input'),
+                sendKey: const Key('group-send-message'),
+                onSend: onSend,
+                onSendBatch: onSendBatch,
+              ),
+            ),
+          ),
+        ],
+      ),
     ),
   );
 

@@ -12,6 +12,7 @@ class ChatShell extends StatefulWidget {
     required this.coreBridge,
     this.initialConversationId,
     this.onConversationSelected,
+    this.onBackToConversations,
     this.peerConversations = const [],
     this.onPeerSelected,
     this.onCreateGroup,
@@ -23,6 +24,7 @@ class ChatShell extends StatefulWidget {
   final CoreBridge coreBridge;
   final String? initialConversationId;
   final ValueChanged<String>? onConversationSelected;
+  final VoidCallback? onBackToConversations;
   final List<ConversationView> peerConversations;
   final ValueChanged<String>? onPeerSelected;
   final VoidCallback? onCreateGroup;
@@ -43,6 +45,7 @@ class _ChatShellState extends State<ChatShell> {
     super.initState();
     widget.controller.addListener(_controllerChanged);
     widget.controller.initialize();
+    _deferInitialConversation();
   }
 
   @override
@@ -56,7 +59,7 @@ class _ChatShellState extends State<ChatShell> {
     if (oldWidget.initialConversationId != widget.initialConversationId) {
       if (widget.initialConversationId == null) _mobileRoomOpen = false;
       _appliedInitialConversationId = null;
-      _applyInitialConversation();
+      _deferInitialConversation();
     }
   }
 
@@ -71,6 +74,14 @@ class _ChatShellState extends State<ChatShell> {
       _applyInitialConversation();
       setState(() {});
     }
+  }
+
+  void _deferInitialConversation() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _applyInitialConversation();
+      setState(() {});
+    });
   }
 
   void _applyInitialConversation() {
@@ -96,6 +107,11 @@ class _ChatShellState extends State<ChatShell> {
     if (narrow) {
       setState(() => _mobileRoomOpen = true);
     }
+  }
+
+  void _showConversations() {
+    setState(() => _mobileRoomOpen = false);
+    widget.onBackToConversations?.call();
   }
 
   @override
@@ -137,7 +153,7 @@ class _ChatShellState extends State<ChatShell> {
                   onSend: widget.controller.sendText,
                   onSendAttachment: widget.controller.sendAttachment,
                   onSendBatch: widget.controller.sendBatch,
-                  onBack: () => setState(() => _mobileRoomOpen = false),
+                  onBack: _showConversations,
                   onDelete: widget.onConversationAction == null
                       ? null
                       : () => widget.onConversationAction!(
@@ -187,6 +203,9 @@ class _ChatShellState extends State<ChatShell> {
                   : ChatRoom(
                       key: const Key('chat-room'),
                       conversation: selected,
+                      onBack: widget.onBackToConversations == null
+                          ? null
+                          : _showConversations,
                       onSend: widget.controller.sendText,
                       onSendAttachment: widget.controller.sendAttachment,
                       onSendBatch: widget.controller.sendBatch,

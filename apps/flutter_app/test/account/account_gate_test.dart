@@ -7,7 +7,10 @@ import 'package:cht/chat/chat_controller.dart';
 import 'package:cht/chat/chat_models.dart';
 import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/peer_history_store.dart';
+import 'package:cht/chat/attachment_store.dart';
 import 'package:cht/core/core_bridge.dart';
+import 'package:cht/groups/group_crypto_bridge.dart';
+import 'package:cht/groups/group_blob_bridge.dart';
 import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_avatar.dart';
 import 'package:cht/profile/profile_store.dart';
@@ -17,6 +20,121 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 
 void main() {
+  testWidgets('missing group route retains a Back button on desktop', (
+    tester,
+  ) async {
+    final bridge = _GroupAccountBridge();
+    final router = AppRouter(initialPath: '/chats/group%3A${'c' * 64}');
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        peerHistoryStore: _HistoryTestStore(),
+        router: router,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Group unavailable'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back to chats'));
+    await tester.pumpAndSettle();
+    expect(router.path, '/chats');
+    expect(find.byType(NavigationBar), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+    'opening a different local route does not notify siblings during build',
+    (tester) async {
+      final bridge = _TwoRoomAccountBridge();
+      final router = AppRouter(initialPath: '/chats/group%3A${'a' * 64}');
+      final chat = ChatController(coreBridge: bridge);
+      await tester.pumpWidget(
+        ChtApp(
+          controller: chat,
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(chat.selectedConversation.id, 'general');
+      router.go('/chats/design');
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(chat.selectedConversation.id, 'design');
+      expect(find.byTooltip('Back to chats'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets(
+    'group room hides main navigation and both Back actions return to chats',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _GroupAccountBridge(),
+          router = AppRouter(initialPath: '/chats/group%3A${'a' * 64}');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('group-room-title')), findsOneWidget);
+      expect(find.byType(NavigationBar), findsNothing);
+      await tester.tap(find.byTooltip('Back to chats'));
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats');
+      expect(find.byType(NavigationBar), findsOneWidget);
+      router.go('/chats/group%3A${'a' * 64}');
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats');
+      expect(find.byType(NavigationBar), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets(
+    'local and friend chat Back buttons restore the room list and navigation',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _AccountTestBridge(hasExistingIdentity: true),
+          router = AppRouter(initialPath: '/chats/general');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsNothing);
+      await tester.tap(find.byTooltip('Back to chats'));
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats');
+      expect(find.byType(NavigationBar), findsOneWidget);
+      router.go('/chats/did%3Acht%3Aalice');
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byTooltip('Back to chats'), findsOneWidget);
+      await tester.tap(find.byTooltip('Back to chats'));
+      await tester.pumpAndSettle();
+      expect(router.path, '/chats');
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets(
     'contacts and chat show the local profile and signed friend avatar',
     (tester) async {
@@ -333,6 +451,69 @@ class _HistoryTestStore implements PeerHistoryStore {
   Future<void> save(String ownerId, String source) async {
     values[ownerId] = source;
   }
+}
+
+class _TwoRoomAccountBridge extends _GroupAccountBridge {
+  @override
+  Future<ChatSnapshot> loadSnapshot() async => ChatSnapshot(
+    schemaVersion: 1,
+    conversations: [
+      ...(await super.loadSnapshot()).conversations,
+      ConversationView(
+        id: 'design',
+        title: 'Design',
+        preview: '',
+        updatedAtMilliseconds: 1,
+        messages: const [],
+      ),
+    ],
+  );
+}
+
+class _GroupAccountBridge extends _AccountTestBridge
+    implements GroupCryptoBridge, GroupBlobBridge, AttachmentBridge {
+  _GroupAccountBridge() : super(hasExistingIdentity: true);
+  @override
+  Future<IdentityView> identity() async => IdentityView(
+    id: 'did:cht:${'b' * 64}',
+    rootPublicKey: '',
+    noiseStaticPublicKey: '',
+    derivationVersion: 1,
+  );
+  @override
+  Future<Map<String, Object?>> groupCall(
+    String op,
+    Map<String, Object?> args,
+  ) async {
+    if (op == 'list') {
+      return {
+        'groups': [
+          {
+            'groupId': 'group:${'a' * 64}',
+            'name': 'Test group',
+            'ownerId': 'did:cht:${'b' * 64}',
+            'epoch': 1,
+            'closed': false,
+            'members': [
+              {'identityId': 'did:cht:${'b' * 64}', 'displayName': 'Owner'},
+            ],
+            'states': <String>[],
+          },
+        ],
+      };
+    }
+    if (op == 'export') return {'data': '{}'};
+    throw UnimplementedError(op);
+  }
+
+  @override
+  Future<String?> loadGroupBlob(String owner, String key) async => null;
+  @override
+  Future<void> saveGroupBlob(String owner, String key, String value) async {}
+  @override
+  Future<void> deleteGroupBlob(String owner, String key) async {}
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _AccountTestBridge implements AppBridge {

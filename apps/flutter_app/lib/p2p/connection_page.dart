@@ -65,6 +65,7 @@ class ConnectionPage extends StatefulWidget {
     this.chatController,
     this.peerHistory,
     this.onRoomSelected,
+    this.onBackToChats,
     this.onCreateGroup,
     this.onConversationAction,
     this.onOnlinePeersChanged,
@@ -92,6 +93,7 @@ class ConnectionPage extends StatefulWidget {
   final ChatController? chatController;
   final PeerHistory? peerHistory;
   final ValueChanged<String>? onRoomSelected;
+  final VoidCallback? onBackToChats;
   final VoidCallback? onCreateGroup;
   final ConversationActionCallback? onConversationAction;
   final ValueChanged<Set<String>>? onOnlinePeersChanged;
@@ -2394,10 +2396,12 @@ class ConnectionPageState extends State<ConnectionPage> {
       (message) => message.hasAttachment ? _mediaItem(message).groupKey : null,
     );
     return ListView.builder(
+      key: ValueKey('peer-history-${widget.targetContactId ?? peerIdentityId}'),
+      reverse: true,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 20),
       itemCount: groups.length + (incomingProgress.isEmpty ? 0 : 1),
       itemBuilder: (context, index) {
-        if (index == groups.length) {
+        if (incomingProgress.isNotEmpty && index == 0) {
           return Column(
             children: [
               for (final progress in incomingProgress.values)
@@ -2416,7 +2420,8 @@ class ConnectionPageState extends State<ConnectionPage> {
             ],
           );
         }
-        final group = groups[index];
+        final messageIndex = index - (incomingProgress.isEmpty ? 0 : 1);
+        final group = groups[groups.length - 1 - messageIndex];
         final message = group.first;
         final album =
             message.hasAttachment && _mediaItem(message).groupKey != null;
@@ -2677,12 +2682,14 @@ class ConnectionPageState extends State<ConnectionPage> {
   Widget _secureChatLayout() => LayoutBuilder(
     key: const Key('secure-chat-shell'),
     builder: (context, constraints) {
-      if (constraints.maxWidth <= 720) return _peerRoom();
+      if (constraints.maxWidth <= 720) {
+        return _peerRoom(onBack: widget.onBackToChats);
+      }
       return Row(
         children: [
           SizedBox(width: 340, child: _chatSidebar()),
           const VerticalDivider(width: 1, thickness: 1),
-          Expanded(child: _peerRoom()),
+          Expanded(child: _peerRoom(onBack: widget.onBackToChats)),
         ],
       );
     },

@@ -13,8 +13,10 @@ void main() {
   ) async {
     tester.view.physicalSize = const Size(320, 720);
     tester.view.devicePixelRatio = 1;
+    tester.view.padding = const FakeViewPadding(top: 40, bottom: 24);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPadding);
 
     final ownerId = 'did:cht:${'a' * 64}';
     final peerId = 'did:cht:${'b' * 64}';
@@ -121,6 +123,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text(room.name), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const Key('group-room-title'))).dy,
+      greaterThanOrEqualTo(40),
+    );
+    expect(
+      tester.getBottomRight(find.byKey(const Key('group-message-composer'))).dy,
+      lessThanOrEqualTo(696),
+    );
     expect(find.text('Mali'), findsWidgets);
     expect(find.text('Hello from Mali'), findsOneWidget);
     expect(find.text('draft.pdf'), findsOneWidget);
