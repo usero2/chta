@@ -114,7 +114,7 @@ flutter build windows --release
 .\build\windows\x64\runner\Release\chta.exe
 ```
 
-The Windows build compiles and bundles `cht_core.dll`, `cht_mesh.dll` and `cht-relay.exe` automatically. After identity unlock, every Desktop starts its native LAN listener and Circuit Relay v2 service. **Connect → Stop listening** stops the LAN service for the current session. For Internet chat, enable **Public relay through TryCloudflare** in Connect and share its URL; the app creates/supervises the tunnel and remembers this setting. See [relay mesh](docs/relay-mesh.md). Native TCP listening and its optional PIN are separate from the public WebSocket service.
+The Windows build compiles and bundles `cht_core.dll`, `cht_mesh.dll`, `cht-relay.exe` and a checksum-pinned `cloudflared.exe` automatically. The tunnel component and its license are included in the single-file runtime; users do not need to install cloudflared separately. After identity unlock, every Desktop starts its native LAN listener and Circuit Relay v2 service. **Connect → Stop listening** stops the LAN service for the current session. For Internet chat, enable **Public relay through TryCloudflare** in Connect and share its URL; the app creates/supervises the tunnel and remembers this setting. See [relay mesh](docs/relay-mesh.md). Native TCP listening and its optional PIN are separate from the public WebSocket service.
 
 Contact cards/QRs include up to two signed public relay URLs.
 In build 34 and later, one person scans or pastes the other's card and selects

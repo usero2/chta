@@ -16,7 +16,7 @@ QR มีเพียง public URL ไม่มี PIN หรือ recovery ph
 
 ## เปิด public relay จาก Windows Desktop
 
-ใช้แอปทุกฝั่งรุ่น `0.0.1+13` ขึ้นไป และติดตั้ง `cloudflared` บน Desktop ที่จะเปิด relay ก่อน (ค้นหาจาก PATH หรือ `C:\Program Files (x86)\cloudflared\cloudflared.exe`) จากนั้น:
+Desktop build `0.0.1+36` and later includes `cloudflared` in the single-file runtime. No separate installation is needed. To start a public relay:
 
 1. เปิด cht และปลดล็อก identity ด้วย PIN ของคุณ
 2. เปิด **Connect → Public relay through TryCloudflare**
@@ -94,7 +94,7 @@ cd apps/flutter_app
 flutter test test/relay/trycloudflare_integration_test.dart --dart-define=CHT_TEST_PUBLIC_RELAY=true
 ```
 
-ต้อง build `target/relay-server/release/cht-relay.exe` และติดตั้ง cloudflared ก่อน ชุดทดสอบปกติข้ามการเปิด public tunnel เพื่อให้รัน offline ได้
+Build the Windows release first; the test uses its bundled `cht-relay.exe` and `cloudflared.exe`. Normal test runs skip public tunnel startup so they can run offline.
 
 ## ?????????? ? build23
 

@@ -57,6 +57,14 @@ set(CHT_MESH_TARGET_DIR "${CHT_REPOSITORY_ROOT}/target/native-mesh")
 set(CHT_MESH_DLL "${CHT_MESH_TARGET_DIR}/release/cht_mesh.dll")
 set(CHT_RELAY_TARGET_DIR "${CHT_REPOSITORY_ROOT}/target/relay-server")
 set(CHT_RELAY_EXE "${CHT_RELAY_TARGET_DIR}/release/cht-relay.exe")
+find_program(CHT_PYTHON_EXECUTABLE NAMES python.exe python3 python REQUIRED)
+set(CHT_RELAY_TOOLS_DIR "${CMAKE_CURRENT_BINARY_DIR}/relay-tools")
+add_custom_target(cht_relay_tools ALL
+  COMMAND "${CHT_PYTHON_EXECUTABLE}" "${CHT_REPOSITORY_ROOT}/scripts/fetch_windows_relay_tools.py"
+    --output "${CHT_RELAY_TOOLS_DIR}"
+  WORKING_DIRECTORY "${CHT_REPOSITORY_ROOT}"
+  COMMENT "Preparing verified public relay runtime"
+  VERBATIM)
 add_custom_target(cht_relay_server ALL
   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CHT_RELAY_TARGET_DIR}"
     "${CARGO_EXECUTABLE}" build --locked --release
@@ -82,6 +90,7 @@ add_subdirectory("runner")
 add_dependencies(${BINARY_NAME} cht_core_native)
 add_dependencies(${BINARY_NAME} cht_mesh_native)
 add_dependencies(${BINARY_NAME} cht_relay_server)
+add_dependencies(${BINARY_NAME} cht_relay_tools)
 
 
 # Generated plugin build rules, which manage building the plugins and adding
@@ -119,6 +128,10 @@ install(FILES "${CHT_MESH_DLL}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 install(PROGRAMS "${CHT_RELAY_EXE}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
+install(PROGRAMS "${CHT_RELAY_TOOLS_DIR}/cloudflared.exe" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+install(FILES "${CHT_RELAY_TOOLS_DIR}/licenses/cloudflared-LICENSE.txt"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/licenses" COMPONENT Runtime)
 
 if(PLUGIN_BUNDLED_LIBRARIES)
   install(FILES "${PLUGIN_BUNDLED_LIBRARIES}"

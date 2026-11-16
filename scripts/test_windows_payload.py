@@ -9,12 +9,23 @@ from scripts.pack_windows_payload import build_payload
 
 
 class WindowsPayloadTests(unittest.TestCase):
+    def test_refuses_a_release_missing_its_public_relay_tool(self):
+        with tempfile.TemporaryDirectory(prefix="chta-payload-") as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            (release / "data").mkdir(parents=True)
+            for name in ["chta.exe", "cht-relay.exe", "cht_core.dll", "flutter_windows.dll", "data/app.so"]:
+                (release / name).write_bytes(b"fixture")
+            with self.assertRaisesRegex(ValueError, "cloudflared"):
+                build_payload(release, root / "payload.bin")
+
     def test_payload_roundtrip_omits_old_launcher_and_symbols(self):
         with tempfile.TemporaryDirectory(prefix="chta-payload-") as temporary:
             root = Path(temporary)
             release = root / "release"
             (release / "data").mkdir(parents=True)
-            for name in ["chta.exe", "cht.exe", "cht-relay.exe", "cht_core.dll", "flutter_windows.dll", "debug.pdb", "data/app.so"]:
+            (release / "licenses").mkdir()
+            for name in ["chta.exe", "cht.exe", "cht-relay.exe", "cloudflared.exe", "licenses/cloudflared-LICENSE.txt", "cht_core.dll", "flutter_windows.dll", "debug.pdb", "data/app.so"]:
                 (release / name).write_bytes(name.encode() * 1024)
             output = root / "payload.bin"
             result = build_payload(release, output)
@@ -24,6 +35,8 @@ class WindowsPayloadTests(unittest.TestCase):
             manifest = json.loads(archive[12:12 + length])
             names = [entry["path"] for entry in manifest["files"]]
             self.assertIn("cht-relay.exe", names)
+            self.assertIn("cloudflared.exe", names)
+            self.assertIn("licenses/cloudflared-LICENSE.txt", names)
             self.assertNotIn("cht.exe", names)
             self.assertNotIn("debug.pdb", names)
             data = gzip.decompress(archive[12 + length:])

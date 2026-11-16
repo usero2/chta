@@ -13,18 +13,26 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'cht-relay-integration-',
       );
+      final expectedDirectory = await directory.resolveSymbolicLinks();
+      final runtime =
+          Platform.environment['CHTA_TEST_RELAY_RUNTIME'] ??
+          'build/windows/x64/runner/Release';
       final binary = (await File(
-        '../../target/relay-server/release/cht-relay.exe',
+        '$runtime/cht-relay.exe',
       ).copy('${directory.path}${Platform.pathSeparator}cht-relay.exe')).path;
+      await File('$runtime/cloudflared.exe')
+          .copy('${directory.path}${Platform.pathSeparator}cloudflared.exe');
+      final diagnostics = <String>[];
       final host = WindowsRelayHost(
         binaryPath: binary,
         stateDirectory: directory.path,
-        diagnostic: print,
+        diagnostic: diagnostics.add,
       );
       WebSocket? socket;
       try {
         await host.start([]);
         expect(host.running, isTrue, reason: host.error);
+        expect(diagnostics, contains('Tunnel executable: bundled'));
         expect(host.endpoint, startsWith('wss://'));
         // DNS propagation may lag the cloudflared announcement briefly.
         Object? failure;
@@ -51,7 +59,12 @@ void main() {
       } finally {
         await socket?.close();
         await host.shutdown();
-        await directory.delete(recursive: true);
+        if (directory.parent.absolute.path ==
+                Directory.systemTemp.absolute.path &&
+            await directory.resolveSymbolicLinks() == expectedDirectory &&
+            directory.path.contains('cht-relay-integration-')) {
+          await directory.delete(recursive: true);
+        }
       }
     },
     skip:

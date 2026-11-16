@@ -28,7 +28,8 @@ def build_payload(release, output, runtime_directory=None):
     release, output = Path(release).absolute(), Path(output).absolute()
     if _redirected(release) or release == output or release in output.parents:
         raise ValueError("Use a real release folder and an output outside it")
-    for required in ["chta.exe", "cht_core.dll", "flutter_windows.dll", "data/app.so"]:
+    for required in ["chta.exe", "cht_core.dll", "flutter_windows.dll", "data/app.so",
+                     "cht-relay.exe", "cloudflared.exe", "licenses/cloudflared-LICENSE.txt"]:
         if not (release / required).is_file():
             raise ValueError(f"Missing desktop runtime: {required}")
     files = {}

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'relay_host.dart';
+import 'relay_executable.dart';
 import 'windows_process_job.dart';
 import 'relay_websocket_native.dart';
 
@@ -80,7 +81,16 @@ class WindowsRelayHost extends RelayHost {
         '${directory.path}${Platform.pathSeparator}cloudflared.yml',
       );
       await tunnelConfig.writeAsString('{}\n', flush: true);
-      final cloudflared = await _findCloudflared();
+      final cloudflared = await findRelayTunnelExecutable(
+        runtimeDirectory: binary.parent.path,
+        overridePath: cloudflaredPath,
+      );
+      diagnostic?.call(
+        cloudflared ==
+                '${binary.parent.path}${Platform.pathSeparator}cloudflared.exe'
+            ? 'Tunnel executable: bundled'
+            : 'Tunnel executable: external',
+      );
       if (generation != _generation) return;
       final tunnel = await Process.start(
         cloudflared,
@@ -266,20 +276,6 @@ class WindowsRelayHost extends RelayHost {
     } catch (caught) {
       if (generation == _generation) await _failed(generation, '$caught');
     }
-  }
-
-  Future<String> _findCloudflared() async {
-    for (final name in [
-      ?cloudflaredPath,
-      'cloudflared',
-      '${Platform.environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)'}${Platform.pathSeparator}cloudflared${Platform.pathSeparator}cloudflared.exe',
-    ]) {
-      try {
-        final result = await Process.run(name, ['--version']);
-        if (result.exitCode == 0) return name;
-      } catch (_) {}
-    }
-    throw StateError('Install cloudflared, then enable the relay.');
   }
 
   Future<void> _failed(int generation, String message) async {
