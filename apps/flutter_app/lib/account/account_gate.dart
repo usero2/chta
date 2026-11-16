@@ -20,6 +20,9 @@ import '../groups/group_seed_client.dart';
 import '../groups/group_room.dart';
 import '../groups/group_dialogs.dart';
 import '../relay/relay_crypto_bridge.dart';
+import '../contact_requests/contact_request_bridge.dart';
+import '../contact_requests/contact_request_controller.dart';
+import '../contact_requests/contact_request_views.dart';
 import '../core/core_bridge.dart';
 import '../notifications/incoming_notifications.dart';
 import '../notifications/peer_history_notifications.dart';
@@ -560,6 +563,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   Object? groupsError;
   String? targetGroupId;
   bool exiting = false;
+  ContactRequestController? friendRequests;
 
   @override
   void initState() {
@@ -586,6 +590,24 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     _loadHistory();
     _loadChatContacts();
     final bridge = widget.bridge;
+    if (bridge is ContactRequestBridge && bridge is GroupBlobBridge) {
+      final requests = ContactRequestController(
+        ownerId: widget.accountController.identity!.id,
+        account: bridge,
+        crypto: bridge as ContactRequestBridge,
+        blobs: bridge as GroupBlobBridge,
+        displayName: () => widget.profileController.name,
+        avatar: () => widget.profileController.contactAvatar,
+        relayUrls: () => relayNetwork?.contactRelayUrls ?? const [],
+        onTrustedContact: _requestTrusted,
+        onAcceptedRoutes: (urls) async {
+          if (mounted) await relayNetwork?.addContactRoutes(urls);
+        },
+      );
+      friendRequests = requests;
+      requests.addListener(_requestsChanged);
+      unawaited(requests.initialize().catchError((Object _) {}));
+    }
     if (bridge is GroupCryptoBridge && bridge is GroupBlobBridge) {
       final controller = GroupController(
         ownerId: widget.accountController.identity!.id,
@@ -613,6 +635,59 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
 
   void _groupsChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _requestsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _requestTrusted(ContactView contact) async {
+    if (!mounted) return;
+    await _loadChatContacts();
+    if (!mounted) return;
+    setState(() => contactsRefreshToken++);
+    await connectionPageKey.currentState?.refreshTrustedContact(
+      contact.identityId,
+    );
+  }
+
+  Future<void> _reviewFriendRequests() async {
+    final requests = friendRequests;
+    if (requests == null || requests.incoming.isEmpty) return;
+    ContactRequest? selected;
+    if (requests.incoming.length == 1) {
+      selected = requests.incoming.single;
+    } else {
+      selected = await showDialog<ContactRequest>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Friend requests'),
+          content: SizedBox(
+            width: 420,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final request in requests.incoming)
+                  ListTile(
+                    title: Text(request.contact.displayName),
+                    trailing: const Text('Review'),
+                    onTap: () => Navigator.pop(context, request),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    }
+    if (selected == null || !mounted) return;
+    final contact = await reviewContactRequest(context, requests, selected);
+    if (contact != null && mounted) _chatWith(contact);
   }
 
   Future<void> _attachGroupTransport() async {
@@ -804,9 +879,12 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         avatarBase64: contact.avatarBase64,
         preview:
             peerHistory.messagesFor(contact.identityId).lastOrNull?.text ??
+            friendRequests?.labelFor(contact.identityId) ??
             (onlinePeers.contains(contact.identityId)
                 ? 'Connected securely'
-                : 'Offline'),
+                : friendRequests == null
+                ? 'Offline'
+                : 'Not connected'),
         updatedAtMilliseconds:
             peerHistory
                 .messagesFor(contact.identityId)
@@ -923,6 +1001,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     peerHistory.dispose();
     groups?.removeListener(_groupsChanged);
     unawaited(groups?.close());
+    friendRequests?.removeListener(_requestsChanged);
+    unawaited(friendRequests?.close());
     super.dispose();
   }
 
@@ -984,6 +1064,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   }
 
   Future<void> _switchIdentity() async {
+    await friendRequests?.flush();
     await groups?.flush();
     await peerHistory.flush();
     await widget.accountController.lock();
@@ -1103,6 +1184,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       targetContactId: targetContactId,
       chatMode: showingPeerChat,
       showChatSidebar: !wide,
+      requests: friendRequests,
+      onSeedReady: (seed) => friendRequests?.attach(seed),
       onPeerAuthenticated: (contact) {
         unawaited(_loadChatContacts());
         if (index == 2) {
@@ -1130,7 +1213,25 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       },
     );
     final home = Scaffold(
-      appBar: groups?.invitations.isNotEmpty == true
+      appBar: friendRequests?.incoming.isNotEmpty == true
+          ? AppBar(
+              leading: const Icon(Icons.person_add_outlined),
+              title: Text(
+                'Friend requests (${friendRequests!.incoming.length})',
+              ),
+              actions: [
+                if (groups?.invitations.isNotEmpty == true)
+                  TextButton(
+                    onPressed: () => unawaited(_reviewGroupInvitations()),
+                    child: Text('Groups (${groups!.invitations.length})'),
+                  ),
+                TextButton(
+                  onPressed: () => unawaited(_reviewFriendRequests()),
+                  child: const Text('Review'),
+                ),
+              ],
+            )
+          : groups?.invitations.isNotEmpty == true
           ? AppBar(
               leading: const Icon(Icons.group_add_outlined),
               title: Text('Group invitations (${groups!.invitations.length})'),
@@ -1175,6 +1276,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                         : null,
                   ),
                 ContactsPage(
+                  requests: friendRequests,
                   relayNetwork: relayNetwork,
                   bridge: widget.bridge,
                   identity: widget.accountController.identity!,

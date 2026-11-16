@@ -14,6 +14,13 @@ import '../relay/relay_crypto_bridge.dart';
 import '../seed/seed_crypto_bridge.dart';
 import '../groups/group_crypto_bridge.dart';
 import '../groups/group_blob_bridge.dart';
+import '../contact_requests/contact_request_bridge.dart';
+
+@JS('chtCore.contactRequestCall')
+external JSPromise<JSString> _contactRequestCall(
+  JSString operation,
+  JSString args,
+);
 
 @JS('chtCore.savedIdentities')
 external JSPromise<JSString> _savedIdentities();
@@ -177,7 +184,18 @@ class _WebCoreBridge
         RoutedContactBridge,
         BrowserChunkedStorageHost,
         GroupCryptoBridge,
+        ContactRequestBridge,
         GroupBlobBridge {
+  @override
+  Future<Map<String, Object?>> contactRequestCall(
+    String operation,
+    Map<String, Object?> args,
+  ) async => _decodeMap(
+    (await _contactRequestCall(
+      operation.toJS,
+      jsonEncode(args).toJS,
+    ).toDart).toDart,
+  );
   @override
   bool get usesPlatformHistory => false;
   @override

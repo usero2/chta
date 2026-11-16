@@ -113,6 +113,12 @@ impl NativeRuntime {
 
     fn dispatch(&mut self, command: &str, args: &Value) -> Result<Value, String> {
         match command {
+            "contactRequestCall" => {
+                let owner = self.active_id.as_deref().ok_or("Unlock an identity before contact setup")?;
+                let active = parse_json(self.account.identity_json().map_err(|e| e.to_string())?)?;
+                if required_string(&active, "id")? != owner { return Err("Contact setup owner mismatch".into()); }
+                self.account.contact_request_call(required_string(args,"operation")?, args.get("args").ok_or("Missing contact arguments")?.clone())
+            }
             "groupCall" => {
                 let owner = self
                     .active_id
@@ -690,6 +696,46 @@ fn required_bool(value: &Value, key: &str) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn contact_request_native_opens_without_pretrust_and_rejects_wrong_recipient() {
+        let folder = TestVault::new();
+        let mut sender = folder.runtime();
+        let receiver_folder = TestVault::new();
+        let mut receiver = receiver_folder.runtime();
+        let a = crate::IdentityManager::create().unwrap();
+        let b = crate::IdentityManager::create().unwrap();
+        sender.account = crate::AccountCore::new(Some(&a.export_secret()), None).unwrap();
+        sender.active_id = Some(a.public_identity().id.clone());
+        receiver.account = crate::AccountCore::new(Some(&b.export_secret()), None).unwrap();
+        receiver.active_id = Some(b.public_identity().id.clone());
+        let now = 1_800_000_000_000u64;
+        let sealed = sender.call("contactRequestCall", &serde_json::json!({
+            "operation":"seal", "args": {
+                "peerCard": b.contact_card().unwrap().to_json().unwrap(),
+                "requestId":"0123456789abcdef0123456789abcdef",
+                "kind":"request", "displayName":"Synthetic request sender", "now":now,
+            }
+        })).expect("A signed card should permit sending a contact request before mutual add");
+        let source = sealed["envelope"].to_string();
+        assert!(!source.contains("Synthetic request sender"));
+        let inspect = serde_json::json!({"operation":"inspect","args":{"source":source,"now":now}});
+        assert_eq!(receiver.account.contacts_json().unwrap(), "[]");
+        let opened = receiver.call("contactRequestCall", &inspect).unwrap();
+        assert_eq!(opened["peerId"], a.public_identity().id);
+        assert_eq!(opened["kind"], "request");
+        assert_eq!(opened["contact"]["verified"], false);
+        assert_eq!(receiver.account.contacts_json().unwrap(), "[]", "Only Review/Accept may create trust");
+        assert!(sender.call("contactRequestCall", &inspect).is_err());
+        let mut tampered = sealed["envelope"].clone();
+        tampered["kind"] = serde_json::json!("accepted");
+        assert!(receiver.call("contactRequestCall", &serde_json::json!({
+            "operation":"inspect","args":{"source":tampered.to_string(),"now":now}
+        })).is_err());
+        assert!(receiver.call("contactRequestCall", &serde_json::json!({
+            "operation":"inspect","args":{"source":source,"now":now+120000}
+        })).is_err());
+    }
     #[cfg(windows)]
     #[test]
     fn seed_native_command_arguments_and_result_match_account() {

@@ -20,6 +20,7 @@ import '../chat/attachment_store.dart';
 import '../chat/chunked_attachment_bridge.dart';
 import '../groups/group_crypto_bridge.dart';
 import '../groups/group_blob_bridge.dart';
+import '../contact_requests/contact_request_bridge.dart';
 import 'core_bridge.dart';
 
 typedef _CallNative = Pointer<Utf8> Function(Pointer<Utf8> request);
@@ -45,7 +46,15 @@ class _NativeCoreBridge
         AndroidSessionBridge,
         RoutedContactBridge,
         GroupCryptoBridge,
+        ContactRequestBridge,
         GroupBlobBridge {
+  @override
+  Future<Map<String, Object?>> contactRequestCall(
+    String operation,
+    Map<String, Object?> args,
+  ) async => _map(
+    _invoke('contactRequestCall', {'operation': operation, 'args': args}),
+  );
   @override
   Future<Map<String, Object?>> groupCall(
     String operation,

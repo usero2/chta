@@ -491,6 +491,11 @@ async function verifyChunkedProgress(database, ownerId, id, manifest) {
 }
 
 const operations = {
+  contactRequestCall: async (operation, args) => {
+    await ready;
+    if (!account.hasIdentity()) throw new Error('Unlock an identity before contact setup');
+    return account.contactRequestCall(operation, args);
+  },
   groupCall: async (operation, args) => {
     await ready;
     if (!account.hasIdentity()) throw new Error('Unlock an identity before using groups');
@@ -1048,7 +1053,7 @@ const operations = {
 const serializedOperations=new Set(['savedIdentities','hasIdentity','identity','snapshot','contacts','loadDesktopProfile','profileName',
   'createIdentity','discardPendingIdentity','confirmRecovery','restoreIdentity','rememberIdentity','unlockIdentity','lockIdentity',
   'deleteConversation','sendText','setProfileName','saveDesktopProfile','addContact','markContactVerified','setContactAlias','removeContact','preparePeer',
-  'createPeerOffer','acceptPeerOffer','acceptPeerAnswer','groupCall','startPeerHandshake','receivePeerHandshake','encryptPeerMessage','decryptPeerMessage','relayProof','contactCard','contactCardWithRelays']);
+  'createPeerOffer','acceptPeerOffer','acceptPeerAnswer','groupCall','contactRequestCall','startPeerHandshake','receivePeerHandshake','encryptPeerMessage','decryptPeerMessage','relayProof','contactCard','contactCardWithRelays']);
 const transactionalOperations=new Set(['deleteConversation','sendText','addContact','markContactVerified','setContactAlias','removeContact','preparePeer','setProfileName','saveDesktopProfile','acceptPeerOffer','acceptPeerAnswer']);
 const unscopedOperations=new Set(['savedIdentities','hasIdentity','identity','snapshot','contacts','loadDesktopProfile','profileName']);
 globalThis.chtCore=Object.freeze(Object.fromEntries(Object.entries(operations).map(([name,operation])=>[name,

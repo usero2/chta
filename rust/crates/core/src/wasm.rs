@@ -119,6 +119,14 @@ pub struct WasmAccountCore {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_class = AccountCore)]
 impl WasmAccountCore {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = contactRequestCall)]
+    pub fn contact_request_call(&self, operation: &str, args_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+        if args_json.len() > 32768 { return Err(wasm_bindgen::JsValue::from_str("Contact arguments too large")); }
+        let args = serde_json::from_str(args_json).map_err(|_| wasm_bindgen::JsValue::from_str("Invalid contact arguments"))?;
+        self.inner.contact_request_call(operation,args)
+            .and_then(|v|serde_json::to_string(&v).map_err(|e|e.to_string()))
+            .map_err(|e|wasm_bindgen::JsValue::from_str(&e))
+    }
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = groupCall)]
     pub fn group_call(
         &mut self,

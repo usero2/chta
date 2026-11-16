@@ -178,6 +178,46 @@ void main() {
     await flush();
   }
 
+  test('contact setup reaches its review stream without trusting or selecting an unknown peer', () async {
+    await register();
+    final packets = <Map<String, Object?>>[], chats = <SeedVerifiedSignal>[];
+    final contactSub = client.contactRequests.listen(packets.add);
+    final chatSub = client.signals.listen(chats.add);
+    final packet = <String, Object?>{
+      ...envelope(from: other),
+      'version': 2,
+      'topic': 'contacts',
+    };
+    socket.receive({'type': 'signal', 'envelope': packet});
+    await flush();
+    expect(packets, [packet]);
+    expect(chats, isEmpty);
+    expect(account.savedContacts, isEmpty);
+    expect(client.selectedPeer, peer);
+    expect(client.registered, isTrue);
+    await contactSub.cancel();
+    await chatSub.cancel();
+  });
+  test('contact send reuses the socket without changing the selected chat and checks owner', () async {
+    await register();
+    final packet = <String, Object?>{
+      ...envelope(),
+      'from': owner,
+      'to': other,
+      'version': 2,
+      'topic': 'contacts',
+    };
+    await client.sendContactRequest(packet);
+    expect(socket.sent.last, {'type': 'signal', 'envelope': packet});
+    expect(client.selectedPeer, peer);
+    await expectLater(
+      client.sendContactRequest({...packet, 'from': other}),
+      throwsStateError,
+    );
+    account.active = other;
+    await expectLater(client.sendContactRequest(packet), throwsStateError);
+  });
+
   test(
     'idle receiver adopts only a verified signed offer before emitting it',
     () async {

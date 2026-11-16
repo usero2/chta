@@ -1,0 +1,18 @@
+{
+  "canonical": "chta contact request signal v1\u0000[2,\"contacts\",\"did:cht:b46ddcfe2f06a6f828061854228a5d546e27cdfa7b26a8965ae23d0a1c25c951\",\"did:cht:7dc7c9f2ced253d2c177dba7f63e0396bb27e5852c3e3356f7ef561dcc349064\",\"0123456789abcdef0123456789abcdef\",\"cht-contact-request-v1-0123456789abcdef0123456789abcdef-request-a27b505b026215243b3a52092e3fa937\",\"request\",\"{\\\"v\\\":1,\\\"t\\\":\\\"request\\\",\\\"s\\\":\\\"0123456789abcdef0123456789abcdef\\\",\\\"box\\\":\\\"1GS0JD7r1HPaKzafp2PwYnIeVuW0ihhfkFAbcXq-qVjHMZPTSW-SpA9gL2zTYEWwXDQJ_2fO4IM0ZYz-xTmglZfZSGKp_5b8KNFy5c03b7yT7ycu9SKbcLWK1VOjHVQx45NC2F3OEbUaxqkykswSx5GRDyyxkiOc9zAmRlIpbF5OXprEyE-zNHgPsTGZhvC37PC2FGRw2gOnske62Som8xudoxDjPz-XAjtMjDNJuRJlhWKmanXI-kcKaiAoHmcEjcwETQnCmXUq0SgngZjlNSkrq_4Gl2qYpRC4rQXWnzrBi6vSN44fWtW1UFFIJo0cAxhRGhJlfuWFAIPKOT55E9D9UsFPnUgh_71gWpg6bV7lgcxJQm-wMWZJG97SjBdLpOXWH_LYm_HtGJxkfuCwEwbUQiZsSmmqwm6Ee5HAe-zosSfBKb2t28kr314-q8aE5jO0opFqdGV8kIRhsNB3Z5ceaKPO3wvD4JQfhtAqnEWFuoVJ57dW_b8oWHydWh7OXluPp4sCMek4mMT5HLcip2fFRlKKdvwqNoTsgvuLk-WLJe4VFU1NKPOGJm4ZDnClBEvXyJi11S9vYcujTfLok9TXWGFX__cSt48llXoQgUD94MlZz8WHIqfAZTJgFc9Y5P5yryYjSmN2vdLAfQyLVeGz3wHDekRdREyZ0C2aJeMC4U-hVeY3GDZ6EtBnT4bjrXKvPoK-5L4LYnhY5J0Z6gNthRxLoKSJu3lBb2GlI3zfAUSDPg0dXGlB89HyWb9mdjQreIYgeqFWVKfjvXSHi1qG2gBCFJmO-GOCw8kMFm8ymmCvLMRxooLalyOzKoWNljGqRTXszMD-7KH_90-yhk6Q7nyiBJ_LeZwz0S85INrLfHXo_9SeBXSlNFelOBnT9FP7kNSPBPmFTxwcZAyBAMy0jnDA6y7lKkM4X6VRwHbnYsA093ywkMog\\\"}\",1800000000000,1800000120000]",
+  "envelope": {
+    "expiresAt": 1800000120000,
+    "from": "did:cht:b46ddcfe2f06a6f828061854228a5d546e27cdfa7b26a8965ae23d0a1c25c951",
+    "id": "cht-contact-request-v1-0123456789abcdef0123456789abcdef-request-a27b505b026215243b3a52092e3fa937",
+    "issuedAt": 1800000000000,
+    "kind": "request",
+    "payload": "{\"v\":1,\"t\":\"request\",\"s\":\"0123456789abcdef0123456789abcdef\",\"box\":\"1GS0JD7r1HPaKzafp2PwYnIeVuW0ihhfkFAbcXq-qVjHMZPTSW-SpA9gL2zTYEWwXDQJ_2fO4IM0ZYz-xTmglZfZSGKp_5b8KNFy5c03b7yT7ycu9SKbcLWK1VOjHVQx45NC2F3OEbUaxqkykswSx5GRDyyxkiOc9zAmRlIpbF5OXprEyE-zNHgPsTGZhvC37PC2FGRw2gOnske62Som8xudoxDjPz-XAjtMjDNJuRJlhWKmanXI-kcKaiAoHmcEjcwETQnCmXUq0SgngZjlNSkrq_4Gl2qYpRC4rQXWnzrBi6vSN44fWtW1UFFIJo0cAxhRGhJlfuWFAIPKOT55E9D9UsFPnUgh_71gWpg6bV7lgcxJQm-wMWZJG97SjBdLpOXWH_LYm_HtGJxkfuCwEwbUQiZsSmmqwm6Ee5HAe-zosSfBKb2t28kr314-q8aE5jO0opFqdGV8kIRhsNB3Z5ceaKPO3wvD4JQfhtAqnEWFuoVJ57dW_b8oWHydWh7OXluPp4sCMek4mMT5HLcip2fFRlKKdvwqNoTsgvuLk-WLJe4VFU1NKPOGJm4ZDnClBEvXyJi11S9vYcujTfLok9TXWGFX__cSt48llXoQgUD94MlZz8WHIqfAZTJgFc9Y5P5yryYjSmN2vdLAfQyLVeGz3wHDekRdREyZ0C2aJeMC4U-hVeY3GDZ6EtBnT4bjrXKvPoK-5L4LYnhY5J0Z6gNthRxLoKSJu3lBb2GlI3zfAUSDPg0dXGlB89HyWb9mdjQreIYgeqFWVKfjvXSHi1qG2gBCFJmO-GOCw8kMFm8ymmCvLMRxooLalyOzKoWNljGqRTXszMD-7KH_90-yhk6Q7nyiBJ_LeZwz0S85INrLfHXo_9SeBXSlNFelOBnT9FP7kNSPBPmFTxwcZAyBAMy0jnDA6y7lKkM4X6VRwHbnYsA093ywkMog\"}",
+    "publicKey": "DJZKL0AORQpmG7wNt0mjmkaSfBYYC7PZ6wRqEHLm-Ts",
+    "session": "0123456789abcdef0123456789abcdef",
+    "signature": "eo5jJUkzVl93uf60QMOfOUPF92XCgg3RmR_FbrEBxkhaljg5MTYPst5p6TXPhikpw1q0ym7iQLvepHKAvnILDw",
+    "to": "did:cht:7dc7c9f2ced253d2c177dba7f63e0396bb27e5852c3e3356f7ef561dcc349064",
+    "topic": "contacts",
+    "version": 2
+  },
+  "now": 1800000000000
+}

@@ -11,6 +11,7 @@ import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
 import '../relay/relay_socket.dart';
 import 'seed_crypto_bridge.dart';
+import '../contact_requests/contact_request_transport.dart';
 
 final seedId = sha256.convert(utf8.encode('chta.app/relay/v1')).toString();
 const defaultSeedUrl = String.fromEnvironment(
@@ -24,7 +25,7 @@ class SeedVerifiedSignal {
 }
 
 /// Discovery and signed WebRTC control only. No user-content send API exists.
-class SeedClient extends ChangeNotifier {
+class SeedClient extends ChangeNotifier implements ContactRequestTransport {
   SeedClient({
     required this.account,
     required this.relayCrypto,
@@ -46,6 +47,9 @@ class SeedClient extends ChangeNotifier {
   final int Function() _clock;
   final _signals = StreamController<SeedVerifiedSignal>.broadcast();
   Stream<SeedVerifiedSignal> get signals => _signals.stream;
+  final _contactRequests = StreamController<Map<String, Object?>>.broadcast();
+  @override
+  Stream<Map<String, Object?>> get contactRequests => _contactRequests.stream;
   final _replays = <String, int>{};
   RelaySocket? _socket;
   StreamSubscription<String>? _subscription;
@@ -58,6 +62,7 @@ class SeedClient extends ChangeNotifier {
   int _lastAlive = 0, _presenceAt = 0;
   bool _online = false;
   Future<void> _incoming = Future.value();
+  @override
   bool get registered => _registered;
   String? get selectedPeer => _selectedPeer;
   bool get peerOnline =>
@@ -245,6 +250,18 @@ class SeedClient extends ChangeNotifier {
       case 'signal':
         final selected = _selectedPeer, selection = _selection;
         final envelope = value['envelope'];
+        if (envelope is Map &&
+            envelope['version'] == 2 &&
+            envelope['topic'] == 'contacts') {
+          if (_did(envelope['from']) &&
+              envelope['from'] != _owner &&
+              envelope['to'] == _owner) {
+            // A separate Rust-backed controller verifies these before Review.
+            // Never route an unknown contact into the trusted chat stream.
+            _contactRequests.add(Map<String, Object?>.from(envelope));
+          }
+          return;
+        }
         if (envelope is! Map ||
             envelope['from'] is! String ||
             !_did(envelope['from'] as String) ||
@@ -392,6 +409,32 @@ class SeedClient extends ChangeNotifier {
     }
   }
 
+  @override
+  Future<void> sendContactRequest(Map<String, Object?> envelope) async {
+    final generation = _generation;
+    if (!_registered ||
+        envelope['version'] != 2 ||
+        envelope['topic'] != 'contacts' ||
+        envelope['from'] != _owner ||
+        !_did(envelope['to']) ||
+        envelope['to'] == _owner) {
+      throw StateError('Contact setup unavailable');
+    }
+    if (!await _active(generation) || !_registered) {
+      throw StateError('Identity changed');
+    }
+    final frame = {'type': 'signal', 'envelope': envelope};
+    if (utf8.encode(jsonEncode(frame)).length > 16384) {
+      throw const FormatException('Contact setup too large');
+    }
+    try {
+      _send(frame);
+    } catch (_) {
+      _drop(generation);
+      rethrow;
+    }
+  }
+
   void _drop(int generation) {
     if (!_current(generation)) return;
     _generation++;
@@ -437,6 +480,7 @@ class SeedClient extends ChangeNotifier {
     _closed = true;
     await stop();
     await _signals.close();
+    await _contactRequests.close();
     dispose();
   }
 }

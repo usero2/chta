@@ -3,6 +3,7 @@ mod account;
 mod android_storage;
 mod chat;
 mod contacts;
+mod contact_requests;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop_vault;
 pub mod device_sync;

@@ -34,6 +34,7 @@ import '../profile/profile_avatar.dart';
 import 'p2p_bridge.dart';
 import 'p2p_bridge_factory.dart';
 import 'direct_file_link.dart';
+import '../contact_requests/contact_request_controller.dart';
 import 'peer_file_controller.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
@@ -59,6 +60,8 @@ class ConnectionPage extends StatefulWidget {
     this.targetContactId,
     this.chatMode = false,
     this.showChatSidebar = true,
+    this.requests,
+    this.onSeedReady,
     this.onPeerAuthenticated,
     this.onConnectRequested,
     this.onChatSelected,
@@ -88,6 +91,8 @@ class ConnectionPage extends StatefulWidget {
   final String? targetContactId;
   final bool chatMode;
   final bool showChatSidebar;
+  final ContactRequestController? requests;
+  final ValueChanged<SeedClient>? onSeedReady;
   final ValueChanged<ContactView>? onPeerAuthenticated;
   final ValueChanged<ContactView>? onConnectRequested;
   final ValueChanged<ContactView>? onChatSelected;
@@ -171,6 +176,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   int messageCounter = 0;
   ConnectionFlow flow = ConnectionFlow.choose;
   bool working = false;
+  bool requestingFriend = false;
   bool replyCreated = false;
   bool checkingAnswer = false;
   String? roomCode;
@@ -223,6 +229,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   @override
   void initState() {
     super.initState();
+    widget.requests?.addListener(_requestsChanged);
     bridge = widget.bridge ?? createP2pBridge();
     initializingRelays = widget.accountBridge is RelayCryptoBridge;
     history = widget.peerHistory ?? PeerHistory();
@@ -492,6 +499,7 @@ class ConnectionPageState extends State<ConnectionPage> {
           return;
         }
         await seed.start(owner);
+        if (mounted) widget.onSeedReady?.call(seed);
         if (mounted) await _updateFilePeer(authenticated);
       }
       relayConnectionLimit.text = '${network.connectionLimit}';
@@ -667,9 +675,75 @@ class ConnectionPageState extends State<ConnectionPage> {
     _reportOnlinePeers();
   }
 
+  void _requestsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _requestFriend() async {
+    final requests = widget.requests, contact = targetContact;
+    if (requests == null || contact == null || requestingFriend) return;
+    setState(() => requestingFriend = true);
+    try {
+      if (!contact.verified) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Add ${contact.displayName}?'),
+            content: SelectableText(contact.fingerprint),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Add friend'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted) return;
+        await widget.accountBridge.markContactVerified(contact.identityId);
+        await _loadTargetContact();
+      }
+      await requests.request(contact.identityId);
+    } catch (_) {
+      if (mounted) {
+        setState(() => error = 'Could not send friend request. Retry.');
+      }
+    } finally {
+      if (mounted) setState(() => requestingFriend = false);
+    }
+  }
+
+  String? get _requestLabel => widget.targetContactId == null
+      ? null
+      : widget.requests?.labelFor(widget.targetContactId!);
+
+  Future<void> refreshTrustedContact(String id) async {
+    final known = await widget.accountBridge.contacts();
+    if (!mounted) return;
+    contacts = known;
+    history.rememberContacts(known);
+    if (widget.targetContactId == id) {
+      await _loadTargetContact();
+      await _updateFilePeer(authenticated);
+      if (mounted &&
+          !(authenticated && peerIdentityId == id) &&
+          fileController?.ready != true) {
+        await _connectAutomatically(force: true);
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
   @override
   void didUpdateWidget(covariant ConnectionPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.requests != widget.requests) {
+      oldWidget.requests?.removeListener(_requestsChanged);
+      widget.requests?.addListener(_requestsChanged);
+    }
     if (oldWidget.targetContactId != widget.targetContactId) {
       peerGeneration++;
       attachments.reset();
@@ -687,6 +761,7 @@ class ConnectionPageState extends State<ConnectionPage> {
 
   @override
   void dispose() {
+    widget.requests?.removeListener(_requestsChanged);
     attachments.dispose();
     unawaited(fileController?.close());
     timer?.cancel();
@@ -1626,14 +1701,18 @@ class ConnectionPageState extends State<ConnectionPage> {
     }
     if (automaticConnectionAttempted && !force) return;
     automaticConnectionAttempted = true;
-    final displayName =
+    var displayName =
         widget.profileController?.name.trim() ??
         profileNameController.text.trim();
     if (displayName.isEmpty) {
-      if (mounted) {
-        setState(() => error = 'Set your Profile name before connecting.');
+      try {
+        final identity = await widget.accountBridge.identity();
+        if (!mounted || widget.targetContactId != contact.identityId) return;
+        displayName =
+            'Identity ${identity.id.split(':').last.characters.take(8)}';
+      } catch (_) {
+        return;
       }
-      return;
     }
     if (mounted) {
       setState(() {
@@ -2561,9 +2640,14 @@ class ConnectionPageState extends State<ConnectionPage> {
                                   : usingRelayChat
                                   ? 'Relay · connected securely'
                                   : 'Direct · connected securely')
-                            : seedClient?.registered == true
-                            ? 'Waiting for Direct'
-                            : 'Offline',
+                            : _requestLabel ??
+                                  (widget.requests != null
+                                      ? (seedClient?.peerOnline == true
+                                            ? 'Connecting'
+                                            : 'Not connected')
+                                      : seedClient?.registered == true
+                                      ? 'Waiting for Direct'
+                                      : 'Offline'),
                         style: TextStyle(
                           color: connected
                               ? const Color(0xFF9AE585)
@@ -2707,12 +2791,21 @@ class ConnectionPageState extends State<ConnectionPage> {
           Text(
             targetContact == null
                 ? 'Friend is not available'
-                : '${targetContact!.displayName} is offline',
+                : _requestLabel ??
+                      (widget.requests != null
+                          ? (seedClient?.peerOnline == true
+                                ? 'Connecting with ${targetContact!.displayName}'
+                                : 'Not connected to ${targetContact!.displayName}')
+                          : '${targetContact!.displayName} is offline'),
             style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           Text(
-            targetContact?.verified == false
+            _requestLabel != null
+                ? (_requestLabel == 'Waiting for approval'
+                      ? 'Your friend can accept in Contacts.'
+                      : 'Keep both apps open.')
+                : targetContact?.verified == false
                 ? 'Verify this friend in Contacts to reconnect.'
                 : relayNetwork != null &&
                       !relayNetwork!.enabled &&
@@ -2783,6 +2876,25 @@ class ConnectionPageState extends State<ConnectionPage> {
               ],
             ],
           ),
+          if (widget.requests != null && targetContact != null) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const Key('send-contact-request'),
+              onPressed: requestingFriend || !widget.requests!.ready
+                  ? null
+                  : _requestFriend,
+              icon: const Icon(Icons.person_add_outlined),
+              label: Text(
+                requestingFriend
+                    ? 'Sending…'
+                    : _requestLabel == null
+                    ? 'Send request'
+                    : _requestLabel == 'Request declined'
+                    ? 'Send new request'
+                    : 'Resend request',
+              ),
+            ),
+          ],
         ],
       ),
     ),
@@ -2918,6 +3030,7 @@ class ConnectionPageState extends State<ConnectionPage> {
           }
           await widget.accountBridge.markContactVerified(inspected.identityId);
         }
+        await widget.requests?.request(inspected.identityId);
         await _refreshPeerContacts();
         routes = inspected.relayUrls.isEmpty
             ? []

@@ -60,6 +60,10 @@ pub struct AccountCore {
 }
 
 impl AccountCore {
+    pub fn contact_request_call(&self, operation: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        let identity = self.identity.as_ref().ok_or("Unlock an identity before contact setup")?;
+        crate::contact_requests::call(identity, &self.contacts, operation, args)
+    }
     pub fn sign_seed_signal(
         &self,
         peer_id: &str,

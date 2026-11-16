@@ -116,9 +116,14 @@ flutter build windows --release
 
 The Windows build compiles and bundles `cht_core.dll`, `cht_mesh.dll` and `cht-relay.exe` automatically. After identity unlock, every Desktop starts its native LAN listener and Circuit Relay v2 service. **Connect → Stop listening** stops the LAN service for the current session. For Internet chat, enable **Public relay through TryCloudflare** in Connect and share its URL; the app creates/supervises the tunnel and remembers this setting. See [relay mesh](docs/relay-mesh.md). Native TCP listening and its optional PIN are separate from the public WebSocket service.
 
-In `0.0.1+13`, contact cards/QRs include up to two signed public relay URLs.
-**Add friend & chat** imports the route after fingerprint confirmation; an unknown
-sender requires **Review** approval on the recipient. All clients can set a saved
+Contact cards/QRs include up to two signed public relay URLs.
+In build 34 and later, one person scans or pastes the other's card and selects
+**Add friend**. The recipient chooses **Review → Accept** to add back. Both people
+must be online; pending requests stay encrypted on the sender's device and retry
+without an offline mailbox on the seed. Existing contacts can use **Send request**
+in their conversation. Compare fingerprints through a trusted channel when needed.
+Acceptance imports the signed relay routes but still needs a usable Direct or
+community-relay path for chat. All clients can set a saved
 relay connection target of 50–1000 (default 50, at most six pending handshakes).
 Android activity recreation now returns to the saved identity/PIN picker instead
 of hanging on the splash; see [startup regression](docs/android-startup.md).

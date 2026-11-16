@@ -23,11 +23,104 @@ import 'package:cht/seed/seed_crypto_bridge.dart';
 import 'package:cht/seed/seed_client.dart';
 
 import '../seed/seed_client_test.dart' as seed_test;
+import '../contact_requests/contact_request_controller_test.dart'
+    as request_test;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'scanning a saved contact QR queues the reciprocal Review request',
+    (tester) async {
+      final account = request_test.Account(request_test.alice),
+          store = request_test.Blobs();
+      await account.addContact(request_test.card(request_test.bob), '');
+      await account.markContactVerified(request_test.bob);
+      final requests = request_test.controller(account, store);
+      await requests.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConnectionPage(
+            accountBridge: account,
+            bridge: _FakeP2pBridge(),
+            requests: requests,
+            targetContactId: request_test.bob,
+            chatMode: true,
+            scanRelayQr: () async => request_test.card(request_test.bob),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(find.text('Scan QR'));
+      await tester.pumpAndSettle();
+      expect(requests.statusFor(request_test.bob), isNotNull);
+      await tester.pumpWidget(const SizedBox());
+      unawaited(requests.close());
+      await tester.pump();
+    },
+  );
+  testWidgets('automatic chat setup works with a default unnamed identity', (
+    tester,
+  ) async {
+    final bridge = _FakeP2pBridge(automaticSupported: true);
+    final account = _FakeAccountBridge()
+      ..savedContacts.add(
+        const ContactView(
+          identityId: 'did:cht:peer',
+          displayName: 'Friend',
+          fingerprint: 'test',
+          verified: true,
+        ),
+      );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ConnectionPage(
+          accountBridge: account,
+          bridge: bridge,
+          targetContactId: 'did:cht:peer',
+          chatMode: true,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(bridge.connectCount, greaterThan(0));
+    expect(bridge.connectedDisplayName, startsWith('Identity '));
+    expect(find.text('Set your Profile name before connecting.'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+    'existing friend can request Review and pending setup is not labelled offline',
+    (tester) async {
+      final account = request_test.Account(request_test.alice),
+          store = request_test.Blobs();
+      await account.addContact(request_test.card(request_test.bob), '');
+      await account.markContactVerified(request_test.bob);
+      final requests = request_test.controller(account, store);
+      await requests.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConnectionPage(
+            accountBridge: account,
+            bridge: _FakeP2pBridge(),
+            targetContactId: request_test.bob,
+            chatMode: true,
+            requests: requests,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('Send request'), findsOneWidget);
+      await tester.tap(find.text('Send request'));
+      await tester.pumpAndSettle();
+      expect(requests.statusFor(request_test.bob), isNotNull);
+      expect(find.text('Bob is offline'), findsNothing);
+      expect(find.text('Request pending'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+      unawaited(requests.close());
+      await tester.pump();
+    },
+  );
   for (final connected in [false, true]) {
     testWidgets(
       'mobile peer chat opens at latest message (connected=$connected)',

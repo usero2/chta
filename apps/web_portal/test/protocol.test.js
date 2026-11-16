@@ -3,9 +3,37 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { SEED_ID, verifyProof, verifySignal, verifyRecord, publicEndpoint } from '../src/protocol.js';
-import { identity, now, proof, signal, groupSignal, record, sdp } from './helpers.js';
+import { identity, now, proof, signal, groupSignal, contactSignal, record, sdp } from './helpers.js';
 const alice = identity(), bob = identity();
 const did = `did:cht:${bob.id}`;
+
+test('contact setup verifies isolated encrypted setup kinds without allowing content fields', async () => {
+  for (const kind of ['request','received','accepted','declined']) {
+    const value=contactSignal(alice,did,{kind});
+    assert.deepEqual(await verifySignal(value,value.from,now),value);
+  }
+  const base=contactSignal(alice,did);
+  for (const changes of [{version:1},{topic:'groups'},{kind:'message'},{session:'A'.repeat(32)},
+    {id:base.id+'x'},{expiresAt:now},{expiresAt:now+120001},{issuedAt:now+30001},
+    {extra:'not allowed'},{to:base.from},{publicKey:bob.publicKey}]) {
+    await assert.rejects(verifySignal(contactSignal(alice,did,changes),base.from,now));
+  }
+  for (const packet of [{v:1,t:'request',s:base.session,box:'hello'},
+    {v:1,t:'request',s:base.session,box:'a'.repeat(11053)},
+    {v:1,t:'request',s:base.session,box:'a'.repeat(128),text:'secret'},
+    {v:1,t:'message',s:base.session,box:'a'.repeat(128)},
+    {v:1,t:'request',s:base.session,box:'a'.repeat(128),filename:'private'}]) {
+    await assert.rejects(verifySignal(contactSignal(alice,did,{payload:JSON.stringify(packet)}),base.from,now));
+  }
+  await assert.rejects(verifySignal({...base,signature:base.signature.slice(1)},base.from,now));
+});
+
+test('Rust sealed contact fixture has the same canonical signature and topic on the seed', async () => {
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/contact-request.json',import.meta.url),'utf8'));
+  const fields=['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt'];
+  assert.equal('chta contact request signal v1\0'+JSON.stringify(fields.map(k=>fixture.envelope[k])),fixture.canonical);
+  assert.deepEqual(await verifySignal(fixture.envelope,fixture.envelope.from,fixture.now),fixture.envelope);
+});
 test('seed ID and registration use the existing Rust relay authentication domain', async () => {
   assert.equal(SEED_ID, createHash('sha256').update('chta.app/relay/v1').digest('hex'));
   const nonce = Buffer.alloc(32, 5).toString('base64url');

@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { identity, proof, signal } from './helpers.js';
+import { identity, proof, signal, contactSignal } from './helpers.js';
 
 function queue(ws) {
   const messages=[],pending=[];
@@ -27,10 +27,11 @@ test('actual workerd authenticates, routes signed SDP, rejects replay/content/bi
   await writeFile(join(assets,'chat/index.html'),'<html><base href="/chat/">mounted</html>');
   const listener=createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));const port=listener.address().port;await new Promise(r=>listener.close(r));
   const fixture=JSON.parse(await readFile(new URL('./fixtures/seed-signal.json',import.meta.url),'utf8'));
+  const contactFixture=JSON.parse(await readFile(new URL('./fixtures/contact-request.json',import.meta.url),'utf8'));
   const productionWorker=resolve('src/worker.js').replaceAll('\\','/'),protocol=resolve('src/protocol.js').replaceAll('\\','/');
   // Test-only wrapper checks the Rust fixture at its deterministic time, under workerd's Ed25519.
   // No test endpoint or time override exists in production sources.
-  await writeFile(join(folder,'fixture-worker.mjs'),`import worker from ${JSON.stringify(productionWorker)};export {SeedDirectory} from ${JSON.stringify(productionWorker)};import {verifySignal} from ${JSON.stringify(protocol)};const f=${JSON.stringify(fixture)};export default {async fetch(r,e){if(new URL(r.url).pathname==='/__fixture')return Response.json(await verifySignal(f.envelope,f.envelope.from,f.now));return worker.fetch(r,e);}};`);
+  await writeFile(join(folder,'fixture-worker.mjs'),`import worker from ${JSON.stringify(productionWorker)};export {SeedDirectory} from ${JSON.stringify(productionWorker)};import {verifySignal} from ${JSON.stringify(protocol)};const f=${JSON.stringify(fixture)},c=${JSON.stringify(contactFixture)};export default {async fetch(r,e){if(new URL(r.url).pathname==='/__fixture')return Response.json(await verifySignal(f.envelope,f.envelope.from,f.now));if(new URL(r.url).pathname==='/__contact_fixture')return Response.json(await verifySignal(c.envelope,c.envelope.from,c.now));return worker.fetch(r,e);}};`);
   const config={name:'chta-seed-test',main:join(folder,'fixture-worker.mjs'),compatibility_date:'2026-11-01',assets:{directory:assets,binding:'ASSETS',run_worker_first:true,html_handling:'none',not_found_handling:'none'},durable_objects:{bindings:[{name:'SEED_DIRECTORY',class_name:'SeedDirectory'}]},migrations:[{tag:'v1',new_sqlite_classes:['SeedDirectory']}],vars:{SEED_MAX_SOCKETS:'24'}};
   await writeFile(join(folder,'wrangler.json'),JSON.stringify(config));
   const child=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--local','--config',join(folder,'wrangler.json'),'--ip','127.0.0.1','--port',String(port),'--persist-to',join(folder,'state')],{cwd:resolve('.'),windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,WRANGLER_SEND_METRICS:'false',CI:'true'}});
@@ -41,6 +42,7 @@ test('actual workerd authenticates, routes signed SDP, rejects replay/content/bi
   for(let i=0;i<120;i++){try{const r=await fetch(base+'/relay',{signal:AbortSignal.timeout(500)});if(r.ok){ready=true;break;}}catch{}if(child.exitCode!==null)break;await delay(150);}
   assert.ok(ready,output);
   assert.deepEqual(await(await fetch(base+'/__fixture')).json(),fixture.envelope);
+  assert.deepEqual(await(await fetch(base+'/__contact_fixture')).json(),contactFixture.envelope);
   assert.match(await(await fetch(base+'/')).text(),/landing/);
   const deep=await fetch(base+'/chat/chats/did:cht:abc');assert.equal(deep.status,200);assert.match(await deep.text(),/mounted/);assert.equal(deep.headers.get('cache-control'),'no-store');
   for(const path of ['/missing','/relay/upload','/chat/missing.wasm'])assert.equal((await fetch(base+path)).status,404,path);
@@ -51,6 +53,9 @@ test('actual workerd authenticates, routes signed SDP, rejects replay/content/bi
   const bad=new WebSocket(url),badNext=queue(bad),badChallenge=await badNext(),badKey=identity();
   const badClosed=new Promise(r=>bad.addEventListener('close',r,{once:true}));bad.send(JSON.stringify({type:'register',proof:proof(badKey,Buffer.alloc(32,9).toString('base64url'),badChallenge.seedId)}));assert.equal((await badClosed).code,1008,'proof for another nonce cannot authenticate');
   const a=identity(),b=identity(),ca=await client(url,a),cb=await client(url,b);
+  const request=contactSignal(a,`did:cht:${b.id}`,{issuedAt:Date.now(),expiresAt:Date.now()+120000});
+  ca.ws.send(JSON.stringify({type:'signal',envelope:request}));
+  assert.deepEqual(await cb.next(),{type:'signal',envelope:request},'an unknown sender may deliver only a sealed contact-setup packet');
   ca.ws.send(JSON.stringify({type:'lookup',identityId:`did:cht:${b.id}`}));assert.equal((await ca.next()).online,true);
   ca.ws.send('{"type":"keepalive"}');assert.equal((await ca.next()).type,'alive');
   const burst=[2,3].map(index=>signal(a,`did:cht:${b.id}`,{id:`cht-control-direct-v1-0123456789abcdef0123456789abcdef-offer-${index}`,issuedAt:Date.now(),expiresAt:Date.now()+60000}));

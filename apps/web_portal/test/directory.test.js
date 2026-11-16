@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SeedDirectory } from '../src/seed-directory.js';
 import { SEED_ID } from '../src/protocol.js';
-import { identity, proof, signal, record, now } from './helpers.js';
+import { identity, proof, signal, contactSignal, record, now } from './helpers.js';
 function context() {
   const data = new Map(), sockets = [];
   return { data, sockets, storage: { async get(k) {return structuredClone(data.get(k));}, async put(k,v) {data.set(k,structuredClone(v));},async setAlarm() {} }, blockConcurrencyWhile: fn => fn(), getWebSockets: () => sockets, setWebSocketAutoResponse() {} };
@@ -19,6 +19,25 @@ async function registered(ctx,dir,key,opts={}) {
   await dir.webSocketMessage(ws,JSON.stringify({type:'register',proof:proof(key,ws.attachment.nonce,SEED_ID)}));
   assert.equal(ws.sent[0]?.type,'registered'); return ws;
 }
+
+test('contact requests forward live only; offline retries never create a seed mailbox', async () => {
+  const ctx=context(),dir=new SeedDirectory(ctx,{});await dir.ready;
+  const a=identity(),b=identity(),wa=await registered(ctx,dir,a);
+  const envelope=contactSignal(a,`did:cht:${b.id}`,{issuedAt:Date.now(),expiresAt:Date.now()+60000});
+  await dir.webSocketMessage(wa,JSON.stringify({type:'signal',envelope}));
+  assert.equal(wa.readyState,1);
+  assert.deepEqual(wa.sent.at(-1),{type:'unreachable',identityId:`did:cht:${b.id}`});
+  assert.ok(!JSON.stringify([...ctx.data]).includes(envelope.payload));
+  assert.ok(!JSON.stringify([...ctx.data]).includes(envelope.session));
+  const woke=new SeedDirectory(ctx,{});await woke.ready;
+  const wb=await registered(ctx,woke,b);
+  assert.equal(wb.sent.filter(p=>p.type==='signal').length,0);
+  const retry=contactSignal(a,`did:cht:${b.id}`,{id:envelope.id.slice(0,-32)+'b'.repeat(32),issuedAt:Date.now(),expiresAt:Date.now()+60000});
+  await woke.webSocketMessage(wa,JSON.stringify({type:'signal',envelope:retry}));
+  assert.deepEqual(wb.sent.at(-1),{type:'signal',envelope:retry});
+  assert.ok(!JSON.stringify([...ctx.data]).includes(retry.payload));
+  assert.ok(!JSON.stringify([...ctx.data]).includes(retry.session));
+});
 test('only authenticated lookup and signed signals route; duplicate replay survives reconstruction', async () => {
   const ctx=context(), dir=new SeedDirectory(ctx,{}); await dir.ready;
   const a=identity(),b=identity(),wa=await registered(ctx,dir,a),wb=await registered(ctx,dir,b);

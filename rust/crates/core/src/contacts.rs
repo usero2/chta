@@ -160,6 +160,7 @@ impl IdentityManager {
             contact_token: URL_SAFE_NO_PAD.encode(self.contact_token()),
             capabilities: vec![
                 "seed-v1".to_owned(),
+                "contact-requests-v1".to_owned(),
                 "webrtc-datachannel-v1".to_owned(),
                 "noise-kk-v1".to_owned(),
                 "relay-catalog-v1".to_owned(),

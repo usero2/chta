@@ -62,6 +62,7 @@ function candidate(value){
   requireThat(/^\d+$/.test(parts[1]) && +parts[1] >= 1 && +parts[1] <= 256 && /^\d+$/.test(parts[3]) && +parts[3] <= 4294967295 && parts[4].length <= 253 && /^\d+$/.test(parts[5]) && +parts[5] >= 1 && +parts[5] <= 65535 && !/\btyp\s+relay\b/i.test(value));
 }
 export async function verifySignal(v, sender, now) {
+  if(v?.version === 2 && v.topic === 'contacts')return verifyContactSignal(v,sender,now);
   const groups = v !== null && typeof v === 'object' && v.version === 2;
   exact(v,groups ? ['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt','publicKey','signature'] : ['version','from','to','session','id','kind','payload','issuedAt','expiresAt','publicKey','signature']);
   requireThat(bytes(JSON.stringify(v)) <= MAX_FRAME && (groups ? v.topic === 'groups' : v.version === 1) && typeof v.from === 'string' && DID.test(v.from) && typeof v.to === 'string' && DID.test(v.to) && v.from === sender && v.from !== v.to);
@@ -73,6 +74,23 @@ export async function verifySignal(v, sender, now) {
   times(v,now,120000,30000); payload(v);
   const tuple = groups ? [v.version,v.topic,v.from,v.to,v.session,v.id,v.kind,v.payload,v.issuedAt,v.expiresAt] : [v.version,v.from,v.to,v.session,v.id,v.kind,v.payload,v.issuedAt,v.expiresAt];
   await signature(v.publicKey,v.signature,(groups ? 'chta group seed signal v1\0' : 'chta seed signal v1\0')+JSON.stringify(tuple),v.from.slice(8));
+  return v;
+}
+
+async function verifyContactSignal(v, sender, now) {
+  const fields=['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt','publicKey','signature'];
+  exact(v,fields);
+  requireThat(bytes(JSON.stringify(v))<=MAX_FRAME&&v.version===2&&v.topic==='contacts');
+  requireThat(typeof v.from==='string'&&DID.test(v.from)&&v.from===sender&&typeof v.to==='string'&&DID.test(v.to)&&v.from!==v.to);
+  requireThat(typeof v.session==='string'&&/^[0-9a-f]{32}$/.test(v.session)&&['request','received','accepted','declined'].includes(v.kind));
+  const prefix=`cht-contact-request-v1-${v.session}-${v.kind}-`;
+  requireThat(typeof v.id==='string'&&v.id.startsWith(prefix)&&/^[0-9a-f]{32}$/.test(v.id.slice(prefix.length)));
+  times(v,now,120000,30000);
+  requireThat(typeof v.payload==='string'&&bytes(v.payload)<=11264);
+  const p=JSON.parse(v.payload);exact(p,['v','t','s','box']);
+  requireThat(p.v===1&&p.t===v.kind&&p.s===v.session&&typeof p.box==='string'&&p.box.length>=128&&p.box.length<=11052);
+  const size=Math.floor(p.box.length*3/4);requireThat(size>=96&&size<=8288);decode(p.box,size);
+  await signature(v.publicKey,v.signature,'chta contact request signal v1\0'+JSON.stringify(fields.slice(0,-2).map(k=>v[k])),v.from.slice(8));
   return v;
 }
 // This is syntax validation only: never resolve or fetch a caller-supplied URL.

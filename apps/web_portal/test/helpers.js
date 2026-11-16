@@ -6,6 +6,17 @@ export const identity = () => {
   return { privateKey, publicKey: raw.toString('base64url'), id: createHash('sha256').update(raw).digest('hex') };
 };
 export const signed = (key, domain, tuple) => sign(null, Buffer.from(domain + JSON.stringify(tuple)), key.privateKey).toString('base64url');
+export function contactSignal(key, to, changes = {}) {
+  const session = '0123456789abcdef0123456789abcdef';
+  const kind = changes.kind ?? 'request';
+  const value = {version:2,topic:'contacts',from:`did:cht:${key.id}`,to,session,
+    id:`cht-contact-request-v1-${session}-${kind}-${'a'.repeat(32)}`,kind,
+    payload:JSON.stringify({v:1,t:kind,s:session,box:Buffer.alloc(192,6).toString('base64url')}),
+    issuedAt:now,expiresAt:now+120000,publicKey:key.publicKey,...changes};
+  value.signature=signed(key,'chta contact request signal v1\0',
+    ['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt'].map(k=>value[k]));
+  return value;
+}
 export function proof(key, nonce, seedId) {
   return { identityId: `did:cht:${key.id}`, publicKey: key.publicKey, signature: sign(null, Buffer.from(`cht relay registration v1\0${seedId}\0${nonce}`), key.privateKey).toString('base64url') };
 }

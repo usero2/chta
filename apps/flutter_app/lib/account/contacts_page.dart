@@ -11,6 +11,8 @@ import 'contact_qr_files.dart';
 import '../profile/profile_controller.dart';
 import '../profile/profile_avatar.dart';
 import '../chat/peer_history.dart';
+import '../contact_requests/contact_request_controller.dart';
+import '../contact_requests/contact_request_views.dart';
 
 class ContactsPage extends StatefulWidget {
   const ContactsPage({
@@ -22,6 +24,7 @@ class ContactsPage extends StatefulWidget {
     this.peerHistory,
     this.readQrImage,
     this.relayNetwork,
+    this.requests,
     super.key,
   });
 
@@ -33,6 +36,7 @@ class ContactsPage extends StatefulWidget {
   final PeerHistory? peerHistory;
   final Future<String?> Function()? readQrImage;
   final RelayNetwork? relayNetwork;
+  final ContactRequestController? requests;
 
   @override
   State<ContactsPage> createState() => _ContactsPageState();
@@ -266,17 +270,18 @@ class _ContactsPageState extends State<ContactsPage> {
                       hintText: 'Only you see this name',
                     ),
                   ),
-                  CheckboxListTile(
-                    value: fingerprintChecked,
-                    contentPadding: EdgeInsets.zero,
-                    onChanged: (value) => setDialogState(
-                      () => fingerprintChecked = value ?? false,
+                  if (widget.requests == null)
+                    CheckboxListTile(
+                      value: fingerprintChecked,
+                      contentPadding: EdgeInsets.zero,
+                      onChanged: (value) => setDialogState(
+                        () => fingerprintChecked = value ?? false,
+                      ),
+                      title: const Text('Fingerprint matches'),
+                      subtitle: const Text(
+                        'Compare with your friend in person or by call.',
+                      ),
                     ),
-                    title: const Text('Fingerprint matches'),
-                    subtitle: const Text(
-                      'Compare with your friend in person or by call.',
-                    ),
-                  ),
                 ],
               ),
             ),
@@ -289,7 +294,9 @@ class _ContactsPageState extends State<ContactsPage> {
                 key: const Key('confirm-add-friend'),
                 onPressed: () => Navigator.pop(context, true),
                 child: Text(
-                  fingerprintChecked ? 'Add friend & chat' : 'Add friend',
+                  widget.requests == null && fingerprintChecked
+                      ? 'Add friend & chat'
+                      : 'Add friend',
                 ),
               ),
             ],
@@ -298,11 +305,14 @@ class _ContactsPageState extends State<ContactsPage> {
       );
       if (accepted == true) {
         await widget.bridge.addContact(card.text, alias.text);
-        if (fingerprintChecked) {
+        if (fingerprintChecked || widget.requests != null) {
           await widget.bridge.markContactVerified(inspected.identityId);
         }
+        if (widget.requests != null) {
+          await widget.requests!.request(inspected.identityId);
+        }
         if (mounted) _refresh();
-        if (fingerprintChecked && mounted) {
+        if ((fingerprintChecked || widget.requests != null) && mounted) {
           final saved = await widget.bridge.contacts();
           final friend = saved
               .where((c) => c.identityId == inspected.identityId)
@@ -505,6 +515,11 @@ class _ContactsPageState extends State<ContactsPage> {
               ),
             ),
             const Divider(height: 40),
+            if (widget.requests != null)
+              FriendRequestsSection(
+                controller: widget.requests!,
+                onAccepted: widget.onChat,
+              ),
             const Text(
               'Friends',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),

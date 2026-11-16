@@ -13,6 +13,7 @@ import 'package:cht/chat/attachment_store.dart';
 import 'package:cht/core/core_bridge.dart';
 import 'package:cht/groups/group_crypto_bridge.dart';
 import 'package:cht/groups/group_blob_bridge.dart';
+import 'package:cht/contact_requests/contact_request_bridge.dart';
 import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_avatar.dart';
 import 'package:cht/profile/profile_store.dart';
@@ -22,6 +23,47 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 
 void main() {
+  testWidgets(
+    'an unknown friend request is reviewed from chat before reciprocal trust',
+    (tester) async {
+      final bridge = _RequestAccountBridge(),
+          router = AppRouter(initialPath: '/chats/general');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        bridge.savedContacts.any((c) => c.identityId == bridge.requester),
+        isFalse,
+      );
+      expect(find.text('Friend requests (1)'), findsOneWidget);
+      await tester.tap(find.text('Review'));
+      await tester.pumpAndSettle();
+      expect(find.text('Request Alice'), findsWidgets);
+      expect(
+        bridge.savedContacts.any((c) => c.identityId == bridge.requester),
+        isFalse,
+      );
+      await tester.tap(find.text('Accept'));
+      await tester.pumpAndSettle();
+      expect(
+        bridge.savedContacts
+            .firstWhere((c) => c.identityId == bridge.requester)
+            .verified,
+        isTrue,
+      );
+      expect(router.path, contains(Uri.encodeComponent(bridge.requester)));
+      expect(find.text('Friend requests (1)'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    },
+  );
   testWidgets(
     'desktop keeps the same room order and sidebar width across room types',
     (tester) async {
@@ -558,6 +600,77 @@ class _HistoryTestStore implements PeerHistoryStore {
   Future<void> save(String ownerId, String source) async {
     values[ownerId] = source;
   }
+}
+
+class _RequestAccountBridge extends _GroupAccountBridge
+    implements ContactRequestBridge {
+  final requester = 'did:cht:${'a' * 64}';
+  String? requestState;
+  String get requestCard => jsonEncode({
+    'identity': {'id': requester},
+    'displayName': 'Request Alice',
+  });
+  @override
+  Future<String?> loadGroupBlob(String owner, String key) async {
+    if (key != 'contact-requests-v1') return null;
+    return requestState ??
+        jsonEncode({
+          'version': 1,
+          'ownerId': owner,
+          'outbox': [],
+          'decisions': [],
+          'inbox': [
+            {
+              'peerId': requester,
+              'requestId': '1' * 32,
+              'cardJson': requestCard,
+              'status': 'pending',
+              'createdAt': 1000,
+            },
+          ],
+        });
+  }
+
+  @override
+  Future<void> saveGroupBlob(String owner, String key, String value) async {
+    if (key == 'contact-requests-v1') requestState = value;
+  }
+
+  @override
+  Future<ContactView> inspectContactCard(String source) async => ContactView(
+    identityId: requester,
+    displayName: 'Request Alice',
+    fingerprint: 'Synthetic fingerprint',
+    verified: false,
+  );
+  @override
+  Future<List<ContactView>> addContact(String source, String name) async {
+    savedContacts = [...savedContacts, await inspectContactCard(source)];
+    return savedContacts;
+  }
+
+  @override
+  Future<List<ContactView>> markContactVerified(String id) async {
+    savedContacts = [
+      for (final c in savedContacts)
+        if (c.identityId == id)
+          ContactView(
+            identityId: c.identityId,
+            displayName: c.displayName,
+            fingerprint: c.fingerprint,
+            verified: true,
+          )
+        else
+          c,
+    ];
+    return savedContacts;
+  }
+
+  @override
+  Future<Map<String, Object?>> contactRequestCall(
+    String operation,
+    Map<String, Object?> args,
+  ) async => throw UnimplementedError();
 }
 
 class _TwoRoomAccountBridge extends _GroupAccountBridge {
