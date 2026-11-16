@@ -160,9 +160,17 @@ class GroupTransport extends ChangeNotifier {
     });
   }
 
-  Future<void> _bind(_GroupPeer p) => p.link
-      .bind(p.id, signalingAvailable: signaling.registered)
-      .timeout(_operationTimeout);
+  Future<void> _bind(_GroupPeer p) async {
+    try {
+      await p.link
+          .bind(p.id, signalingAvailable: signaling.registered)
+          .timeout(_operationTimeout);
+    } catch (_) {
+      // A Direct setup failure must not block an authenticated relay route.
+      // DirectFileLink keeps its own bounded retry schedule.
+    }
+  }
+
   void _linkChanged(_GroupPeer p) {
     if (_closed) return;
     unawaited(

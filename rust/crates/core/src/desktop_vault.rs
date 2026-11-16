@@ -134,6 +134,15 @@ pub(crate) fn validate_session_route(path: &str) -> Result<(), String> {
         let identifier = std::str::from_utf8(&decoded).map_err(|_| "Invalid saved app page")?;
         if identifier.starts_with("did:cht:") {
             id_hash(identifier)?;
+        } else if let Some(group_hash) = identifier.strip_prefix("group:") {
+            if !path.starts_with("/chats/")
+                || group_hash.len() != 64
+                || !group_hash
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            {
+                return Err("Invalid saved app page".into());
+            }
         } else if identifier.is_empty()
             || identifier.len() > 128
             || !identifier
@@ -776,3 +785,26 @@ mod attachment_tests {
 
 mod chunked;
 mod group_blobs;
+
+#[cfg(test)]
+mod session_route_tests {
+    use super::validate_session_route;
+    #[test]
+    fn group_room_route_is_accepted_without_weakening_session_validation() {
+        let gid = format!("group:{}", "a".repeat(64));
+        for path in [
+            format!("/chats/{gid}"),
+            format!("/chats/group%3A{}", "a".repeat(64)),
+        ] {
+            assert!(validate_session_route(&path).is_ok(), "{path}");
+        }
+        for path in [
+            format!("/connect/{gid}"),
+            "/chats/group:short".into(),
+            format!("/chats/group:{}", "A".repeat(64)),
+            format!("/chats/{gid}/extra"),
+        ] {
+            assert!(validate_session_route(&path).is_err(), "{path}");
+        }
+    }
+}

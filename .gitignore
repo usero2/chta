@@ -38,6 +38,7 @@
 **/chta-recovery*.txt
 
 # Flutter and Dart
+.kotlin/
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies

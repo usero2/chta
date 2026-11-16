@@ -17,6 +17,28 @@ const fixtureIdentity = IdentityView(
 );
 
 void main() {
+  test('group room routes remain valid through Android session restore', () {
+    final group = 'group:${'a' * 64}';
+    for (final path in [
+      '/chats/$group',
+      '/chats/${Uri.encodeComponent(group)}',
+    ]) {
+      expect(isSessionRoute(path), isTrue, reason: path);
+      expect(
+        SessionPreferences.fromJson({'pinRequired': false, 'lastRoute': path})
+            .lastRoute,
+        path,
+      );
+    }
+    for (final path in [
+      '/connect/$group',
+      '/chats/group:short',
+      '/chats/group:${'A' * 64}',
+      '/chats/group:${'a' * 64}/extra',
+    ]) {
+      expect(isSessionRoute(path), isFalse, reason: path);
+    }
+  });
   test('saved routes accept app pages and reject malformed external paths', () {
     for (final path in [
       '/chats',

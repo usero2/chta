@@ -36,6 +36,7 @@ bool isSessionRoute(String path) {
   try {
     final id = Uri.decodeComponent(path.substring(prefix.length));
     return RegExp(r'^did:cht:[0-9a-f]{64}$').hasMatch(id) ||
+        (prefix == '/chats/' && RegExp(r'^group:[0-9a-f]{64}$').hasMatch(id)) ||
         RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id);
   } on FormatException {
     return false;

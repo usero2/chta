@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cht/groups/group_crypto_bridge.dart';
 import 'package:cht/groups/group_seed_client.dart';
 import 'package:cht/groups/group_transport.dart';
+import 'package:cht/p2p/direct_file_link.dart';
 import 'package:cht/relay/relay_network.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -83,7 +84,56 @@ class RegisteredSeed extends QuietSeed {
   Future<void> send(String peer, String id, String text) async {}
 }
 
+class FailingDirectFactory implements DirectPeerFactory {
+  @override
+  Future<DirectPeer> create() async =>
+      throw StateError('Synthetic WebRTC unavailable');
+}
+
 void main() {
+  test(
+    'failed WebRTC negotiation does not block encrypted group relay delivery',
+    () async {
+      final hub = fixture.Hub(fixture.a, 'relay-a');
+      final a = RelayNetwork(fixture.Crypto(did('a')), connector: hub.connect),
+          b = RelayNetwork(fixture.Crypto(did('b')), connector: hub.connect);
+      final alice = GroupTransport(
+        ownerId: did('a'),
+        crypto: FakeGroups({did('a'), did('b')}),
+        network: a,
+        signaling: RegisteredSeed(),
+        peerFactory: FailingDirectFactory(),
+      );
+      final bob = GroupTransport(
+        ownerId: did('b'),
+        crypto: FakeGroups({did('a'), did('b')}),
+        network: b,
+        signaling: RegisteredSeed(),
+        peerFactory: FailingDirectFactory(),
+      );
+      final received = <String>[];
+      bob.frames.listen((f) => received.add(f.text));
+      try {
+        await a.addSeed(fixture.a);
+        await b.addSeed(fixture.a);
+        await alice.start();
+        await bob.start();
+        await fixture.until(() => a.online.isNotEmpty && b.online.isNotEmpty);
+        await alice.connect(did('b'));
+        await fixture.until(
+          () => alice.connected(did('b')) && bob.connected(did('a')),
+        );
+        await alice.send(did('b'), 'synthetic group invitation');
+        await fixture.until(() => received.isNotEmpty);
+        expect(received.single, 'synthetic group invitation');
+      } finally {
+        await alice.close();
+        await bob.close();
+        await a.close();
+        await b.close();
+      }
+    },
+  );
   test('ICE waits for an asynchronous glare replacement on the same peer', () async {
     final gate = Completer<void>(), factory = direct_fixture.FakeFactory();
     final seed = RegisteredSeed(),
