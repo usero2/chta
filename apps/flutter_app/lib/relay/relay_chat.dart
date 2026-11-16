@@ -295,7 +295,7 @@ class RelayChat {
     if (frame['type'] == 'unreachable') {
       if (endpoint == _route &&
           frame['session'] == _session &&
-          !authenticated) {
+          frame['to'] == peerId) {
         _blocked[endpoint] = now + 10000;
         _reset();
         _lastAttempt = 0;
@@ -500,9 +500,14 @@ class RelayChat {
               ? await _callV2('decrypt', session, {'frame': body['payload']})
               : await account.decryptPeerMessage(body['payload'] as String);
           if (stale()) return;
-          if (decoded['duplicate'] == true) return;
           final content =
               jsonDecode(decoded['text'] as String) as Map<String, dynamic>;
+          // Crypto deduplication precedes durable history/ACK. A retry must
+          // reach the history layer again so an interrupted receive can finish
+          // or return its original receipt without adding another bubble.
+          if (decoded['duplicate'] == true && content['type'] != 'message') {
+            return;
+          }
           _lastReceived = now;
           switch (content['type']) {
             case 'message':
@@ -531,16 +536,17 @@ class RelayChat {
               }
             case 'ack':
               final id = content['messageId'] as String;
-              if (_pending.remove(id) != null) {
-                events.add(
-                  PeerEvent(
-                    type: 'delivered',
-                    messageId: id,
-                    receivedAtMilliseconds:
-                        content['receivedAtMilliseconds'] as int,
-                  ),
-                );
-              }
+              _pending.remove(id);
+              // Direct text can retry on this authenticated fallback. Its ACK
+              // still belongs to history even without a relay-local pending ID.
+              events.add(
+                PeerEvent(
+                  type: 'delivered',
+                  messageId: id,
+                  receivedAtMilliseconds:
+                      content['receivedAtMilliseconds'] as int,
+                ),
+              );
             case 'ping':
               await _encrypted({'type': 'pong'});
             case 'pong':

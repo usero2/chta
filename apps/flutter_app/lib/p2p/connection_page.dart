@@ -393,6 +393,8 @@ class ConnectionPageState extends State<ConnectionPage> {
             receivedAtMilliseconds: time,
           ),
         );
+      } else if (history.error != null) {
+        history.changed();
       }
       await history.flush();
       if (history.error != null) {
@@ -967,6 +969,9 @@ class ConnectionPageState extends State<ConnectionPage> {
                 ),
                 expectedGeneration: roomGeneration,
               );
+              if (existing != null && history.error != null) {
+                history.changed();
+              }
               receipts.add((event.messageId!, receivedAt));
             case 'sent':
               error = null;
@@ -1003,6 +1008,18 @@ class ConnectionPageState extends State<ConnectionPage> {
           }
         }
       });
+      if (receipts.isNotEmpty) {
+        await history.flush();
+        if (!mounted ||
+            generation != peerGeneration ||
+            useRelay != usingRelayChat) {
+          return;
+        }
+        if (history.error != null) {
+          setState(() => error = 'Could not save received message. Retrying…');
+          return;
+        }
+      }
       for (final receipt in receipts) {
         try {
           if (useRelay) {

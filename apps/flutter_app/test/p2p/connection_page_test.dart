@@ -31,6 +31,69 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
+    'incoming text is acknowledged only after durable history succeeds, including retry',
+    (tester) async {
+      final store = _GatedHistoryStore();
+      final savedHistory = PeerHistory(store: store);
+      await savedHistory.load('me');
+      final bridge = _FakeP2pBridge(authenticated: true);
+      final account = _FakeAccountBridge()
+        ..savedContacts.add(
+          const ContactView(
+            identityId: 'did:cht:peer',
+            displayName: 'Alice',
+            fingerprint: 'test',
+            verified: true,
+          ),
+        );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConnectionPage(
+            accountBridge: account,
+            bridge: bridge,
+            targetContactId: 'did:cht:peer',
+            chatMode: true,
+            peerHistory: savedHistory,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      const event = PeerEvent(
+        type: 'message',
+        messageId: 'durable-text',
+        text: 'Synthetic receive',
+        sentAtMilliseconds: 1000,
+        receivedAtMilliseconds: 2000,
+      );
+      store.gate = Completer<void>();
+      store.fail = true;
+      bridge.pendingEvents.add(event);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(
+        bridge.receipts,
+        isEmpty,
+        reason: 'Queued writes are not durable delivery',
+      );
+      store.gate!.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(
+        bridge.receipts,
+        isEmpty,
+        reason: 'A failed disk write must not acknowledge delivery',
+      );
+      store.gate = null;
+      store.fail = false;
+      bridge.pendingEvents.add(event);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(bridge.receipts, [('durable-text', 2000)]);
+      expect(savedHistory.messagesFor('did:cht:peer'), hasLength(1));
+      expect(store.values['me'], contains('Synthetic receive'));
+      await tester.pumpWidget(const SizedBox());
+      savedHistory.dispose();
+    },
+  );
+  testWidgets(
     'scanning a saved contact QR queues the reciprocal Review request',
     (tester) async {
       final account = request_test.Account(request_test.alice),
@@ -1515,6 +1578,17 @@ class _MemoryHistoryStore implements PeerHistoryStore {
   @override
   Future<void> save(String ownerId, String source) async {
     values[ownerId] = source;
+  }
+}
+
+class _GatedHistoryStore extends _MemoryHistoryStore {
+  Completer<void>? gate;
+  bool fail = false;
+  @override
+  Future<void> save(String ownerId, String source) async {
+    await gate?.future;
+    if (fail) throw StateError('Synthetic storage failure');
+    await super.save(ownerId, source);
   }
 }
 
