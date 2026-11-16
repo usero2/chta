@@ -13,6 +13,7 @@ class ChatShell extends StatefulWidget {
     this.initialConversationId,
     this.onConversationSelected,
     this.onBackToConversations,
+    this.showSidebar = true,
     this.peerConversations = const [],
     this.onPeerSelected,
     this.onCreateGroup,
@@ -25,6 +26,7 @@ class ChatShell extends StatefulWidget {
   final String? initialConversationId;
   final ValueChanged<String>? onConversationSelected;
   final VoidCallback? onBackToConversations;
+  final bool showSidebar;
   final List<ConversationView> peerConversations;
   final ValueChanged<String>? onPeerSelected;
   final VoidCallback? onCreateGroup;
@@ -145,8 +147,11 @@ class _ChatShellState extends State<ChatShell> {
         final selected = widget.controller.conversations.isEmpty
             ? null
             : widget.controller.selectedConversation;
-        if (narrow) {
-          return _mobileRoomOpen && selected != null
+        if (!widget.showSidebar && selected == null) {
+          return const Center(child: Text('Select a chat'));
+        }
+        if (narrow || !widget.showSidebar) {
+          return (_mobileRoomOpen || !widget.showSidebar) && selected != null
               ? ChatRoom(
                   key: const Key('chat-room'),
                   conversation: selected,

@@ -28,15 +28,50 @@ class ContactQrView extends StatelessWidget {
       data: card,
       errorCorrectLevel: QrErrorCorrectLevel.L,
     );
-    return QrImageView.withQr(
-      qr: qr,
-      size: size,
-      padding: EdgeInsets.all(
-        contactQrMargin(size, qr.moduleCount, quietModules: 2),
+    return Semantics(
+      label: 'qr code',
+      child: SizedBox.square(
+        dimension: size,
+        child: CustomPaint(painter: _ContactQrPainter(card, qr)),
       ),
-      backgroundColor: Colors.white,
     );
   }
+}
+
+class _ContactQrPainter extends CustomPainter {
+  _ContactQrPainter(this.card, QrCode qr) : image = QrImage(qr);
+  final String card;
+  final QrImage image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final edge = size.shortestSide;
+    final margin = contactQrMargin(edge, image.moduleCount);
+    final module = (edge - 2 * margin) / image.moduleCount;
+    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.white);
+    final ink = Paint()
+      ..color = Colors.black
+      ..isAntiAlias = false;
+    // Do not round each module's width: cumulative rounding can erase the
+    // quiet zone of dense codes at small display sizes.
+    for (var row = 0; row < image.moduleCount; row++) {
+      for (var col = 0; col < image.moduleCount; col++) {
+        if (!image.isDark(row, col)) continue;
+        canvas.drawRect(
+          Rect.fromLTRB(
+            margin + col * module,
+            margin + row * module,
+            margin + (col + 1) * module,
+            margin + (row + 1) * module,
+          ),
+          ink,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_ContactQrPainter oldDelegate) => oldDelegate.card != card;
 }
 
 Future<Uint8List> encodeContactQrImage(String card) async {
@@ -45,15 +80,12 @@ Future<Uint8List> encodeContactQrImage(String card) async {
     data: card,
     errorCorrectLevel: QrErrorCorrectLevel.L,
   );
-  final margin = contactQrMargin(pixels.toDouble(), qr.moduleCount);
   final recorder = ui.PictureRecorder();
   final canvas = ui.Canvas(recorder);
-  canvas.drawColor(const ui.Color(0xffffffff), ui.BlendMode.src);
-  canvas.translate(margin, margin);
-  QrPainter.withQr(
-    qr: qr,
-    gapless: true,
-  ).paint(canvas, ui.Size(pixels - 2 * margin, pixels - 2 * margin));
+  _ContactQrPainter(
+    card,
+    qr,
+  ).paint(canvas, ui.Size.square(pixels.toDouble()));
   final picture = recorder.endRecording();
   final image = await picture.toImage(pixels, pixels);
   try {

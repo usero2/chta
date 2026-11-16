@@ -2,9 +2,11 @@ import 'dart:convert';
 
 import 'package:cht/account/account_controller.dart';
 import 'package:cht/account/account_models.dart';
+import 'package:cht/account/contacts_page.dart';
 import 'package:cht/app.dart';
 import 'package:cht/chat/chat_controller.dart';
 import 'package:cht/chat/chat_models.dart';
+import 'package:cht/chat/widgets/conversation_list.dart';
 import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/chat/attachment_store.dart';
@@ -20,6 +22,105 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 
 void main() {
+  testWidgets(
+    'desktop keeps the same room order and sidebar width across room types',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _TwoRoomAccountBridge();
+      final groupId = 'group:${'a' * 64}';
+      final router = AppRouter(
+        initialPath: '/chats/${Uri.encodeComponent(groupId)}',
+      );
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final expected = ['general', 'design', 'did:cht:alice', groupId];
+      double? width;
+      for (final route in [
+        '/chats/${Uri.encodeComponent(groupId)}',
+        '/chats/did%3Acht%3Aalice',
+        '/chats/design',
+        '/chats',
+      ]) {
+        router.go(route);
+        await tester.pumpAndSettle();
+        final list = find.byType(ConversationList);
+        expect(list, findsOneWidget);
+        expect(
+          tester.widget<ConversationList>(list).conversations.map((c) => c.id),
+          expected,
+          reason: 'Room selection must not reorder the sidebar',
+        );
+        width ??= tester.getSize(list).width;
+        expect(
+          tester.getSize(list).width,
+          width,
+          reason: 'Sidebar width must remain constant',
+        );
+      }
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets(
+    'desktop main navigation stays in the sidebar on every destination',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _GroupAccountBridge();
+      final router = AppRouter(initialPath: '/chats/group%3A${'a' * 64}');
+      await tester.pumpWidget(
+        ChtApp(
+          controller: ChatController(coreBridge: bridge),
+          coreBridge: bridge,
+          accountController: AccountController(bridge),
+          peerHistoryStore: _HistoryTestStore(),
+          router: router,
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final entry in [
+        ('Contacts', '/contacts'),
+        ('Connect', '/connect'),
+        ('Profile', '/profile'),
+        ('Chats', '/chats'),
+      ]) {
+        final nav = find.byType(NavigationBar);
+        expect(nav, findsOneWidget);
+        expect(tester.getRect(nav).right, lessThanOrEqualTo(304));
+        await tester.tap(
+          find.descendant(of: nav, matching: find.text(entry.$1)),
+        );
+        await tester.pumpAndSettle();
+        expect(router.path, entry.$2);
+        expect(find.byType(ConversationList), findsOneWidget);
+      }
+      router.go('/chats/did%3Acht%3Aalice');
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsOneWidget);
+      tester.view.physicalSize = const Size(720, 800);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byTooltip('Back to chats'), findsOneWidget);
+      tester.view.physicalSize = const Size(721, 800);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byType(ConversationList), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets('missing group route retains a Back button on desktop', (
     tester,
   ) async {
@@ -302,7 +403,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Alice'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(ContactsPage),
+        matching: find.text('Alice'),
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('Signed name: Alice'), findsOneWidget);
     expect(find.textContaining('Identity verified'), findsOneWidget);
 

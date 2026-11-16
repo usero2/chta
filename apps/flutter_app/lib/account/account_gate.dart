@@ -817,7 +817,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       ),
     ...?groups?.conversations,
   ];
-  Widget _groupChat(String id) {
+  Widget _groupChat(String id, {bool showSidebar = true}) {
     final controller = groups, group = groups?.group(id);
     if (controller == null || !controller.ready || group == null) {
       return SafeArea(
@@ -844,7 +844,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     }
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 720;
+        final wide = showSidebar && constraints.maxWidth > 720;
         final room = GroupRoom(
           group: group,
           ownId: controller.ownerId,
@@ -1021,8 +1021,73 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     }
   }
 
+  Widget _mainNavigation() => NavigationBar(
+    selectedIndex: index,
+    onDestinationSelected: _selectDestination,
+    destinations: const [
+      NavigationDestination(
+        icon: Icon(Icons.chat_bubble_outline),
+        label: 'Chats',
+      ),
+      NavigationDestination(
+        icon: Icon(Icons.people_outline),
+        label: 'Contacts',
+      ),
+      NavigationDestination(icon: Icon(Icons.hub_outlined), label: 'Connect'),
+      NavigationDestination(icon: Icon(Icons.person_outline), label: 'Profile'),
+    ],
+  );
+
+  Widget _desktopSidebar() => SizedBox(
+    key: const Key('desktop-sidebar'),
+    width: 304,
+    child: ColoredBox(
+      color: const Color(0xFF1C1C1E),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListenableBuilder(
+                listenable: widget.chatController,
+                builder: (context, _) => ConversationList(
+                  conversations: [
+                    ...widget.chatController.conversations,
+                    ..._peerConversations(),
+                  ],
+                  selectedId: index != 0
+                      ? ''
+                      : conversationIdFromRoute(widget.router.path) ??
+                            (widget.chatController.status ==
+                                        ChatControllerStatus.ready &&
+                                    widget
+                                        .chatController
+                                        .conversations
+                                        .isNotEmpty
+                                ? widget.chatController.selectedConversation.id
+                                : ''),
+                  onSelected: (id) => widget.router.go(conversationRoute(id)),
+                  onCreateGroup: groups?.ready == true
+                      ? () => unawaited(_createGroup())
+                      : null,
+                  onActionSelected: _conversationAction,
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            _mainNavigation(),
+          ],
+        ),
+      ),
+    ),
+  );
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) =>
+        _buildLayout(context, wide: constraints.maxWidth > 720),
+  );
+
+  Widget _buildLayout(BuildContext context, {required bool wide}) {
     final conversationOpen =
         index == 0 && conversationIdFromRoute(widget.router.path) != null;
     final connectionPage = ConnectionPage(
@@ -1037,6 +1102,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       profileController: widget.profileController,
       targetContactId: targetContactId,
       chatMode: showingPeerChat,
+      showChatSidebar: !wide,
       onPeerAuthenticated: (contact) {
         unawaited(_loadChatContacts());
         if (index == 2) {
@@ -1090,41 +1156,17 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 if (showingPeerChat)
                   connectionPage
                 else if (targetGroupId != null)
-                  _groupChat(targetGroupId!)
+                  _groupChat(targetGroupId!, showSidebar: !wide)
                 else
                   ChatShell(
                     controller: widget.chatController,
+                    showSidebar: !wide,
                     coreBridge: widget.bridge,
                     initialConversationId: initialConversationId,
                     onConversationSelected: (id) =>
                         widget.router.go(conversationRoute(id)),
                     onBackToConversations: () => widget.router.go('/chats'),
-                    peerConversations: [
-                      ...?groups?.conversations,
-                      for (final contact in peerHistory.withSavedConversations(
-                        chatContacts,
-                      ))
-                        ConversationView(
-                          id: contact.identityId,
-                          title: contact.displayName,
-                          avatarBase64: contact.avatarBase64,
-                          preview:
-                              peerHistory
-                                  .messagesFor(contact.identityId)
-                                  .lastOrNull
-                                  ?.text ??
-                              (onlinePeers.contains(contact.identityId)
-                                  ? 'Connected securely'
-                                  : 'Offline'),
-                          updatedAtMilliseconds:
-                              peerHistory
-                                  .messagesFor(contact.identityId)
-                                  .lastOrNull
-                                  ?.sentAtMilliseconds ??
-                              0,
-                          messages: const [],
-                        ),
-                    ],
+                    peerConversations: _peerConversations(),
                     onPeerSelected: (id) =>
                         widget.router.go(conversationRoute(id)),
                     onConversationAction: _conversationAction,
@@ -1166,31 +1208,17 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 ),
               ],
             ),
-      bottomNavigationBar: conversationOpen
-          ? null
-          : NavigationBar(
-              selectedIndex: index,
-              onDestinationSelected: _selectDestination,
-              destinations: const [
-                NavigationDestination(
-                  icon: Icon(Icons.chat_bubble_outline),
-                  label: 'Chats',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.people_outline),
-                  label: 'Contacts',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.hub_outlined),
-                  label: 'Connect',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.person_outline),
-                  label: 'Profile',
-                ),
-              ],
-            ),
+      bottomNavigationBar: wide || conversationOpen ? null : _mainNavigation(),
     );
+    final layout = wide
+        ? Row(
+            children: [
+              _desktopSidebar(),
+              const VerticalDivider(width: 1),
+              Expanded(child: home),
+            ],
+          )
+        : home;
     return conversationOpen ||
             widget.accountController.supportsPinLockPreference
         ? PopScope<void>(
@@ -1203,8 +1231,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 unawaited(_closeApp());
               }
             },
-            child: home,
+            child: layout,
           )
-        : home;
+        : layout;
   }
 }

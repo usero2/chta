@@ -58,6 +58,7 @@ class ConnectionPage extends StatefulWidget {
     this.stunUrl = defaultStunUrl,
     this.targetContactId,
     this.chatMode = false,
+    this.showChatSidebar = true,
     this.onPeerAuthenticated,
     this.onConnectRequested,
     this.onChatSelected,
@@ -86,6 +87,7 @@ class ConnectionPage extends StatefulWidget {
   final String stunUrl;
   final String? targetContactId;
   final bool chatMode;
+  final bool showChatSidebar;
   final ValueChanged<ContactView>? onPeerAuthenticated;
   final ValueChanged<ContactView>? onConnectRequested;
   final ValueChanged<ContactView>? onChatSelected;
@@ -2682,7 +2684,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   Widget _secureChatLayout() => LayoutBuilder(
     key: const Key('secure-chat-shell'),
     builder: (context, constraints) {
-      if (constraints.maxWidth <= 720) {
+      if (!widget.showChatSidebar || constraints.maxWidth <= 720) {
         return _peerRoom(onBack: widget.onBackToChats);
       }
       return Row(

@@ -5,6 +5,7 @@ import 'package:cht/account/contact_qr_files.dart';
 import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_store.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 import 'package:qr_flutter/qr_flutter.dart';
@@ -76,6 +77,71 @@ class _Bridge implements AccountBridge {
 }
 
 void main() {
+  testWidgets(
+    'contact and relay QR keep a thin opaque four-module white border',
+    (tester) async {
+      for (final data in ['x' * 2800, 'wss://example.trycloudflare.com/cht']) {
+        final size = data.startsWith('wss:') ? 112.0 : 260.0;
+        final qr = QrCode.fromData(
+          data: data,
+          errorCorrectLevel: QrErrorCorrectLevel.L,
+        );
+        final margin = contactQrMargin(size, qr.moduleCount);
+        final boundary = GlobalKey();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Center(
+              child: RepaintBoundary(
+                key: boundary,
+                child: ContactQrView(card: data, size: size),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        final raster =
+            (boundary.currentContext!.findRenderObject()!
+                    as RenderRepaintBoundary)
+                .toImageSync();
+        final bytes = await tester.runAsync(() => raster.toByteData());
+        expect(bytes, isNotNull);
+        expect(raster.width, size.toInt());
+        expect(raster.height, size.toInt());
+        // Four modules are the entire frame, with no extra outer padding.
+        expect(margin, lessThan(size * 0.14));
+        final module = (size - margin * 2) / qr.moduleCount;
+        final matrix = QrImage(qr);
+        for (var row = 0; row < qr.moduleCount; row++) {
+          for (var col = 0; col < qr.moduleCount; col++) {
+            final x = (margin + (col + 0.5) * module).floor();
+            final y = (margin + (row + 0.5) * module).floor();
+            expect(
+              bytes!.getUint32((y * raster.width + x) * 4),
+              matrix.isDark(row, col) ? 0x000000ff : 0xffffffff,
+              reason: 'Correct QR module at ($row, $col)',
+            );
+          }
+        }
+        for (var y = 0; y < size; y++) {
+          for (var x = 0; x < size; x++) {
+            if (x >= margin.floor() &&
+                y >= margin.floor() &&
+                x < size - margin.floor() &&
+                y < size - margin.floor()) {
+              continue;
+            }
+            final offset = (y * raster.width + x) * 4;
+            expect(
+              bytes!.getUint32(offset),
+              0xffffffff,
+              reason: 'White quiet zone at ($x, $y), size $size',
+            );
+          }
+        }
+        raster.dispose();
+      }
+    },
+  );
   test('QR uses exactly four quiet-zone modules at every density', () {
     for (final size in [260.0, 1200.0]) {
       final qr = QrCode.fromData(
