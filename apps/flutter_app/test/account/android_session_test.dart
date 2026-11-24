@@ -17,6 +17,24 @@ const fixtureIdentity = IdentityView(
 );
 
 void main() {
+  test(
+    'simultaneous lock paths serialize and block unlock until completion',
+    () async {
+      final bridge = _Bridge()
+        ..active = true
+        ..lockGate = Completer<void>();
+      final controller = AccountController(bridge);
+      await controller.initialize();
+      final first = controller.lock(), second = controller.lock();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.working, isTrue);
+      expect(await controller.unlock(owner, 'synthetic'), isFalse);
+      bridge.lockGate!.complete();
+      await Future.wait([first, second]);
+      expect(bridge.calls.where((c) => c == 'lock').length, 1);
+      expect(controller.identity, isNull);
+    },
+  );
   test('group room routes remain valid through Android session restore', () {
     final group = 'group:${'a' * 64}';
     for (final path in [
@@ -192,7 +210,7 @@ class _Bridge
     implements AccountBridge, DesktopIdentityBridge, AndroidSessionBridge {
   bool enabled = true, active = false, remembered = false;
   Object? resumeError, saveError;
-  Completer<void>? writeGate, routeGate;
+  Completer<void>? writeGate, routeGate, lockGate;
   int resumeCalls = 0;
   final calls = <String>[];
   SessionPreferences prefs = const SessionPreferences(pinRequired: true);
@@ -250,6 +268,7 @@ class _Bridge
 
   @override
   Future<void> lockIdentity() async {
+    await lockGate?.future;
     calls.add('lock');
     active = false;
     remembered = false;

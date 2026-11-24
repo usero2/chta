@@ -6,6 +6,7 @@ import '../media_item.dart';
 import '../attachment_files.dart';
 import 'media_viewer.dart';
 import 'message_bubble.dart';
+import 'media_caption.dart';
 
 class MediaAlbum extends StatelessWidget {
   const MediaAlbum({super.key, required this.items, this.onOpen});
@@ -16,10 +17,14 @@ class MediaAlbum extends StatelessWidget {
     final ordered = List<MediaItem>.of(items)
       ..sort((a, b) => (a.groupIndex ?? 0).compareTo(b.groupIndex ?? 0));
     final caption = ordered
-        .where((item) => item.caption?.isNotEmpty == true)
+        .where((item) => item.caption?.trim().isNotEmpty == true)
         .firstOrNull
         ?.caption;
-    final color = ordered.first.incoming
+    final visualMedia =
+        ordered.first.kind == 'image' || ordered.first.kind == 'video';
+    final color = visualMedia
+        ? Theme.of(context).colorScheme.onSurface
+        : ordered.first.incoming
         ? const Color(0xFFECECEC)
         : const Color(0xFF0B0B0B);
     void open(int index) {
@@ -35,53 +40,58 @@ class MediaAlbum extends StatelessWidget {
       );
     }
 
-    return SizedBox(
-      width: 340,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (ordered.first.kind == 'video')
-            SizedBox(
-              height: 142,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: ordered.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 6),
-                itemBuilder: (context, index) => SizedBox(
-                  width: 104,
-                  child: _AlbumTile(
-                    key: ValueKey(ordered[index].id),
-                    item: ordered[index],
-                    onOpen: () => open(index),
-                    color: color,
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 340,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (ordered.first.kind == 'video' && ordered.length > 1)
+              SizedBox(
+                height: 142,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: ordered.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 6),
+                  itemBuilder: (context, index) => SizedBox(
+                    width: 104,
+                    child: _AlbumTile(
+                      key: ValueKey(ordered[index].id),
+                      item: ordered[index],
+                      onOpen: () => open(index),
+                      color: color,
+                    ),
                   ),
                 ),
+              )
+            else
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: ordered.length > 1 ? 2 : 1,
+                  crossAxisSpacing: 5,
+                  mainAxisSpacing: 5,
+                ),
+                itemCount: ordered.length,
+                itemBuilder: (context, index) => _AlbumTile(
+                  key: ValueKey(ordered[index].id),
+                  item: ordered[index],
+                  onOpen: () => open(index),
+                  color: color,
+                ),
               ),
-            )
-          else
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: ordered.length > 1 ? 2 : 1,
-                crossAxisSpacing: 5,
-                mainAxisSpacing: 5,
+            if (caption != null && visualMedia)
+              MediaCaption(text: caption, incoming: ordered.first.incoming)
+            else if (caption != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: ChatMarkdown(text: caption, color: color),
               ),
-              itemCount: ordered.length,
-              itemBuilder: (context, index) => _AlbumTile(
-                key: ValueKey(ordered[index].id),
-                item: ordered[index],
-                onOpen: () => open(index),
-                color: color,
-              ),
-            ),
-          if (caption != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: ChatMarkdown(text: caption, color: color),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -165,14 +175,23 @@ class _AlbumTileState extends State<_AlbumTile> {
                     ),
                   ),
                 Positioned(
-                  left: 4,
-                  bottom: 4,
+                  left: 6,
+                  bottom: 6,
                   child: Tooltip(
                     message: 'Cached',
-                    child: Icon(
-                      Icons.offline_pin_outlined,
-                      size: 15,
-                      color: Colors.white,
+                    child: DecoratedBox(
+                      decoration: const BoxDecoration(
+                        color: Color(0x99000000),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Padding(
+                        padding: EdgeInsets.all(3),
+                        child: Icon(
+                          Icons.offline_pin_outlined,
+                          size: 15,
+                          color: Colors.white,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -180,6 +199,9 @@ class _AlbumTileState extends State<_AlbumTile> {
                   right: 0,
                   bottom: 0,
                   child: IconButton(
+                    style: IconButton.styleFrom(
+                      backgroundColor: const Color(0x99000000),
+                    ),
                     onPressed: widget.item.onRetry ?? _save,
                     tooltip: widget.item.onRetry != null
                         ? 'Retry'

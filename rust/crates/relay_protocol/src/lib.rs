@@ -3,6 +3,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+mod courier;
+pub use courier::{CourierCatalog, verify_courier_advertisement};
 
 pub const MAX_RECORDS: usize = 1000;
 pub const MAX_BATCH_RECORDS: usize = 64;

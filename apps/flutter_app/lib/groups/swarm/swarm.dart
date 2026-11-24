@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import '../../chat/attachment_ref.dart';
 import '../../chat/attachment_source.dart';
 import '../../chat/attachment_store.dart';
+import '../../chat/managed_attachment_cache.dart';
+import '../../chat/cache_policy.dart';
 import '../../chat/chat_attachment.dart';
 import '../group_blob_bridge.dart';
 
@@ -288,18 +290,32 @@ class SparseSwarmCache {
       merkleRoot: _hex(levels.last.single),
       caption: file.caption,
     );
-    var index = 0;
-    await for (final bytes in _chunks(file)) {
-      await putPiece(m, index, bytes, _proof(levels, index));
-      index++;
+    final managed = attachments is BudgetedAttachmentStore
+        ? attachments as BudgetedAttachmentStore
+        : null;
+    final reservation = 'swarm_${m.identityHash}';
+    final existed = (managed?.policy.entrySize(reservation) ?? 0) > 0;
+    try {
+      var index = 0;
+      await for (final bytes in _chunks(file)) {
+        await putPiece(m, index, bytes, _proof(levels, index));
+        index++;
+      }
+      if (index != m.pieceCount) {
+        throw const FormatException('Source changed during import');
+      }
+      if (!(await status(m)).complete) {
+        throw const FormatException('Source digest changed during import');
+      }
+      return m;
+    } catch (_) {
+      if (managed != null && !existed) {
+        try {
+          await managed.policy.retainCached(reservation);
+        } catch (_) {}
+      }
+      rethrow;
     }
-    if (index != m.pieceCount) {
-      throw const FormatException('Source changed during import');
-    }
-    if (!(await status(m)).complete) {
-      throw const FormatException('Source digest changed during import');
-    }
-    return m;
   }
 
   Stream<Uint8List> _chunks(ChatAttachment file) async* {
@@ -330,8 +346,13 @@ class SparseSwarmCache {
       throw const FormatException('Invalid swarm piece proof');
     }
     final pageNumber = index ~/ 128, key = _pageKey(m, pageNumber);
-    await _serial(key, () async {
+    final managed = attachments is BudgetedAttachmentStore
+        ? attachments as BudgetedAttachmentStore
+        : null;
+    final reservation = 'swarm_${m.identityHash}';
+    Future<void> writePiece() => _serial(key, () async {
       final page = await _page(m, pageNumber);
+      final fresh = !page.containsKey('$index');
       final context = sha256.convert(utf8.encode(_context(m, index))).bytes;
       final wrapped = Uint8List.fromList([...context, ...bytes]);
       final ref = await attachments.put(
@@ -342,9 +363,24 @@ class SparseSwarmCache {
           bytes: wrapped,
         ),
       );
+      if (fresh && managed != null) {
+        managed.policy.noteWritten(
+          reservation,
+          managed.policy.entryWritten(reservation) + wrapped.length,
+        );
+      }
       page['$index'] = {'ref': ref.toJson(), 'proof': proof};
       await blobs.saveGroupBlob(ownerId, key, jsonEncode(page));
     });
+    if (managed == null) {
+      await writePiece();
+    } else {
+      await managed.withReservation(
+        reservation,
+        m.size + 32 * m.pieceCount,
+        writePiece,
+      );
+    }
   }
 
   Future<SwarmPiece> readPiece(SwarmManifest m, int index) async {
@@ -395,6 +431,19 @@ class SparseSwarmCache {
       }
     }
     final all = available.length == m.pieceCount;
+    if (attachments case BudgetedAttachmentStore(policy: final policy)) {
+      if (available.isNotEmpty) {
+        try {
+          await policy.accountExisting(
+            'swarm_${m.identityHash}',
+            m.size + 32 * m.pieceCount,
+            total + 32 * available.length,
+          );
+        } on CachePolicyException {
+          /* Existing readable files remain available; new cache writes still require budget approval. */
+        }
+      }
+    }
     if (all) {
       final digest = await sha256.bind(_openRead(m)).first;
       if (digest.toString() != m.digest) {

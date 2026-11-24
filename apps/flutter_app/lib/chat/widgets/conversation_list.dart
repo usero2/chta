@@ -56,7 +56,7 @@ class ConversationList extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => ColoredBox(
+  Widget build(BuildContext context) => Material(
     color: const Color(0xFF1C1C1E),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

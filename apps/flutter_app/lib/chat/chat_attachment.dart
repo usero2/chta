@@ -1,12 +1,16 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:characters/characters.dart';
+
 import 'attachment_source.dart';
 
 class ChatAttachment {
   static const int relayMaxBytes = 25 * 1024 * 1024;
   static const int maxBytes = 100 * 1024 * 1024;
   static const int maxStreamedBytes = 10 * 1024 * 1024 * 1024;
+  static const int maxLongMessageBytes = 1024 * 1024;
+  static const markdownMimeType = 'text/markdown';
   final String name;
   final String mimeType;
   final Uint8List? _bytes;
@@ -63,6 +67,39 @@ class ChatAttachment {
     validatePresentation(caption, groupId, groupIndex, groupCount);
   }
 
+  factory ChatAttachment.longMessage(String text) {
+    const tooLong = FormatException(
+      'Messages over 1 MiB must be attached as a file.',
+    );
+    if (text.length > maxLongMessageBytes) throw tooLong;
+    final bytes = utf8.encode(text);
+    if (bytes.length > maxLongMessageBytes) throw tooLong;
+    return ChatAttachment.fromOwnedBytes(
+      name: _longMessageName(text),
+      mimeType: markdownMimeType,
+      bytes: bytes,
+    );
+  }
+
+  static String _longMessageName(String text) {
+    final prefix = text
+        .trimLeft()
+        .characters
+        .take(30)
+        .toString()
+        .replaceAll(RegExp(r'\s+'), ' ');
+    final title = StringBuffer();
+    var bytes = 0;
+    for (final character in prefix.characters) {
+      bytes += utf8.encode(character).length;
+      // Leave room for the extension and a reserved-name prefix on export.
+      if (bytes > 251) break;
+      title.write(character);
+    }
+    final name = title.toString().trimRight();
+    return safeAttachmentExportName('${name.isEmpty ? 'Message' : name}.md');
+  }
+
   Stream<List<int>> openRead({int start = 0, int? end}) {
     final last = end ?? size;
     if (start < 0 || last < start || last > size) {
@@ -70,6 +107,20 @@ class ChatAttachment {
     }
     if (source != null) return source!.openRead(start: start, end: last);
     return Stream.value(_bytes!.sublist(start, last));
+  }
+
+  Future<String> readTextExcerpt(int limit) async {
+    final end = size.clamp(0, maxLongMessageBytes);
+    final chunks = const Utf8Decoder(allowMalformed: true)
+        .bind(openRead(end: end));
+    final content = StringBuffer();
+    await for (final chunk in chunks) {
+      content.write(chunk);
+      // The next grapheme confirms the boundary even across storage chunks.
+      final prefix = content.toString().characters.take(limit + 1);
+      if (prefix.length > limit) return '${prefix.take(limit)}…';
+    }
+    return content.toString();
   }
 
   ChatAttachment withPresentation({
@@ -208,4 +259,19 @@ class ChatAttachment {
       groupCount: json['groupCount'] as int?,
     );
   }
+}
+
+/// Keep exports inside the chosen folder on Windows, including NTFS streams.
+String safeAttachmentExportName(String name) {
+  var result = name
+      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f\x7f]'), '_')
+      .replaceFirst(RegExp(r'[. ]+$'), '');
+  if (result.isEmpty) result = 'attachment';
+  if (RegExp(
+    r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]) *(?:\.|$)',
+    caseSensitive: false,
+  ).hasMatch(result)) {
+    result = '_$result';
+  }
+  return result;
 }

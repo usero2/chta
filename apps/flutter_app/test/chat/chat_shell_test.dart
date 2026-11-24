@@ -4,12 +4,41 @@ import 'package:cht/app.dart';
 import 'package:cht/chat/chat_controller.dart';
 import 'package:cht/chat/chat_shell.dart';
 import 'package:cht/chat/chat_models.dart';
+import 'package:cht/chat/widgets/conversation_list.dart';
 import 'package:cht/core/core_bridge.dart';
 import 'package:cht/routing/app_router.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('standalone desktop sidebar uses the normal logo text style', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 320,
+            child: ConversationList(
+              conversations: const [],
+              selectedId: '',
+              onSelected: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    final logo = find.descendant(
+      of: find.text('chta'),
+      matching: find.byType(RichText),
+    );
+    expect(
+      tester.widget<RichText>(logo).text.style?.decoration,
+      anyOf(isNull, TextDecoration.none),
+    );
+  });
+
   testWidgets(
     'an empty persisted room list stays usable on phone and desktop',
     (tester) async {

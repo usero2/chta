@@ -1,0 +1,7 @@
+# Media message layout
+
+The user supplied a private reference screenshot and explicitly requested borderless image/video messages with text below. Show visual media directly on the chat surface, with no colored bubble padding around it. Keep an optional Markdown caption in a colored strip underneath, one caption per album. No caption means no empty footer. Text, audio and generic file bubbles keep their existing style.
+
+Use an explicit media presentation flag in the shared bubble, wired for peer, local and group rooms from existing attachment/manifest metadata. Ordinary image/video content shares the media album rendering so legacy/cached paths agree; large streamed media preserves its existing metadata/save fallback without eager preview reads. A single video uses the full single-tile layout; only multiple videos use the horizontal row, matching the existing reference behavior. Preserve save, playback, thumbnail, cached state, timestamps, retries and the completed-progress fix. Readable metadata remains on the neutral surface, and captions select colors for their own background.
+
+No protocol, encryption, cache format or send behavior changes. Keep the private reference screenshot and reference-app source outside public source. Build/audit/install current Android/Windows/Web targets as version 41 and inspect existing Android media without real-contact test sends. Keep source commits local.

@@ -4,8 +4,12 @@ import 'package:cht/account/account_models.dart';
 import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_page.dart';
 import 'package:cht/profile/profile_store.dart';
+import 'package:cht/notifications/incoming_notifications.dart';
+import 'package:cht/runtime/app_runtime.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../runtime/app_runtime_test.dart' show FakeRuntime;
 
 const _identity = IdentityView(
   id: 'test-identity',
@@ -27,6 +31,7 @@ void main() {
     bool? enabled,
     Future<void> Function(bool)? onChanged,
     Future<void> Function()? onLock,
+    IncomingNotifications? notifications,
   }) => tester.pumpWidget(
     MaterialApp(
       home: ProfilePage(
@@ -35,6 +40,7 @@ void main() {
         pinLockEnabled: enabled,
         onPinLockChanged: onChanged,
         onLockApp: onLock,
+        notifications: notifications,
       ),
     ),
   );
@@ -46,6 +52,57 @@ void main() {
     await tester.tap(find.byKey(key));
     await tester.pump();
   }
+
+  testWidgets('Android can hide the lock action while reception stays on', (
+    tester,
+  ) async {
+    final runtime = AppRuntime(bridge: FakeRuntime());
+    AppRuntime.instance = runtime;
+    addTearDown(() {
+      AppRuntime.instance = null;
+      runtime.dispose();
+    });
+    await runtime.attach(
+      'test-identity',
+      flush: () async {},
+      lock: () async {},
+    );
+    await showProfile(tester);
+    const action = Key('profile-background-lock-action');
+    expect(tester.widget<SwitchListTile>(find.byKey(action)).value, isTrue);
+    await tapControl(tester, action);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(find.byKey(action)).value, isFalse);
+    expect(runtime.running, isTrue);
+    expect(find.text('On · Lock app to stop'), findsNothing);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+  testWidgets('Notifications cannot change during a delayed lock', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final notifications = IncomingNotifications(
+      identityId: _identity.id,
+      backend: _NotificationBackend(),
+    );
+    addTearDown(notifications.dispose);
+    await notifications.initialize();
+    final locking = Completer<void>();
+    await showProfile(
+      tester,
+      notifications: notifications,
+      onLock: () => locking.future,
+    );
+    await tapControl(tester, _lockApp);
+    final toggle = find.byKey(const Key('notifications-toggle'));
+    expect(tester.widget<SwitchListTile>(toggle).onChanged, isNull);
+    locking.complete();
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(toggle).onChanged, isNotNull);
+  });
 
   testWidgets('PIN controls stay hidden without platform callbacks', (
     tester,
@@ -252,6 +309,15 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+}
+
+class _NotificationBackend implements NotificationBackend {
+  @override
+  Future<bool> initialize() async => true;
+  @override
+  Future<bool> requestPermissions() async => true;
+  @override
+  Future<void> show(IncomingNotification notification) async {}
 }
 
 class _MemoryProfileStore implements ProfileStore {

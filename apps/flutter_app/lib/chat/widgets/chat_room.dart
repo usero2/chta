@@ -106,6 +106,10 @@ class ChatRoom extends StatelessWidget {
                     message.attachment != null &&
                     item(message).groupKey != null;
                 return MessageBubble(
+                  media: const {
+                    'image',
+                    'video',
+                  }.contains(message.attachment?.kind),
                   bubbleKey: const Key('message-bubble'),
                   text: message.text,
                   incoming: message.incoming,

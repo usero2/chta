@@ -1,5 +1,5 @@
 //! Own-device cryptography. Discovery envelopes cannot carry account content.
-mod certificate;
+pub(crate) mod certificate;
 mod session;
 use crate::IdentityManager;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

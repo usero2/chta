@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SeedDirectory } from '../src/seed-directory.js';
 import { SEED_ID } from '../src/protocol.js';
-import { identity, proof, signal, contactSignal, record, now } from './helpers.js';
+import { identity, proof, signal, contactSignal, record, now, advertisement } from './helpers.js';
 function context() {
   const data = new Map(), sockets = [];
   return { data, sockets, storage: { async get(k) {return structuredClone(data.get(k));}, async put(k,v) {data.set(k,structuredClone(v));},async setAlarm() {} }, blockConcurrencyWhile: fn => fn(), getWebSockets: () => sockets, setWebSocketAutoResponse() {} };
@@ -19,6 +19,16 @@ async function registered(ctx,dir,key,opts={}) {
   await dir.webSocketMessage(ws,JSON.stringify({type:'register',proof:proof(key,ws.attachment.nonce,SEED_ID)}));
   assert.equal(ws.sent[0]?.type,'registered'); return ws;
 }
+test('Courier discovery is live metadata only and never exposes new frames to old clients',async()=>{
+  const ctx=context(),dir=new SeedDirectory(ctx,{});await dir.ready;
+  const a=await registered(ctx,dir,identity()),b=await registered(ctx,dir,identity()),legacy=await registered(ctx,dir,identity());
+  const count=legacy.sent.length,r=advertisement();
+  await dir.webSocketMessage(a,JSON.stringify({type:'couriers',records:[r]}));
+  assert.equal(a.readyState,1);
+  await dir.webSocketMessage(b,JSON.stringify({type:'couriers',records:[]}));
+  assert.deepEqual(b.sent.at(-1),{type:'couriers',records:[r]});assert.equal(legacy.sent.length,count);
+  assert.ok(!JSON.stringify([...ctx.data]).includes(r.signerId),'seed SQL never stores Courier jobs or directory');
+});
 
 test('contact requests forward live only; offline retries never create a seed mailbox', async () => {
   const ctx=context(),dir=new SeedDirectory(ctx,{});await dir.ready;

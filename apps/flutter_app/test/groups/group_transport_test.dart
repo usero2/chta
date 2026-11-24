@@ -14,6 +14,35 @@ import '../p2p/direct_file_link_test.dart' as direct_fixture;
 
 String did(String c) => 'did:cht:${c * 64}';
 
+class SilentHub extends fixture.Hub {
+  SilentHub(super.url, super.id);
+  bool dropping = true;
+  @override
+  Future<fixture.Socket> connect(String endpoint) async {
+    final socket = SilentSocket(this);
+    sockets.add(socket);
+    socket.receive({
+      'type': 'challenge',
+      'nonce': 'challenge',
+      'relay': record,
+      'relays': [],
+    });
+    return socket;
+  }
+}
+
+class SilentSocket extends fixture.Socket {
+  SilentSocket(super.hub);
+  @override
+  void send(String source) {
+    if ((hub as SilentHub).dropping &&
+        (jsonDecode(source) as Map)['type'] == 'route') {
+      return;
+    }
+    super.send(source);
+  }
+}
+
 class QuietSeed extends ChangeNotifier implements GroupSignaling {
   @override
   bool get registered => false;
@@ -91,6 +120,101 @@ class FailingDirectFactory implements DirectPeerFactory {
 }
 
 void main() {
+  test(
+    'a single relay can recover after the first handshake was lost',
+    () async {
+      var now = 10000;
+      final hub = SilentHub(fixture.a, 'relay-a'),
+          networks = <RelayNetwork>[],
+          transports = <GroupTransport>[];
+      try {
+        for (final key in ['a', 'b']) {
+          final network = RelayNetwork(
+            fixture.Crypto(did(key)),
+            connector: hub.connect,
+          );
+          networks.add(network);
+          await network.addSeed(fixture.a);
+          final transport = GroupTransport(
+            ownerId: did(key),
+            crypto: FakeGroups({did('a'), did('b')}),
+            network: network,
+            signaling: QuietSeed(),
+            peerFactory: FailingDirectFactory(),
+            clock: () => now,
+          );
+          transports.add(transport);
+          await transport.start();
+        }
+        await fixture.until(() => networks.every((n) => n.online.length == 1));
+        await transports.first.connect(did('b'));
+        expect(transports.first.connected(did('b')), isFalse);
+        hub.dropping = false;
+        now += 6000;
+        await transports.first.connect(did('b'));
+        now += 6000;
+        await transports.first.connect(did('b'));
+        await fixture.until(() => transports.first.connected(did('b')));
+      } finally {
+        for (final t in transports) {
+          await t.close();
+        }
+        for (final n in networks) {
+          await n.close();
+        }
+      }
+    },
+  );
+  test('an authenticated but blackholed relay does not pin group negotiation forever', () async {
+    var now = 10000;
+    final first = SilentHub(fixture.a, 'relay-a'),
+        second = fixture.Hub(fixture.b, 'relay-b');
+    final networks = <RelayNetwork>[], transports = <GroupTransport>[];
+    try {
+      for (final key in ['a', 'b']) {
+        final network = RelayNetwork(
+          fixture.Crypto(did(key)),
+          connector: (url) =>
+              url == fixture.a ? first.connect(url) : second.connect(url),
+        );
+        networks.add(network);
+        await network.addSeed(fixture.a);
+        await network.addSeed(fixture.b);
+        final transport = GroupTransport(
+          ownerId: did(key),
+          crypto: FakeGroups({did('a'), did('b')}),
+          network: network,
+          signaling: QuietSeed(),
+          peerFactory: FailingDirectFactory(),
+          clock: () => now,
+        );
+        transports.add(transport);
+        await transport.start();
+      }
+      await fixture.until(() => networks.every((n) => n.online.length == 2));
+      final got = <String>[];
+      transports[1].frames.listen((f) => got.add(f.text));
+      await transports[0].connect(did('b'));
+      expect(transports[0].connected(did('b')), isFalse);
+      now += 6000;
+      await transports[0].connect(did('b'));
+      await fixture.until(
+        () =>
+            transports[0].connected(did('b')) &&
+            transports[1].connected(did('a')),
+      );
+      await transports[0].send(did('b'), 'original group payload');
+      await fixture.until(() => got.isNotEmpty);
+      expect(got, ['original group payload']);
+    } finally {
+      for (final t in transports) {
+        await t.close();
+      }
+      for (final n in networks) {
+        await n.close();
+      }
+    }
+  });
   test(
     'failed WebRTC negotiation does not block encrypted group relay delivery',
     () async {

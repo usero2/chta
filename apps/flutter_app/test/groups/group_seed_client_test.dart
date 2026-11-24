@@ -9,6 +9,7 @@ import 'package:cht/relay/relay_crypto_bridge.dart';
 import 'package:cht/relay/relay_network.dart';
 import 'package:cht/relay/relay_socket.dart';
 import 'package:cht/seed/seed_client.dart' show seedId;
+import 'package:cht/seed/seed_crypto_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const owner =
@@ -63,7 +64,15 @@ class FakeAccount implements AccountBridge {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class FakeCrypto implements GroupCryptoBridge, RelayCryptoBridge {
+class FakeCrypto
+    implements GroupCryptoBridge, RelayCryptoBridge, SeedDispatchCryptoBridge {
+  @override
+  Future<String> signSeedDispatch(
+    String seedId,
+    String connection,
+    int sequence,
+    String envelopeJson,
+  ) async => jsonEncode({'sequence': sequence, 'connection': connection});
   Completer<Map<String, Object?>>? signGate, inspectGate;
   int inspected = 0, signed = 0;
   @override
@@ -160,7 +169,7 @@ void main() {
     await client.close();
     await network.close();
   });
-  Future<void> register() async {
+  Future<void> register({bool upgraded = false}) async {
     await client.start(owner);
     socket.receive({
       'type': 'challenge',
@@ -168,6 +177,7 @@ void main() {
       'version': 1,
       'seedId': seedId,
       'nonce': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      if (upgraded) 'capabilities': ['session-dispatch-v1'],
     });
     await settle();
     socket.receive({
@@ -178,6 +188,15 @@ void main() {
     await settle();
   }
 
+  test(
+    'group negotiations use the negotiated connection dispatch capability',
+    () async {
+      await register(upgraded: true);
+      await client.send(bob, id('offer', 1), payload());
+      expect((socket.sent.last['dispatch'] as Map)['sequence'], 1);
+      expect((socket.sent.last['envelope'] as Map)['topic'], 'groups');
+    },
+  );
   test(
     'one socket dispatches independent signals from two authorized peers',
     () async {

@@ -113,6 +113,12 @@ impl NativeRuntime {
 
     fn dispatch(&mut self, command: &str, args: &Value) -> Result<Value, String> {
         match command {
+            "deliveryCall" => {
+                let owner=self.active_id.as_deref().ok_or("Unlock an identity before delivery")?;
+                let active=parse_json(self.account.identity_json().map_err(|e|e.to_string())?)?;
+                if required_string(&active,"id")?!=owner{return Err("Delivery identity mismatch".into());}
+                self.account.delivery_call(required_string(args,"operation")?,args.get("args").ok_or("Missing delivery arguments")?.clone())
+            }
             "contactRequestCall" => {
                 let owner = self.active_id.as_deref().ok_or("Unlock an identity before contact setup")?;
                 let active = parse_json(self.account.identity_json().map_err(|e| e.to_string())?)?;
@@ -511,6 +517,12 @@ impl NativeRuntime {
                 required_string(args, "nonce")?,
                 required_string(args, "relayId")?
             )?)),
+            "signSeedDispatch" => Ok(json!(self.account.sign_seed_dispatch(
+                required_string(args, "seedId")?,
+                required_string(args, "connection")?,
+                args["sequence"].as_u64().ok_or("Invalid seed sequence")?,
+                required_string(args, "envelopeJson")?
+            )?)),
             "signSeedSignal" => Ok(json!(
                 self.account.sign_seed_signal(
                     required_string(args, "peerId")?,
@@ -739,6 +751,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn seed_native_command_arguments_and_result_match_account() {
+        use base64::Engine as _;
         let folder = TestVault::new();
         let mut runtime = folder.runtime();
         let args =
@@ -767,6 +780,9 @@ mod tests {
             .add_contact(&b.contact_card().unwrap().to_json().unwrap(), "")
             .unwrap();
         runtime.account.mark_contact_verified(&peer).unwrap();
+        runtime.active_id=Some(a.public_identity().id.clone());
+        let delivery=runtime.call("deliveryCall",&json!({"operation":"signEvent","args":{"scope":"direct:test","messageId":"native-test","sentAt":1800000000000u64,"kind":"text","payload":"hello"}})).unwrap();
+        assert_eq!(delivery["messageId"],"native-test");
         let session = "0123456789abcdef0123456789abcdef";
         let message_id = format!("cht-control-direct-v1-{session}-ice-0");
         let payload=serde_json::json!({"v":1,"t":"ice","s":session,"c":"candidate:1 1 UDP 123 192.0.2.1 1234 typ host","m":null,"l":0}).to_string();
@@ -779,6 +795,15 @@ mod tests {
             runtime.call("signSeedSignal", &args).unwrap(),
             serde_json::json!(expected)
         );
+        let dispatch_args=serde_json::json!({"seedId":"e0ba672185682a830d168e31cee185b9434b49b210a7ec7a435e78fcb2a532a5",
+            "connection":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8;32]),"sequence":1,"envelopeJson":expected});
+        let dispatch_source=runtime.call("signSeedDispatch",&dispatch_args).unwrap();
+        let dispatch:serde_json::Value=serde_json::from_str(dispatch_source.as_str().unwrap()).unwrap();
+        assert_eq!(dispatch["sequence"],1);
+        for sequence in [serde_json::json!(-1),serde_json::json!(1.5),serde_json::json!(9_007_199_254_740_992u64)] {
+            let mut bad=dispatch_args.clone();bad["sequence"]=sequence;
+            assert!(runtime.call("signSeedDispatch",&bad).is_err());
+        }
         for now in [
             serde_json::json!(-1),
             serde_json::json!(1.5),

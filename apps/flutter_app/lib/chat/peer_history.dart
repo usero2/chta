@@ -9,6 +9,7 @@ import 'attachment_source.dart';
 import 'attachment_ref.dart';
 import 'attachment_store.dart';
 import 'peer_history_store.dart';
+import 'cache_policy.dart';
 
 enum DeliveryStatus { pending, sent, delivered, failed }
 
@@ -23,6 +24,12 @@ class PeerMessage {
     this.attachment,
     this.attachmentRef,
     this.thumbnailRef,
+    this.queuedForDelivery = false,
+    this.deliveryPaused = false,
+    this.failureReason,
+    this.deliveryEnvelope,
+    this.courierJobId,
+    this.repaired = false,
   }) : sentAtMilliseconds =
            sentAtMilliseconds ??
            (incoming ? null : DateTime.now().millisecondsSinceEpoch);
@@ -37,12 +44,27 @@ class PeerMessage {
   final int? sentAtMilliseconds;
   int? receivedAtMilliseconds;
   DeliveryStatus status;
+  bool queuedForDelivery;
+  bool deliveryPaused;
+  String? failureReason;
+  Map<String, Object?>? deliveryEnvelope;
+  String? courierJobId;
+  final bool repaired;
+  // Ephemeral hint tied to this message, never an evictable global ID cache.
+  // A process restart safely begins with Direct again, then retries via Relay.
+  bool lastAttemptWasDirect = false;
 
   Map<String, Object?> toJson() => {
     'id': id,
     'text': text,
     'incoming': incoming,
     'status': status.name,
+    if (queuedForDelivery) 'queuedForDelivery': true,
+    if (deliveryPaused) 'deliveryPaused': true,
+    if (failureReason != null) 'failureReason': failureReason,
+    if (deliveryEnvelope != null) 'deliveryEnvelope': deliveryEnvelope,
+    if (courierJobId != null) 'courierJobId': courierJobId,
+    if (repaired) 'repaired': true,
     'sentAtMilliseconds': sentAtMilliseconds,
     'receivedAtMilliseconds': receivedAtMilliseconds,
     if (attachment != null) 'attachment': attachment!.toJson(),
@@ -58,6 +80,17 @@ class PeerMessage {
     text: value['text'] as String,
     incoming: value['incoming'] as bool,
     status: DeliveryStatus.values.byName(value['status'] as String),
+    queuedForDelivery:
+        value['queuedForDelivery'] == true &&
+        value['incoming'] == false &&
+        value['status'] != 'delivered',
+    deliveryPaused: value['deliveryPaused'] == true,
+    failureReason: value['failureReason'] as String?,
+    deliveryEnvelope: value['deliveryEnvelope'] == null
+        ? null
+        : Map<String, Object?>.from(value['deliveryEnvelope'] as Map),
+    courierJobId: value['courierJobId'] as String?,
+    repaired: value['repaired'] == true,
     thumbnailRef: value['thumbnailRef'] == null
         ? null
         : AttachmentRef.fromJson(value['thumbnailRef'] as Map<String, dynamic>),
@@ -79,15 +112,20 @@ class PeerMessage {
 }
 
 class PeerHistory extends ChangeNotifier {
-  PeerHistory({this.store, this.attachments});
+  PeerHistory({this.store, this.attachments, int Function()? clock})
+    : _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
+  final int Function() _clock;
 
   final PeerHistoryStore? store;
   final AttachmentStore? attachments;
   final _rooms = <String, List<PeerMessage>>{};
   final _conversationGenerations = <String, int>{};
   final _tombstones = <String, Set<String>>{};
+  final _deletedBefore = <String, int>{};
   final _names = <String, String>{};
   final _avatars = <String, String>{};
+  final _dirtyRooms = <String, int>{};
+  int _saveRevision = 0;
   Future<void> _writes = Future.value();
   String? _owner;
   int _generation = 0;
@@ -96,10 +134,47 @@ class PeerHistory extends ChangeNotifier {
   bool _disposed = false;
 
   String? get ownerId => _owner;
+  Iterable<({AttachmentRef ref, bool complete})> get cacheReferences sync* {
+    for (final message in _rooms.values.expand((room) => room)) {
+      if (message.attachmentRef case final ref?) {
+        yield (
+          ref: ref,
+          complete:
+              !message.incoming || message.status == DeliveryStatus.delivered,
+        );
+      }
+      if (message.thumbnailRef case final ref?) {
+        yield (ref: ref, complete: true);
+      }
+    }
+  }
+
   int get loadGeneration => _generation;
 
-  List<PeerMessage> messagesFor(String? peerId) =>
-      peerId == null ? const [] : _rooms[peerId] ?? const [];
+  List<PeerMessage> messagesFor(String? peerId) {
+    final messages = _rooms[peerId] ?? const <PeerMessage>[];
+    if (!messages.any((m) => m.repaired)) return messages;
+    final indices = List<int>.generate(messages.length, (i) => i);
+    indices.sort((a, b) {
+      int time(PeerMessage m) =>
+          m.sentAtMilliseconds ?? m.receivedAtMilliseconds ?? -1;
+      final order = time(messages[a]).compareTo(time(messages[b]));
+      return order == 0 ? a.compareTo(b) : order;
+    });
+    return [for (final index in indices) messages[index]];
+  }
+
+  Iterable<MapEntry<String, PeerMessage>> get queuedMessages sync* {
+    for (final room in _rooms.entries) {
+      for (final message in room.value) {
+        if (!message.incoming &&
+            message.queuedForDelivery &&
+            message.status != DeliveryStatus.delivered) {
+          yield MapEntry(room.key, message);
+        }
+      }
+    }
+  }
 
   Future<void> load(String owner) async {
     final generation = ++_generation;
@@ -107,9 +182,11 @@ class PeerHistory extends ChangeNotifier {
     _rooms.clear();
     _conversationGenerations.clear();
     _tombstones.clear();
+    _deletedBefore.clear();
     _names.clear();
     _avatars.clear();
     _thumbnailJobs.clear();
+    _dirtyRooms.clear();
     await _writes;
     final source = await store?.load(owner);
     _checkOwner(owner, generation);
@@ -118,7 +195,9 @@ class PeerHistory extends ChangeNotifier {
       if (value['version'] != 1 &&
           value['version'] != 2 &&
           value['version'] != 3 &&
-          value['version'] != 4) {
+          value['version'] != 4 &&
+          value['version'] != 5 &&
+          value['version'] != 6) {
         throw const FormatException('Unsupported peer history version');
       }
       _names.addAll(
@@ -138,6 +217,10 @@ class PeerHistory extends ChangeNotifier {
           (key, value) => MapEntry(key, (value as List).cast<String>().toSet()),
         ),
       );
+      _deletedBefore.addAll(
+        (value['deletedBefore'] as Map<String, dynamic>? ?? {})
+            .cast<String, int>(),
+      );
       final rooms = value['rooms'] as Map<String, dynamic>;
       for (final entry in rooms.entries) {
         _rooms[entry.key] = (entry.value as List).map((item) {
@@ -146,7 +229,8 @@ class PeerHistory extends ChangeNotifier {
             legacy: value['version'] == 1,
           );
           // Legacy in-memory transfers cannot resume. Chunked references can.
-          if (!((message.attachmentRef?.isChunked ?? false)) &&
+          if (!message.queuedForDelivery &&
+              !((message.attachmentRef?.isChunked ?? false)) &&
               (message.status == DeliveryStatus.pending ||
                   message.status == DeliveryStatus.sent)) {
             message.status = DeliveryStatus.failed;
@@ -201,6 +285,13 @@ class PeerHistory extends ChangeNotifier {
     }
     final owner = _owner;
     final generation = _generation;
+    final roomGeneration = conversationGeneration(peerId);
+    void checkRoom() {
+      if (roomGeneration != conversationGeneration(peerId)) {
+        throw StateError('Conversation changed during attachment access');
+      }
+    }
+
     if (attachments == null) {
       for (final message in messages) {
         add(peerId, message);
@@ -210,8 +301,13 @@ class PeerHistory extends ChangeNotifier {
     if (owner == null) throw StateError('Unlock an identity first');
     return _enqueue(() async {
       _checkOwner(owner, generation);
+      checkRoom();
       final newMessages = messages
-          .where((m) => !messagesFor(peerId).any((old) => old.id == m.id))
+          .where(
+            (m) =>
+                _tombstones[peerId]?.contains(m.id) != true &&
+                !messagesFor(peerId).any((old) => old.id == m.id),
+          )
           .toList();
       if (newMessages.isEmpty) return;
       final refs = <AttachmentRef>[];
@@ -222,6 +318,7 @@ class PeerHistory extends ChangeNotifier {
               await attachments!.put(owner, message.attachment!),
         );
         _checkOwner(owner, generation);
+        checkRoom();
       }
       final previous = [for (final message in newMessages) message.attachment];
       for (var i = 0; i < newMessages.length; i++) {
@@ -231,8 +328,9 @@ class PeerHistory extends ChangeNotifier {
       final room = _rooms.putIfAbsent(peerId, () => []);
       room.addAll(newMessages);
       try {
-        await store?.save(owner, _snapshot());
+        await _saveHistory(owner, peerId: peerId);
         _checkOwner(owner, generation);
+        checkRoom();
         error = null;
       } catch (caught) {
         room.removeWhere(newMessages.contains);
@@ -331,21 +429,55 @@ class PeerHistory extends ChangeNotifier {
     _writes = pending.then(
       (_) {},
       onError: (Object caught) {
-        error = caught;
+        if (caught is! CachePolicyException) error = caught;
       },
     );
     return pending;
   }
 
+  Map<String, Object?> _metadata() => {
+    'version': 6,
+    'names': _names,
+    'avatars': _avatars,
+    'conversationGenerations': _conversationGenerations,
+    'deletedBefore': _deletedBefore,
+    'tombstones': _tombstones.map(
+      (key, values) => MapEntry(key, values.toList()),
+    ),
+  };
+
+  Future<void> _saveHistory(
+    String owner, {
+    String? peerId,
+    bool metadataOnly = false,
+  }) async {
+    final current = store;
+    final generation = _generation;
+    if (!metadataOnly) {
+      for (final id in peerId == null ? _rooms.keys.toList() : [peerId]) {
+        _dirtyRooms[id] = ++_saveRevision;
+      }
+    }
+    final revisions = Map<String, int>.of(_dirtyRooms);
+    if (current is IncrementalPeerHistoryStore) {
+      await current.saveChanges(owner, jsonEncode(_metadata()), {
+        for (final id in revisions.keys)
+          id: _rooms[id] == null
+              ? null
+              : jsonEncode(_rooms[id]!.map((m) => m.toJson()).toList()),
+      });
+    } else {
+      await current?.save(owner, _snapshot());
+    }
+    _checkOwner(owner, generation);
+    for (final entry in revisions.entries) {
+      if (_dirtyRooms[entry.key] == entry.value) _dirtyRooms.remove(entry.key);
+    }
+  }
+
   String _snapshot({Map<PeerMessage, AttachmentRef> replacements = const {}}) =>
       jsonEncode({
-        'version': 4,
-        'names': _names,
-        'avatars': _avatars,
-        'conversationGenerations': _conversationGenerations,
-        'tombstones': _tombstones.map(
-          (key, values) => MapEntry(key, values.toList()),
-        ),
+        ..._metadata(),
         'rooms': _rooms.map(
           (id, messages) => MapEntry(
             id,
@@ -389,15 +521,19 @@ class PeerHistory extends ChangeNotifier {
         updated = true;
       }
     }
-    if (updated) changed();
+    if (updated) _changed(null, metadataOnly: true);
   }
 
   int conversationGeneration(String peerId) =>
       _conversationGenerations[peerId] ?? 0;
+  bool isDeletedDelivery(String peerId, String id, int sentAt) =>
+      _tombstones[peerId]?.contains(id) == true ||
+      sentAt <= (_deletedBefore[peerId] ?? -1);
 
   Future<void> clearConversation(String peerId) {
     final generation = conversationGeneration(peerId) + 1;
     _conversationGenerations[peerId] = generation;
+    _deletedBefore[peerId] = _clock();
     final messages = _rooms.remove(peerId) ?? const <PeerMessage>[];
     _tombstones
         .putIfAbsent(peerId, () => <String>{})
@@ -406,7 +542,9 @@ class PeerHistory extends ChangeNotifier {
     final loadGeneration = _generation;
     return _enqueue(() async {
       if (owner != null) _checkOwner(owner, loadGeneration);
-      if (owner != null && store != null) await store!.save(owner, _snapshot());
+      if (owner != null && store != null) {
+        await _saveHistory(owner, peerId: peerId);
+      }
       if (owner != null) _checkOwner(owner, loadGeneration);
       error = null;
       if (!_disposed) notifyListeners();
@@ -421,8 +559,9 @@ class PeerHistory extends ChangeNotifier {
     if (_tombstones[peerId]?.contains(message.id) == true) return;
     final messages = _rooms.putIfAbsent(peerId, () => []);
     if (messages.any((item) => item.id == message.id)) return;
+    // Append to storage so existing encrypted history pages keep their hashes.
     messages.add(message);
-    changed();
+    changed(peerId);
   }
 
   void setStatus(
@@ -435,22 +574,30 @@ class PeerHistory extends ChangeNotifier {
       if (message.id != messageId) continue;
       // A late sent event must not downgrade a delivered message.
       if (message.status != DeliveryStatus.delivered) message.status = status;
+      if (status == DeliveryStatus.delivered) {
+        message.queuedForDelivery = false;
+        message.deliveryPaused = false;
+        message.failureReason = null;
+        message.lastAttemptWasDirect = false;
+      }
       if (receivedAtMilliseconds != null) {
         message.receivedAtMilliseconds ??= receivedAtMilliseconds;
       }
-      changed();
+      changed(peerId);
       return;
     }
   }
 
-  void changed() {
+  void changed([String? peerId]) => _changed(peerId);
+
+  void _changed(String? peerId, {bool metadataOnly = false}) {
     final owner = _owner;
     final generation = _generation;
     if (owner != null && store != null) {
       _writes = _writes.then((_) async {
         if (_owner != owner || generation != _generation || _disposed) return;
         try {
-          await store!.save(owner, _snapshot());
+          await _saveHistory(owner, peerId: peerId, metadataOnly: metadataOnly);
           error = null;
         } catch (caught) {
           error = caught;
@@ -461,7 +608,15 @@ class PeerHistory extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> flush() => _writes;
+  Future<void> flush() async {
+    // A save can yield while receipts/messages append another write. Await a
+    // stable queue boundary rather than only the snapshot taken on entry.
+    while (true) {
+      final pending = _writes;
+      await pending;
+      if (identical(pending, _writes)) return;
+    }
+  }
 
   @override
   void dispose() {

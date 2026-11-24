@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:image/image.dart' as image;
+
 import 'package:crypto/crypto.dart';
 import 'package:cht/chat/attachment_transfer.dart';
 import 'package:cht/chat/chat_attachment.dart';
@@ -21,6 +23,12 @@ import 'package:cht/p2p/direct_file_link.dart';
 import 'package:cht/relay/relay_crypto_bridge.dart';
 import 'package:cht/seed/seed_crypto_bridge.dart';
 import 'package:cht/seed/seed_client.dart';
+import 'package:cht/chat/messaging_service.dart';
+import 'package:cht/relay/relay_network.dart';
+
+import '../chat/messaging_service_test.dart' as service_test;
+import '../chat/durable_outbox_test.dart' show Store;
+import '../relay/relay_network_test.dart' as relay_test;
 
 import '../seed/seed_client_test.dart' as seed_test;
 import '../contact_requests/contact_request_controller_test.dart'
@@ -30,6 +38,131 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'a partially delivered album shows only its active member progress',
+    (tester) async {
+      final history = PeerHistory();
+      await history.load('did:cht:local');
+      final account = _FakeAccountBridge()
+        ..savedContacts.add(
+          const ContactView(
+            identityId: 'did:cht:peer',
+            displayName: 'Synthetic friend',
+            fingerprint: 'fixture',
+            verified: true,
+          ),
+        );
+      for (var i = 0; i < 2; i++) {
+        history.add(
+          'did:cht:peer',
+          PeerMessage(
+            id: 'album-$i',
+            text: '[image]',
+            incoming: false,
+            status: i == 0 ? DeliveryStatus.delivered : DeliveryStatus.pending,
+            queuedForDelivery: i != 0,
+            attachment: ChatAttachment(
+              name: 'fixture-$i.png',
+              mimeType: 'image/png',
+              bytes: image.encodePng(image.Image(width: 1, height: 1)),
+              groupId: 'album-fixture',
+              groupIndex: i,
+              groupCount: 2,
+            ),
+          ),
+        );
+      }
+      final key = GlobalKey<ConnectionPageState>();
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConnectionPage(
+              key: key,
+              accountBridge: account,
+              bridge: _FakeP2pBridge(),
+              targetContactId: 'did:cht:peer',
+              chatMode: true,
+              peerHistory: history,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 600));
+        key.currentState!.transferProgress.addAll({
+          'album-0': 1,
+          'album-1': .5,
+        });
+        history.changed();
+        await tester.pump();
+        expect(find.text('50%'), findsOneWidget);
+        expect(find.text('100%'), findsNothing);
+        final bubble = tester.widget<Container>(
+          find.byKey(const Key('peer-message-album-0')),
+        );
+        expect(bubble.padding, EdgeInsets.zero);
+        expect(bubble.decoration, isNull);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        history.dispose();
+      }
+    },
+  );
+  testWidgets(
+    'offline composer queues durably and changing or closing the view keeps peer transports',
+    (tester) async {
+      final history = PeerHistory(store: Store());
+      await history.load('alice');
+      final account = service_test.Account('alice', ['bob', 'carol']);
+      final service = MessagingService(
+        ownerId: 'alice',
+        account: account,
+        network: RelayNetwork(relay_test.Crypto('alice')),
+        history: history,
+        ownCard: () async => 'alice',
+        observeNetwork: false,
+      );
+      await service.start();
+      final pageKey = GlobalKey<ConnectionPageState>();
+      Widget view(String peer) => MaterialApp(
+        home: ConnectionPage(
+          key: pageKey,
+          accountBridge: account,
+          bridge: _FakeP2pBridge(),
+          targetContactId: peer,
+          chatMode: true,
+          peerHistory: history,
+          messaging: service,
+        ),
+      );
+      try {
+        await tester.pumpWidget(view('bob'));
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(find.byKey(const Key('peer-message-input')), findsOneWidget);
+        await tester.enterText(
+          find.byKey(const Key('peer-message-input')),
+          'Synthetic offline draft',
+        );
+        await tester.tap(find.byKey(const Key('send-peer-message')));
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(history.messagesFor('bob').single.queuedForDelivery, isTrue);
+        expect(find.text('Waiting for connection'), findsOneWidget);
+        final bob = service.relayFor('bob');
+        await tester.pumpWidget(view('carol'));
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(service.relayFor('bob'), same(bob));
+        expect(bob!.peerId, 'bob');
+        await tester.pumpWidget(
+          const MaterialApp(home: Scaffold(body: Text('Profile'))),
+        );
+        await service.queueText('bob', 'Still running above navigation');
+        expect(history.messagesFor('bob'), hasLength(2));
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await service.close();
+        history.dispose();
+      }
+    },
+  );
   testWidgets(
     'incoming text is acknowledged only after durable history succeeds, including retry',
     (tester) async {

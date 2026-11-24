@@ -88,11 +88,14 @@ class NativeWorker
   }
 }
 
-Future<void> until(bool Function() condition) async {
+Future<void> until(
+  bool Function() condition, {
+  String Function()? describe,
+}) async {
   final deadline = DateTime.now().add(const Duration(seconds: 20));
   while (!condition()) {
     if (DateTime.now().isAfter(deadline)) {
-      fail('Timed out waiting for synthetic group state');
+      fail(describe?.call() ?? 'Timed out waiting for synthetic group state');
     }
     await Future<void>.delayed(const Duration(milliseconds: 25));
   }
@@ -238,6 +241,94 @@ void main() {
               .any((m) => m.text == 'synthetic friend reply'),
         );
         expect(controllers.every((c) => c.onlineCount(gid) == 1), isTrue);
+        final longMarkdown = '# ข้อความยาว\n${'**เนื้อหา** 😀 \\\n' * 1200}';
+        expect(await controllers[0].sendText(gid, longMarkdown), isTrue);
+        final source = controllers[0]
+            .messagesFor(gid)
+            .singleWhere((m) => m.manifest != null)
+            .manifest!;
+        await until(
+          () => controllers[1].progressFor(source.fileId)?.complete == true,
+          describe: () => 'Long Markdown was not reconstructed via relay',
+        );
+        final received = controllers[1]
+            .messagesFor(gid)
+            .singleWhere((m) => m.manifest?.fileId == source.fileId);
+        final document = await controllers[1].openFile(received.manifest!);
+        expect(
+          await utf8.decoder.bind(document.openRead()).join(),
+          longMarkdown,
+        );
+        await until(
+          () => controllers[0]
+              .messagesFor(gid)
+              .first
+              .receipts
+              .containsKey(identities[1]),
+          describe: () => 'Initial recipient receipt stayed pending',
+        );
+        final original = controllers[0].messagesFor(gid).first;
+        for (final c in controllers) {
+          await c.flush();
+          await c.close();
+        }
+        for (final n in networks) {
+          await n.close();
+        }
+        controllers.clear();
+        networks.clear();
+        // Simulate a second installation with the roster but missing history.
+        const index = 'groups-index-v1';
+        final saved = jsonDecode(
+          (await workers[1].loadGroupBlob(identities[1], index))!,
+        ) as Map;
+        saved['rooms'] = <String, Object?>{};
+        saved['jobs'] = <String>[];
+        await workers[1].saveGroupBlob(identities[1], index, jsonEncode(saved));
+        final senderSaved = jsonDecode(
+          (await workers[0].loadGroupBlob(identities[0], index))!,
+        ) as Map;
+        senderSaved['jobs'] = <String>[];
+        await workers[0].saveGroupBlob(
+          identities[0],
+          index,
+          jsonEncode(senderSaved),
+        );
+        for (var n = 0; n < 2; n++) {
+          final network = RelayNetwork(workers[n]);
+          networks.add(network);
+          await network.addSeed(endpoint);
+          final controller = GroupController(
+            ownerId: identities[n],
+            crypto: workers[n],
+            blobs: workers[n],
+            attachments: Attachments(),
+            displayName: () => 'Synthetic member',
+          );
+          controllers.add(controller);
+          await controller.initialize();
+          controller.setCourierEnabled(true);
+          await controller.attachTransport(
+            GroupTransport(
+              ownerId: identities[n],
+              crypto: workers[n],
+              network: network,
+              signaling: RegisteredSeed(),
+              peerFactory: FailingDirectFactory(),
+            ),
+          );
+        }
+        await until(
+          () => controllers[1].messagesFor(gid).any((m) => m.id == original.id),
+          describe: () =>
+              'Missing history did not repair. Online ${controllers.map((c) => c.onlineCount(gid)).toList()}, capability ${controllers[0].supportsCourier(identities[1])}/${controllers[1].supportsCourier(identities[0])}, room counts ${controllers.map((c) => c.messagesFor(gid).length).toList()}',
+        );
+        final repaired = controllers[1]
+            .messagesFor(gid)
+            .singleWhere((m) => m.id == original.id);
+        expect(repaired.repaired, isTrue);
+        expect(repaired.sentAt, original.sentAt);
+        expect(repaired.receivedAt, isNull);
       } finally {
         for (final c in controllers) {
           await c.close();

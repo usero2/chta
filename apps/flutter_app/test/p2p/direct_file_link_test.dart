@@ -5,6 +5,27 @@ import 'package:cht/p2p/direct_file_link.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'network recovery replaces the old channel and preserves the selected peer',
+    () async {
+      final factory = FakeFactory(), signals = <String>[];
+      final link = DirectFileLink(
+        ownIdentityId: 'alice',
+        peerFactory: factory,
+        sendSignal: (id, _) async => signals.add(id),
+      );
+      await link.bind('bob', signalingAvailable: true);
+      expect(factory.peers.length, 1);
+      await link.recoverNetwork();
+      expect(factory.peers.first.closed, isTrue);
+      expect(factory.peers.length, 2);
+      expect(link.peerId, 'bob');
+      expect(signals.where((id) => id.contains('-offer-')).length, 2);
+      await link.close();
+      await link.recoverNetwork();
+      expect(factory.peers.length, 2);
+    },
+  );
   test('ICE waits behind glare disposal instead of being lost', () async {
     final gate = Completer<void>(), factory = FakeFactory();
     final link = DirectFileLink(

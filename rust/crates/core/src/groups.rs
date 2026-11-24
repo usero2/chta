@@ -401,6 +401,35 @@ impl Event {
     }
 }
 impl GroupEngine {
+    pub(crate) fn delivery_peer(
+        &self,
+        local: &str,
+        scope: &str,
+        peer: &str,
+    ) -> Result<PublicIdentity, String> {
+        let (gid, epoch) = scope
+            .rsplit_once(':')
+            .ok_or("Invalid group delivery scope")?;
+        let epoch: u32 = epoch.parse().map_err(|_| "Invalid group delivery epoch")?;
+        if !valid_group(gid) || scope != format!("{gid}:{epoch}") {
+            return Err("Invalid group delivery scope".into());
+        }
+        let current = self.active(local, gid)?;
+        if Self::member(current, peer).is_none() {
+            return Err("Courier peer is no longer a group member".into());
+        }
+        let historical = self
+            .states
+            .get(gid)
+            .and_then(|states| states.iter().find(|s| s.epoch == epoch))
+            .ok_or("Unknown group delivery epoch")?;
+        if historical.closed || Self::member(historical, local).is_none() {
+            return Err("Not a member of delivery epoch".into());
+        }
+        Self::member(historical, peer)
+            .map(|m| m.identity.clone())
+            .ok_or("Peer is not a member of delivery epoch".into())
+    }
     fn latest(&self, gid: &str) -> Result<&State, String> {
         self.states
             .get(gid)

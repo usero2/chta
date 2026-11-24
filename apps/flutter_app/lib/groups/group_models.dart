@@ -85,7 +85,14 @@ class GroupMessage {
     this.receivedAt,
     this.manifest,
     Map<String, int>? receipts,
-  }) : receipts = receipts ?? {};
+    this.deliveryEnvelope,
+    this.repaired = false,
+    Map<String, String>? courierJobs,
+  }) : receipts = receipts ?? {},
+       courierJobs = courierJobs ?? {};
+  Map<String, Object?>? deliveryEnvelope;
+  final Map<String, String> courierJobs;
+  final bool repaired;
   final String id, groupId, senderId, senderName, text, event;
   final int sentAt;
   final int? receivedAt;
@@ -104,6 +111,9 @@ class GroupMessage {
     'receivedAt': receivedAt,
     'recipients': recipients,
     'receipts': receipts,
+    if (deliveryEnvelope != null) 'deliveryEnvelope': deliveryEnvelope,
+    if (courierJobs.isNotEmpty) 'courierJobs': courierJobs,
+    if (repaired) 'repaired': true,
     if (manifest != null) 'manifest': manifest!.toJson(),
   };
   factory GroupMessage.fromJson(Map<String, dynamic> v) => GroupMessage(
@@ -115,9 +125,16 @@ class GroupMessage {
     event: v['event'] as String,
     sentAt: v['sentAt'] as int,
     receivedAt: v['receivedAt'] as int?,
+    repaired: v['repaired'] == true,
     recipients: (v['recipients'] as List).cast<String>(),
     receipts: Map<String, dynamic>.from(v['receipts'] as Map)
         .cast<String, int>(),
+    deliveryEnvelope: v['deliveryEnvelope'] == null
+        ? null
+        : Map<String, Object?>.from(v['deliveryEnvelope'] as Map),
+    courierJobs: v['courierJobs'] == null
+        ? null
+        : Map<String, String>.from(v['courierJobs'] as Map),
     manifest: v['manifest'] == null
         ? null
         : SwarmManifest.fromJson(

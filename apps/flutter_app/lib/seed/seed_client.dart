@@ -11,6 +11,7 @@ import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
 import '../relay/relay_socket.dart';
 import 'seed_crypto_bridge.dart';
+import 'seed_dispatch.dart';
 import '../contact_requests/contact_request_transport.dart';
 
 final seedId = sha256.convert(utf8.encode('chta.app/relay/v1')).toString();
@@ -32,11 +33,13 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
     required this.signalCrypto,
     required this.network,
     this.acceptIncomingPeer,
+    this.multiPeer = false,
     RelayConnector? connector,
     int Function()? clock,
     this.endpoint = defaultSeedUrl,
   }) : connector = connector ?? openRelaySocket,
        _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
+  final bool multiPeer;
   final RelayCryptoBridge relayCrypto;
   final AccountBridge account;
   final SeedCryptoBridge signalCrypto;
@@ -62,12 +65,33 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
   int _lastAlive = 0, _presenceAt = 0;
   bool _online = false;
   Future<void> _incoming = Future.value();
+  final _dispatch = SeedDispatchSession();
+  final _courierRecords = StreamController<List<Object?>>.broadcast();
+  Stream<List<Object?>> get courierRecords => _courierRecords.stream;
+  bool _courierCapable = false;
+  List<Object?> _courierCatalog = const [];
+  void publishCouriers(List<Object?> records) {
+    if (_closed) return;
+    if (records.length > 8 || utf8.encode(jsonEncode(records)).length > 12000) {
+      throw const FormatException('Courier catalog too large');
+    }
+    _courierCatalog = List.unmodifiable(records);
+    if (_registered && _courierCapable) {
+      _send({'type': 'couriers', 'records': _courierCatalog});
+    }
+  }
+
+  bool _storageUnavailable = false;
+  bool get storageUnavailable => _storageUnavailable;
   @override
   bool get registered => _registered;
+  bool get needsRecovery => !_registered || _clock() - _lastAlive > 35000;
   String? get selectedPeer => _selectedPeer;
   bool get peerOnline =>
       _registered && _online && _clock() - _presenceAt < 30000;
-  String get status => _registered
+  String get status => _storageUnavailable
+      ? 'Seed · update required'
+      : _registered
       ? 'Seed · connected'
       : _owner == null
       ? 'Seed · offline'
@@ -101,6 +125,18 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
 
   static bool _did(Object? value) =>
       value is String && RegExp(r'^did:cht:[0-9a-f]{64}$').hasMatch(value);
+  Future<void> recoverNetwork() async {
+    if (_closed || _owner == null) return;
+    final selected = _selectedPeer;
+    _drop(_generation);
+    _retry?.cancel();
+    _retry = null;
+    _attempt = 0;
+    _selectedPeer = selected;
+    final generation = _generation;
+    if (_current(generation)) await _connect(generation);
+  }
+
   Future<void> _connect(int generation) async {
     try {
       final uri = Uri.parse(endpoint);
@@ -190,6 +226,12 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
           value['nonce'] is String &&
           RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(value['nonce'] as String)) {
         _challenged = true;
+        _courierCapable =
+            (value['capabilities'] as List?)?.contains(
+              'courier-directory-v1',
+            ) ==
+            true;
+        _dispatch.configure(value, seedId, signalCrypto);
         final proof = jsonDecode(
           await relayCrypto.relayProof(value['nonce'] as String, seedId),
         ) as Map<String, dynamic>;
@@ -206,6 +248,7 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
           value['protocol'] == 'chta-seed' &&
           value['version'] == 1) {
         _registered = true;
+        _storageUnavailable = false;
         _attempt = 0;
         _lastAlive = _clock();
         _challengeDeadline?.cancel();
@@ -217,12 +260,28 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
           _send({'type': 'lookup', 'identityId': _selectedPeer});
         }
         _publishCatalog();
+        if (_courierCapable) {
+          _send({'type': 'couriers', 'records': _courierCatalog});
+        }
         notifyListeners();
         return;
       }
       throw const FormatException('Unexpected seed registration frame');
     }
     switch (value['type']) {
+      case 'couriers':
+        if (!_courierCapable ||
+            value['records'] is! List ||
+            (value['records'] as List).length > 8) {
+          throw const FormatException('Unexpected Courier directory');
+        }
+        _courierRecords.add(List<Object?>.from(value['records'] as List));
+      case 'error':
+        if (value['code'] != 'storage-unavailable') {
+          throw const FormatException('Unexpected seed error');
+        }
+        _storageUnavailable = true;
+        _drop(generation);
       case 'alive':
         _lastAlive = _clock();
       case 'presence':
@@ -271,7 +330,7 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
         }
         final peer = envelope['from'] as String;
         final incoming = peer != selected;
-        if (incoming && acceptIncomingPeer == null) return;
+        if (incoming && !multiPeer && acceptIncomingPeer == null) return;
         final expires = envelope['expiresAt'];
         if (expires is! int ||
             expires <= _clock() ||
@@ -287,8 +346,8 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
             ),
           ) as Map<String, dynamic>;
           if (!await _active(generation) ||
-              selection != _selection ||
-              selected != _selectedPeer ||
+              (!multiPeer &&
+                  (selection != _selection || selected != _selectedPeer)) ||
               inspected['peerId'] != peer ||
               expires <= _clock()) {
             return;
@@ -298,7 +357,14 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
           _replays.removeWhere((_, until) => until <= _clock());
           final key = '$peer\u0000$id';
           if (_replays.containsKey(key) || _replays.length >= 2048) return;
-          if (incoming) {
+          if (multiPeer) {
+            final known = await account.contacts();
+            if (!known.any((c) => c.identityId == peer && c.verified) ||
+                !await _active(generation)) {
+              return;
+            }
+          }
+          if (incoming && !multiPeer) {
             final packet = jsonDecode(text);
             if (packet is! Map || packet['v'] != 1 || packet['t'] != 'offer') {
               return;
@@ -341,6 +407,9 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
         _send({'type': 'lookup', 'identityId': _selectedPeer});
       }
       _publishCatalog();
+      if (_courierCapable) {
+        _send({'type': 'couriers', 'records': _courierCatalog});
+      }
     } catch (_) {
       _drop(generation);
     } finally {
@@ -375,10 +444,19 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
     if (records.isNotEmpty) _send({'type': 'catalog', 'records': records});
   }
 
-  Future<void> sendSignal(String messageId, String text) async {
-    final peer = _selectedPeer,
-        generation = _generation,
-        selection = _selection;
+  Future<void> sendSignal(String messageId, String text) =>
+      _sendSignal(_selectedPeer, messageId, text, selectedOnly: true);
+
+  Future<void> sendPeerSignal(String peer, String messageId, String text) =>
+      _sendSignal(peer, messageId, text, selectedOnly: false);
+
+  Future<void> _sendSignal(
+    String? destination,
+    String messageId,
+    String text, {
+    required bool selectedOnly,
+  }) async {
+    final peer = destination, generation = _generation, selection = _selection;
     final packet = jsonDecode(text);
     if (!messageId.startsWith('cht-control-direct-v1-') ||
         packet is! Map ||
@@ -386,23 +464,35 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
         !['offer', 'answer', 'ice'].contains(packet['t'])) {
       throw const FormatException('Seed accepts WebRTC control only');
     }
-    if (!_registered || peer == null) throw StateError('Seed unavailable');
+    if (!_registered || peer == null || (!selectedOnly && !multiPeer)) {
+      throw StateError('Seed unavailable');
+    }
+    if (!selectedOnly &&
+        !(await account.contacts()).any(
+          (c) => c.identityId == peer && c.verified,
+        )) {
+      throw StateError('Verify friend first');
+    }
     if (!await _active(generation)) throw StateError('Identity changed');
     final envelope = jsonDecode(
       await signalCrypto.signSeedSignal(peer, messageId, text, _clock()),
     );
     if (!await _active(generation) ||
         !_registered ||
-        selection != _selection ||
-        peer != _selectedPeer) {
+        (selectedOnly && (selection != _selection || peer != _selectedPeer))) {
       throw StateError('Seed session changed');
     }
-    final frame = {'type': 'signal', 'envelope': envelope};
-    if (utf8.encode(jsonEncode(frame)).length > 16384) {
-      throw const FormatException('Signal too large');
-    }
     try {
-      _send(frame);
+      await _dispatch.send(
+        Map<String, dynamic>.from(envelope as Map),
+        crypto: signalCrypto,
+        isActive: () async =>
+            await _active(generation) &&
+            _registered &&
+            (!selectedOnly ||
+                (selection == _selection && peer == _selectedPeer)),
+        emit: _send,
+      );
     } catch (_) {
       _drop(generation);
       rethrow;
@@ -423,12 +513,13 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
     if (!await _active(generation) || !_registered) {
       throw StateError('Identity changed');
     }
-    final frame = {'type': 'signal', 'envelope': envelope};
-    if (utf8.encode(jsonEncode(frame)).length > 16384) {
-      throw const FormatException('Contact setup too large');
-    }
     try {
-      _send(frame);
+      await _dispatch.send(
+        Map<String, dynamic>.from(envelope),
+        crypto: signalCrypto,
+        isActive: () async => await _active(generation) && _registered,
+        emit: _send,
+      );
     } catch (_) {
       _drop(generation);
       rethrow;
@@ -438,6 +529,7 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
   void _drop(int generation) {
     if (!_current(generation)) return;
     _generation++;
+    _dispatch.reset();
     _registered = false;
     _online = false;
     _heartbeat?.cancel();
@@ -447,14 +539,23 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
     _socket = null;
     final next = _generation;
     _retry?.cancel();
-    _retry = Timer(Duration(seconds: min(30, 1 << min(_attempt++, 5))), () {
-      if (_current(next)) unawaited(_connect(next));
-    });
+    _retry = Timer(
+      Duration(
+        seconds: _storageUnavailable ? 300 : min(30, 1 << min(_attempt++, 5)),
+      ),
+      () {
+        if (_current(next)) unawaited(_connect(next));
+      },
+    );
     notifyListeners();
   }
 
   Future<void> stop() async {
     _generation++;
+    _courierCapable = false;
+    _courierCatalog = const [];
+    _dispatch.reset();
+    _storageUnavailable = false;
     _selection++;
     _owner = null;
     _selectedPeer = null;
@@ -481,6 +582,7 @@ class SeedClient extends ChangeNotifier implements ContactRequestTransport {
     await stop();
     await _signals.close();
     await _contactRequests.close();
+    await _courierRecords.close();
     dispose();
   }
 }

@@ -20,13 +20,17 @@ class PeerFileController {
     required this.onPacket,
     required this.onReceipt,
     this.onChanged,
+    this.autoResume = true,
+    bool automaticRetries = true,
     int Function()? clock,
     DirectPeerFactory? peerFactory,
   }) : _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch) {
-    _retryTimer = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => unawaited(_retryMessages()),
-    );
+    if (automaticRetries) {
+      _retryTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => unawaited(_retryMessages()),
+      );
+    }
     link = DirectFileLink(
       ownIdentityId: ownerId,
       allowEitherInitiator: true,
@@ -39,6 +43,7 @@ class PeerFileController {
     });
   }
   final String ownerId;
+  final bool autoResume;
   final ChunkedAttachmentBridge cache;
   final PeerHistory history;
   final DirectSignalSender sendEncryptedControl;
@@ -81,6 +86,20 @@ class PeerFileController {
   bool _current(int generation, String peer) =>
       !_closed && generation == _generation && peer == _peer;
 
+  Future<void> recoverNetwork() async {
+    if (_closed) return;
+    _generation++;
+    _transfer?.dispose();
+    _transfer = null;
+    _running.clear();
+    _pendingMessages.clear();
+    _seedValidated = false;
+    _noiseValidated = false;
+    if (_peer != null && _capable) _createTransfer(_peer!, _generation);
+    await link.recoverNetwork();
+    if (!_closed) onChanged?.call();
+  }
+
   /// Forget local work for a deleted conversation, retaining its live channel.
   void cancelPendingFor(String identityId) {
     if (_closed || _peer != identityId) return;
@@ -91,6 +110,12 @@ class PeerFileController {
     _pendingMessages.clear();
     progress.clear();
     if (_capable) _createTransfer(identityId, _generation);
+    onChanged?.call();
+  }
+
+  void interruptTransfer(String id) {
+    _transfer?.interrupt(id);
+    progress.remove(id);
     onChanged?.call();
   }
 
@@ -186,6 +211,35 @@ class PeerFileController {
       peerId: peer,
       bridge: cache,
       isDirect: () => ready,
+      checkIncoming: (id) {
+        final message = history
+            .messagesFor(peer)
+            .where((m) => m.id == id && m.incoming)
+            .firstOrNull;
+        if (message?.deliveryPaused == true) {
+          if (message!.failureReason == 'Cancelled') {
+            throw const TransferRejected('Cancelled by recipient');
+          }
+          throw const TransferInterrupted('Paused by recipient');
+        }
+      },
+      onReceipt: (id, time) {
+        if (!_current(generation, peer)) return;
+        final message = history
+            .messagesFor(peer)
+            .where(
+              (m) =>
+                  m.id == id &&
+                  !m.incoming &&
+                  m.attachmentRef?.isChunked == true,
+            )
+            .firstOrNull;
+        if (message == null || message.status == DeliveryStatus.delivered) {
+          return;
+        }
+        progress.remove(id);
+        onReceipt(id, time);
+      },
       sendPacket: (id, text) async {
         if (!_current(generation, peer)) throw const TransferInterrupted();
         if (ready) {
@@ -246,12 +300,12 @@ class PeerFileController {
             previousStatus = message.status;
         message.receivedAtMilliseconds = received;
         message.status = DeliveryStatus.delivered;
-        history.changed();
+        history.changed(peer);
         await history.flush();
         if (history.error != null) {
           message.receivedAtMilliseconds = previousTime;
           message.status = previousStatus;
-          history.changed();
+          history.changed(peer);
           throw StateError('Could not persist delivered file');
         }
         if (!_current(generation, peer)) throw const TransferInterrupted();
@@ -259,7 +313,16 @@ class PeerFileController {
       },
       onProgress: (id, value, incoming) {
         if (_current(generation, peer)) {
-          progress[id] = value;
+          if (value.phase == FileTransferPhase.completed ||
+              history
+                  .messagesFor(peer)
+                  .any(
+                    (m) => m.id == id && m.status == DeliveryStatus.delivered,
+                  )) {
+            progress.remove(id);
+          } else {
+            progress[id] = value;
+          }
           onChanged?.call();
         }
       },
@@ -500,7 +563,7 @@ class PeerFileController {
     var drainNext = true;
     try {
       message.status = DeliveryStatus.pending;
-      history.changed();
+      history.changed(peer);
       final received = await transfer.send(
         message.id,
         ref!,
@@ -513,16 +576,29 @@ class PeerFileController {
       return received;
     } on TransferInterrupted {
       drainNext = false;
-      if (_current(generation, peer)) {
+      if (_current(generation, peer) &&
+          !message.deliveryPaused &&
+          message.status != DeliveryStatus.delivered) {
         message.status = DeliveryStatus.pending;
-        history.changed();
+        history.changed(peer);
       }
       rethrow;
-    } catch (_) {
-      if (_current(generation, peer)) {
+    } on TransferRejected {
+      if (_current(generation, peer) &&
+          !message.deliveryPaused &&
+          message.status != DeliveryStatus.delivered) {
         history.setStatus(peer, message.id, DeliveryStatus.failed);
       }
       rethrow;
+    } catch (_) {
+      drainNext = false;
+      if (_current(generation, peer) &&
+          !message.deliveryPaused &&
+          message.status != DeliveryStatus.delivered) {
+        message.status = DeliveryStatus.pending;
+        history.changed(peer);
+      }
+      throw const TransferInterrupted();
     } finally {
       if (_current(generation, peer)) {
         _running.remove(message.id);
@@ -532,6 +608,7 @@ class PeerFileController {
   }
 
   Future<void> resumePending() async {
+    if (!autoResume) return;
     if (_closed || !_capable || _peer == null || _transfer == null) return;
     if (!ready && !_fallbackAuthenticated) return;
     for (final message in history.messagesFor(_peer).toList()) {

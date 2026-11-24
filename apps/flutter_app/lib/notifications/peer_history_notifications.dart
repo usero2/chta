@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../chat/chat_attachment.dart';
 import '../chat/peer_history.dart';
 import 'incoming_notifications.dart';
 
@@ -43,6 +44,7 @@ class PeerHistoryNotifications {
       for (final message in history.messagesFor(contact.identityId)) {
         final key = (contact.identityId, message.id);
         if (!message.incoming ||
+            message.repaired ||
             message.status != DeliveryStatus.delivered ||
             message.id.startsWith('cht-control-') ||
             message.id.startsWith('chtatt1_') ||
@@ -79,6 +81,8 @@ class PeerHistoryNotifications {
         return;
       }
       _completed.add(key);
+      final mimeType =
+          message.attachmentRef?.mimeType ?? message.attachment?.mimeType;
       await notifications.notifyIncoming(
         peerId: peerId,
         displayName: name,
@@ -87,6 +91,11 @@ class PeerHistoryNotifications {
             ? IncomingNotificationKind.file
             : IncomingNotificationKind.message,
         fileName: message.attachmentRef?.name ?? message.attachment?.name,
+        messageText: message.hasAttachment ? null : message.text,
+        markdownSize: message.attachmentRef?.size ?? message.attachment?.size,
+        loadMarkdown: mimeType?.toLowerCase() == ChatAttachment.markdownMimeType
+            ? () => history.resolveAttachment(message)
+            : null,
       );
     } finally {
       if (generation == _generation) _pending.remove(key);

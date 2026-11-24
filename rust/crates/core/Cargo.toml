@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 base64 = "0.22.1"
+chacha20poly1305 = "0.10.1"
 bip39 = { version = "3.0.0", features = ["zeroize"] }
 ed25519-dalek = "3.0.0"
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
@@ -25,7 +26,6 @@ cht-relay-protocol = { path = "../relay_protocol" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 argon2 = "0.5.3"
-chacha20poly1305 = "0.10.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.107"

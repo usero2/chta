@@ -161,6 +161,38 @@ class FailOnceReceiptBlobs extends Blobs {
 }
 
 void main() {
+  test('long group text survives restart as one Markdown swarm file', () async {
+    final blobs = Blobs(), attachments = Attachments();
+    GroupController create() => GroupController(
+      ownerId: owner,
+      crypto: ModelCrypto(),
+      blobs: blobs,
+      attachments: attachments,
+      displayName: () => 'Alice',
+    );
+    final text = '    # ตัวอย่าง\n${'บรรทัด **Markdown** 😀\n' * 1100}\n';
+    final sender = create();
+    try {
+      await sender.initialize();
+      await sender.createGroup('Team', []);
+      expect(await sender.sendText(gid, text), isTrue);
+      expect(sender.messagesFor(gid).single.manifest?.name, endsWith('.md'));
+    } finally {
+      await sender.close();
+    }
+    final reopened = create();
+    try {
+      await reopened.initialize();
+      final message = reopened.messagesFor(gid).single;
+      expect(reopened.pendingJobCount, 1);
+      final file = await reopened.openFile(message.manifest!);
+      expect(file.mimeType, 'text/markdown');
+      expect(await utf8.decoder.bind(file.openRead()).join(), text);
+    } finally {
+      await reopened.close();
+    }
+  });
+
   test(
     'group history and offline outbox restore; local delete keeps membership',
     () async {

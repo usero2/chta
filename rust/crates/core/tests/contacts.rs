@@ -37,6 +37,8 @@ fn relay_catalog_capability_is_signed_and_verified() {
     let identity = IdentityManager::create().unwrap();
     let card = identity.contact_card().unwrap().to_json().unwrap();
     let verified = ContactStore::verify_card(&card).unwrap();
+    assert!(verified.card.capabilities.iter().any(|v|v=="delivery-v2"));
+    assert!(verified.card.capabilities.iter().any(|v|v=="courier-v1"));
     assert!(
         verified
             .card

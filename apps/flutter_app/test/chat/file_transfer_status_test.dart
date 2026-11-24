@@ -4,6 +4,43 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'completed streamed transfer leaves no status row or progress gap',
+    (tester) async {
+      await tester.pumpWidget(
+        _screen(
+          const TransferProgressSnapshot(
+            confirmedBytes: 100,
+            totalBytes: 100,
+            bytesPerSecond: 0,
+            transport: 'Relay',
+            phase: FileTransferPhase.completed,
+          ),
+        ),
+      );
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.textContaining('Completed'), findsNothing);
+    },
+  );
+  testWidgets(
+    'failed transfer is a compact error without a stale percentage bar',
+    (tester) async {
+      await tester.pumpWidget(
+        _screen(
+          const TransferProgressSnapshot(
+            confirmedBytes: 100,
+            totalBytes: 100,
+            bytesPerSecond: 0,
+            transport: 'Direct',
+            phase: FileTransferPhase.failed,
+          ),
+        ),
+      );
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.textContaining('100%'), findsNothing);
+      expect(find.textContaining('failed'), findsOneWidget);
+    },
+  );
   testWidgets('compact status shows direct bytes and speed without overflow', (
     tester,
   ) async {

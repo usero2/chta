@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../attachment_export.dart';
 import '../attachment_files.dart';
 import '../chat_attachment.dart';
 import '../media_item.dart';
@@ -12,6 +13,7 @@ import 'media_viewer.dart';
 export 'media_viewer.dart' show AttachmentMediaControls;
 import '../peer_history.dart';
 import 'message_bubble.dart';
+import 'media_caption.dart';
 
 class CachedAttachmentContent extends StatefulWidget {
   const CachedAttachmentContent({
@@ -101,11 +103,25 @@ class AttachmentContent extends StatelessWidget {
   final ChatAttachment attachment;
   final bool incoming;
   final Future<Uint8List?> Function()? loadThumbnail;
+
+  Future<String> _readMarkdown() async {
+    if (!attachment.isStreamed) {
+      return utf8.decode(attachment.bytes, allowMalformed: true);
+    }
+    final bytes = BytesBuilder(copy: false);
+    await writeAttachmentToSink(attachment, (part) async => bytes.add(part));
+    return utf8.decode(bytes.takeBytes(), allowMalformed: true);
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (attachment.kind == 'video' && !attachment.isStreamed) {
+    final visualMedia =
+        attachment.kind == 'image' || attachment.kind == 'video';
+    if (visualMedia && !attachment.isStreamed) {
       return MediaAlbum(
-        key: ObjectKey(attachment.bytes),
+        key: ObjectKey(
+          attachment.isStreamed ? attachment.source : attachment.bytes,
+        ),
         items: [
           MediaItem(
             id: attachment.name,
@@ -120,10 +136,18 @@ class AttachmentContent extends StatelessWidget {
         ],
       );
     }
-    final color = incoming ? const Color(0xFFECECEC) : const Color(0xFF0B0B0B);
-    final isMarkdown = attachment.name.toLowerCase().endsWith('.md');
+    final color = visualMedia
+        ? Theme.of(context).colorScheme.onSurface
+        : incoming
+        ? const Color(0xFFECECEC)
+        : const Color(0xFF0B0B0B);
+    final canReadMarkdown =
+        attachment.name.toLowerCase().endsWith('.md') &&
+        (!attachment.isStreamed ||
+            attachment.size <= ChatAttachment.maxLongMessageBytes);
     final canOpen =
-        !attachment.isStreamed && (attachment.kind != 'file' || isMarkdown);
+        canReadMarkdown ||
+        (!attachment.isStreamed && attachment.kind != 'file');
     Future<void> save() async {
       try {
         await saveChatAttachment(attachment);
@@ -137,7 +161,7 @@ class AttachmentContent extends StatelessWidget {
     }
 
     void open() {
-      if (attachment.kind == 'image') {
+      if (attachment.kind == 'audio') {
         Navigator.of(context).push(
           MaterialPageRoute<void>(
             fullscreenDialog: true,
@@ -154,35 +178,30 @@ class AttachmentContent extends StatelessWidget {
             ),
           ),
         );
-      } else if (attachment.kind == 'audio' || attachment.kind == 'video') {
+      } else if (canReadMarkdown) {
+        final markdown = _readMarkdown();
         Navigator.of(context).push(
           MaterialPageRoute<void>(
             fullscreenDialog: true,
-            builder: (_) => MediaViewer(
-              items: [
-                MediaItem(
-                  id: attachment.name,
-                  name: attachment.name,
-                  kind: attachment.kind,
-                  incoming: incoming,
-                  loadFile: () async => attachment,
-                ),
-              ],
-            ),
-          ),
-        );
-      } else if (isMarkdown) {
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            fullscreenDialog: true,
-            builder: (_) => Scaffold(
+            builder: (readerContext) => Scaffold(
               appBar: AppBar(title: Text(attachment.name)),
-              body: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: ChatMarkdown(
-                  text: utf8.decode(attachment.bytes, allowMalformed: true),
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
+              body: FutureBuilder<String>(
+                future: markdown,
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return const Center(child: Text('Could not read file.'));
+                  }
+                  if (!snapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: ChatMarkdown(
+                      text: snapshot.data!,
+                      color: Theme.of(readerContext).colorScheme.onSurface,
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -194,21 +213,6 @@ class AttachmentContent extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (attachment.kind == 'image' && !attachment.isStreamed)
-          InkWell(
-            onTap: open,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.memory(
-                attachment.bytes,
-                width: 220,
-                height: 110,
-                fit: BoxFit.cover,
-                errorBuilder: (_, _, _) =>
-                    Icon(Icons.broken_image, color: color),
-              ),
-            ),
-          ),
         InkWell(
           onTap: canOpen ? open : null,
           child: Row(
@@ -219,6 +223,8 @@ class AttachmentContent extends StatelessWidget {
                     ? Icons.audio_file
                     : attachment.kind == 'video'
                     ? Icons.play_circle
+                    : canReadMarkdown
+                    ? Icons.article_outlined
                     : Icons.insert_drive_file,
                 size: 20,
                 color: color,
@@ -256,14 +262,67 @@ class AttachmentContent extends StatelessWidget {
             ],
           ),
         ),
-        if (attachment.caption?.isNotEmpty == true)
+        if (attachment.caption?.trim().isNotEmpty == true && visualMedia)
+          MediaCaption(text: attachment.caption!, incoming: incoming)
+        else if (!visualMedia && attachment.caption?.isNotEmpty == true)
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: ChatMarkdown(text: attachment.caption!, color: color),
           ),
+        if (canReadMarkdown) ...[
+          _MarkdownPreview(attachment: attachment, color: color),
+          Divider(height: 1, color: color.withValues(alpha: .22)),
+          TextButton(
+            onPressed: open,
+            style: TextButton.styleFrom(
+              foregroundColor: color,
+              visualDensity: VisualDensity.compact,
+            ),
+            child: const Text('Read more'),
+          ),
+        ],
       ],
     );
   }
+}
+
+class _MarkdownPreview extends StatefulWidget {
+  const _MarkdownPreview({required this.attachment, required this.color});
+
+  final ChatAttachment attachment;
+  final Color color;
+
+  @override
+  State<_MarkdownPreview> createState() => _MarkdownPreviewState();
+}
+
+class _MarkdownPreviewState extends State<_MarkdownPreview> {
+  late Future<String> _preview = widget.attachment.readTextExcerpt(300);
+
+  @override
+  void didUpdateWidget(covariant _MarkdownPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment != widget.attachment) {
+      _preview = widget.attachment.readTextExcerpt(300);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<String>(
+    future: _preview,
+    builder: (context, snapshot) {
+      final preview = snapshot.data;
+      if (snapshot.connectionState != ConnectionState.done ||
+          preview == null ||
+          preview.isEmpty) {
+        return const SizedBox.shrink();
+      }
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text(preview, style: TextStyle(color: widget.color)),
+      );
+    },
+  );
 }
 
 String _size(int bytes) => bytes < 1024

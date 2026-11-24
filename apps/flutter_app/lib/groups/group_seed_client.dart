@@ -9,6 +9,7 @@ import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
 import '../relay/relay_socket.dart';
 import '../seed/seed_client.dart' show defaultSeedUrl, seedId;
+import '../seed/seed_dispatch.dart';
 import 'group_crypto_bridge.dart';
 
 class GroupSeedSignal {
@@ -62,6 +63,8 @@ class GroupSeedClient extends ChangeNotifier {
       _challenged = false,
       _flushing = false;
   String? _owner;
+  final _dispatch = SeedDispatchSession();
+  bool _storageUnavailable = false;
 
   static final _did = RegExp(r'^did:cht:[0-9a-f]{64}$');
   static final _session = RegExp(r'^[0-9a-f]{32}$');
@@ -269,6 +272,7 @@ class GroupSeedClient extends ChangeNotifier {
           value['nonce'] is String &&
           RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(value['nonce'])) {
         _challenged = true;
+        _dispatch.configure(value, seedId, crypto);
         final proof = jsonDecode(
           await relayCrypto.relayProof(value['nonce'] as String, seedId),
         );
@@ -285,6 +289,7 @@ class GroupSeedClient extends ChangeNotifier {
           value['protocol'] == 'chta-seed' &&
           value['version'] == 1) {
         _registered = true;
+        _storageUnavailable = false;
         _attempt = 0;
         _lastAlive = _clock();
         _challengeDeadline?.cancel();
@@ -300,6 +305,12 @@ class GroupSeedClient extends ChangeNotifier {
       throw const FormatException('Unexpected seed registration frame');
     }
     switch (value['type']) {
+      case 'error':
+        if (value['code'] != 'storage-unavailable') {
+          throw const FormatException('Unexpected seed error');
+        }
+        _storageUnavailable = true;
+        _drop(generation);
       case 'alive':
         _lastAlive = _clock();
       case 'catalog':
@@ -503,11 +514,15 @@ class GroupSeedClient extends ChangeNotifier {
               e['payload'] != item.text) {
             throw const FormatException('Invalid signed signal');
           }
-          final frame = {'type': 'signal', 'envelope': e};
-          if (utf8.encode(jsonEncode(frame)).length > 16384) {
-            throw const FormatException('Signal too large');
-          }
-          _send(frame);
+          await _dispatch.send(
+            Map<String, dynamic>.from(e),
+            crypto: crypto,
+            isActive: () async =>
+                _current(generation) &&
+                _registered &&
+                await _active(generation),
+            emit: _send,
+          );
           _sentAt.add(_clock());
           item.done.complete();
         } catch (error, stack) {
@@ -543,6 +558,7 @@ class GroupSeedClient extends ChangeNotifier {
   void _drop(int generation) {
     if (!_current(generation)) return;
     _generation++;
+    _dispatch.reset();
     _registered = false;
     _heartbeat?.cancel();
     _challengeDeadline?.cancel();
@@ -554,14 +570,21 @@ class GroupSeedClient extends ChangeNotifier {
     _socket = null;
     final next = _generation;
     _retry?.cancel();
-    _retry = Timer(Duration(seconds: min(30, 1 << min(_attempt++, 5))), () {
-      if (_current(next)) unawaited(_connect(next));
-    });
+    _retry = Timer(
+      Duration(
+        seconds: _storageUnavailable ? 300 : min(30, 1 << min(_attempt++, 5)),
+      ),
+      () {
+        if (_current(next)) unawaited(_connect(next));
+      },
+    );
     notifyListeners();
   }
 
   Future<void> stop() async {
     _generation++;
+    _dispatch.reset();
+    _storageUnavailable = false;
     _owner = null;
     _registered = false;
     _attempt = 0;

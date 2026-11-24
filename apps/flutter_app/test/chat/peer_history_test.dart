@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cht/chat/peer_history.dart';
@@ -7,6 +8,63 @@ import 'package:cht/chat/peer_history_store_native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('forwardable delivery metadata survives storage and deletion blocks unseen old backfill', () async {
+    var time = 2000;
+    final store = _Store(), h = PeerHistory(store: store, clock: () => time);
+    await h.load('owner');
+    final m = PeerMessage(
+      id: 'one',
+      text: 'hello',
+      incoming: false,
+      status: DeliveryStatus.pending,
+      sentAtMilliseconds: 1000,
+      deliveryEnvelope: {
+        'version': 2,
+        'event': {'messageId': 'one'},
+        'payload': '{}',
+      },
+      courierJobId: 'a' * 32,
+    );
+    h.add('friend', m);
+    await h.flush();
+    final loaded = PeerHistory(store: store, clock: () => time);
+    await loaded.load('owner');
+    expect(
+      loaded.messagesFor('friend').single.deliveryEnvelope,
+      m.deliveryEnvelope,
+    );
+    expect(loaded.messagesFor('friend').single.courierJobId, 'a' * 32);
+    await loaded.clearConversation('friend');
+    expect(loaded.isDeletedDelivery('friend', 'unseen-old', 1500), isTrue);
+    expect(loaded.isDeletedDelivery('friend', 'new', 2001), isFalse);
+    final reopened = PeerHistory(store: store, clock: () => time);
+    await reopened.load('owner');
+    expect(reopened.isDeletedDelivery('friend', 'unseen-old', 1500), isTrue);
+    h.dispose();
+    loaded.dispose();
+    reopened.dispose();
+  });
+  test(
+    'flush includes writes appended while an earlier save is pending',
+    () async {
+      final store = _GatedStore();
+      final h = PeerHistory(store: store);
+      await h.load('owner');
+      h.add('friend', _message('first'));
+      await store.firstEntered.future;
+      var flushed = false;
+      final flush = h.flush().then((_) => flushed = true);
+      h.add('friend', _message('second'));
+      store.first.complete();
+      await store.secondEntered.future;
+      await Future<void>.delayed(Duration.zero);
+      expect(flushed, isFalse, reason: 'The second save is still blocked');
+      store.second.complete();
+      await flush;
+      expect(flushed, isTrue);
+      h.dispose();
+    },
+  );
   test(
     'restores per-peer history, isolates identities and preserves receipts',
     () async {
@@ -159,6 +217,24 @@ class _Store implements PeerHistoryStore {
   @override
   Future<void> save(String ownerId, String source) async {
     values[ownerId] = source;
+  }
+}
+
+class _GatedStore implements PeerHistoryStore {
+  final first = Completer<void>(), second = Completer<void>();
+  final firstEntered = Completer<void>(), secondEntered = Completer<void>();
+  int saves = 0;
+  @override
+  Future<String?> load(String ownerId) async => null;
+  @override
+  Future<void> save(String ownerId, String source) async {
+    if (++saves == 1) {
+      firstEntered.complete();
+      await first.future;
+    } else if (saves == 2) {
+      secondEntered.complete();
+      await second.future;
+    }
   }
 }
 

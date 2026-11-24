@@ -29,6 +29,78 @@ MediaItem item(
       ChatAttachment(name: '$id.png', mimeType: 'image/png', bytes: png),
 );
 void main() {
+  testWidgets(
+    'caption has its own background below the media and no empty footer is added',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 240,
+              child: MediaAlbum(items: [item('captioned', 0, incoming: false)]),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final caption = find.byKey(const Key('media-caption'));
+      expect(caption, findsOneWidget);
+      expect(
+        tester.getTopLeft(caption).dy,
+        greaterThanOrEqualTo(
+          tester
+              .getBottomLeft(find.byKey(const Key('album-item-captioned')))
+              .dy,
+        ),
+      );
+      expect(
+        (tester.widget<Container>(caption).decoration as BoxDecoration).color,
+        const Color(0xFF9AE585),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 240,
+              child: MediaAlbum(items: [item('plain', 1, incoming: false)]),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('media-caption')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets('a single video uses the available tile width', (tester) async {
+    final video = MediaItem(
+      id: 'single-video',
+      name: 'clip.mp4',
+      kind: 'video',
+      incoming: false,
+      loadFile: () async => ChatAttachment(
+        name: 'clip.mp4',
+        mimeType: 'video/mp4',
+        bytes: Uint8List(3),
+      ),
+      loadThumbnail: () async => null,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(width: 280, child: MediaAlbum(items: [video])),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(find.byKey(const Key('album-item-single-video'))).width,
+      greaterThan(250),
+    );
+    expect(find.byIcon(Icons.play_circle_fill), findsOneWidget);
+    expect(find.byTooltip('Save copy'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   test('groups only explicit IDs, media kind and sender direction', () {
     final a = item('a', 0),
         b = item('b', 1),

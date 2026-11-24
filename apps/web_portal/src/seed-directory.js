@@ -1,4 +1,5 @@
-import { SEED_ID, DID, MAX_FRAME, bytes, encode, exact, hash, requireThat, verifyProof, verifyRecord, verifySignal } from './protocol.js';
+import { SEED_ID, DID, MAX_FRAME, bytes, encode, exact, hash, requireThat, verifyProof, verifyRecord, verifySignal, verifyDispatch } from './protocol.js';
+import {CourierCatalog} from './courier-discovery.js';
 
 const WINDOW = 60000;
 const REPLAYS = 8192, IPS = 2048, RECORDS = 1000;
@@ -7,15 +8,18 @@ export class SeedDirectory {
     this.ctx=ctx; this.env=env; this.sessions=new Map(); this.tails=new Map();this.queued=new Map();this.inFlight=0;this.opening=0;
     this.records=new Map();this.replay=new Map();this.ips=new Map();this.cursor=0;
     this.pendingCatalog=new Set();this.catalogAfter=0;
+    this.storageAvailable=true;this.authTimers=new Map();this.catalogTimer=null;
+    this.couriers=new CourierCatalog();
     this.limit=Math.max(1,Math.min(1000,Number.parseInt(env.SEED_MAX_SOCKETS || '1000',10)||1000));
     for(const ws of ctx.getWebSockets()) {
       const state=ws.deserializeAttachment();
-      if(state) this.sessions.set(ws,state);
+      if(state&&ws.readyState===1){this.sessions.set(ws,state);if(!state.identityId)this.authTimeout(ws,state);}
     }
     // A tiny exact keepalive carries no arbitrary data and needs no wake-up.
     this.autoKeepalive();
     this.ready=ctx.blockConcurrencyWhile(async()=>{
-      const state=await ctx.storage.get('control');
+      let state;
+      try{state=await ctx.storage.get('control');}catch{this.storageAvailable=false;}
       if(state){this.records=new Map(state.records.map(r=>[r.relayId,r]));this.replay=new Map(state.replay);this.ips=new Map(state.ips);this.cursor=state.cursor||0;this.pendingCatalog=new Set(state.pendingCatalog||[]);this.catalogAfter=state.catalogAfter||0;}
       this.prune(Date.now());
     });
@@ -33,10 +37,21 @@ export class SeedDirectory {
     for(const [id,b]of this.ips)if(b.until<=now)this.ips.delete(id);
   }
   save() {return this.ctx.storage.put('control',{records:[...this.records.values()],replay:[...this.replay],ips:[...this.ips],cursor:this.cursor,pendingCatalog:[...this.pendingCatalog],catalogAfter:this.catalogAfter});}
+  async optionalSave(){if(this.storageAvailable)try{await this.save();}catch{this.storageAvailable=false;}}
+  authTimeout(ws,state){
+    const timer=setTimeout(()=>{this.authTimers.delete(ws);if(this.active(ws,state)&&!state.identityId)this.close(ws);},Math.max(0,Math.min(30000,state.deadline-Date.now())));
+    timer.unref?.();this.authTimers.set(ws,timer);
+  }
   async scheduleAlarm() {
     let next=this.pendingCatalog.size?Math.max(Date.now(),this.catalogAfter):Infinity;
     for(const s of this.sessions.values())if(!s.identityId)next=Math.min(next,s.deadline);
-    if(Number.isFinite(next))await this.ctx.storage.setAlarm(next);
+    if(Number.isFinite(next)){
+      if(this.storageAvailable)try{await this.ctx.storage.setAlarm(next);}catch{this.storageAvailable=false;}
+      if(this.pendingCatalog.size&&!this.catalogTimer){
+        this.catalogTimer=setTimeout(()=>{this.catalogTimer=null;this.prune(Date.now());this.flushCatalog(Date.now());void this.scheduleAlarm();},Math.max(0,next-Date.now()));
+        this.catalogTimer.unref?.();
+      }
+    }
   }
   flushCatalog(now) {
     if(!this.pendingCatalog.size||now<this.catalogAfter)return;
@@ -51,7 +66,7 @@ export class SeedDirectory {
     this.catalogAfter=now+5000;
   }
   active(ws,state) {return this.sessions.get(ws)===state && ws.readyState===1;}
-  close(ws) {this.sessions.delete(ws);this.autoKeepalive();try{ws.close(1008,'Seed control policy');}catch{}}
+  close(ws) {clearTimeout(this.authTimers.get(ws));this.authTimers.delete(ws);this.sessions.delete(ws);this.autoKeepalive();try{ws.close(1008,'Seed control policy');}catch{}}
   send(ws,value) {
     if(ws.readyState!==1)return false;
     if(typeof ws.bufferedAmount==='number'&&ws.bufferedAmount>65536){this.close(ws);return false;}
@@ -82,11 +97,10 @@ export class SeedDirectory {
     try{this.ipRate(ip,Date.now(),8);}catch{return new Response('Rate limited',{status:429,headers:{'cache-control':'no-store'}});}
     const pair=new WebSocketPair(),[client,server]=Object.values(pair);
     const nonce=encode(crypto.getRandomValues(new Uint8Array(32)));
-    const state={nonce,deadline:Date.now()+30000,ip};
+    const state={nonce,connection:nonce,sequence:0,deadline:Date.now()+30000,ip};
     this.ctx.acceptWebSocket(server);server.serializeAttachment(state);this.sessions.set(server,state);this.autoKeepalive();
-    await this.save();
-    await this.scheduleAlarm();
-    this.send(server,{type:'challenge',protocol:'chta-seed',version:1,seedId:SEED_ID,nonce});
+    this.authTimeout(server,state);
+    this.send(server,{type:'challenge',protocol:'chta-seed',version:1,seedId:SEED_ID,nonce,capabilities:['session-dispatch-v1','courier-directory-v1']});
     return new Response(null,{status:101,webSocket:client});
     }finally{this.opening--;}
   }
@@ -115,14 +129,15 @@ export class SeedDirectory {
       const frame=JSON.parse(message),now=Date.now();
       requireThat(frame&&typeof frame==='object'&&!Array.isArray(frame)&&typeof frame.type==='string');
       this.socketRate(state,now,frame.type);
+      ws.serializeAttachment(state);
       if(!state.identityId){
         exact(frame,['type','proof']);requireThat(frame.type==='register' && state.nonce && state.deadline>now);
-        const nonce=state.nonce;delete state.nonce; // Consumed before any asynchronous verification.
+        const nonce=state.nonce;state.connection=nonce;state.sequence=0;delete state.nonce; // Consumed before any asynchronous verification.
         ws.serializeAttachment(state);
         const identityId=await verifyProof(frame.proof,nonce);
         if(!this.active(ws,state))return;
         requireThat([...this.sessions.values()].filter(s=>s.identityId===identityId).length<4);
-        state.identityId=identityId;delete state.deadline;ws.serializeAttachment(state);this.autoKeepalive();
+        state.identityId=identityId;delete state.deadline;clearTimeout(this.authTimers.get(ws));this.authTimers.delete(ws);ws.serializeAttachment(state);this.autoKeepalive();
         this.send(ws,{type:'registered',protocol:'chta-seed',version:1});
         this.prune(Date.now());const records=[...this.records.values()];
         const batch=[];
@@ -134,21 +149,36 @@ export class SeedDirectory {
         this.cursor=records.length?(this.cursor+batch.length)%records.length:0;
         const delivered=new Set(batch.map(r=>r.relayId));
         for(const r of records)if(!delivered.has(r.relayId))this.pendingCatalog.add(r.relayId);
-        this.send(ws,{type:'catalog',records:batch});await this.save();await this.scheduleAlarm();return;
+        this.send(ws,{type:'catalog',records:batch});
+        if(this.pendingCatalog.size){await this.optionalSave();await this.scheduleAlarm();}return;
       }
-      if(frame.type==='lookup'){
+      if(frame.type==='couriers'){
+        exact(frame,['type','records']);await this.couriers.merge(frame.records,now);
+        if(this.active(ws,state))this.send(ws,{type:'couriers',records:this.couriers.batch(Date.now())});
+      }else if(frame.type==='lookup'){
         exact(frame,['type','identityId']);requireThat(typeof frame.identityId==='string'&&DID.test(frame.identityId));
         this.send(ws,{type:'presence',identityId:frame.identityId,online:[...this.sessions].some(([w,s])=>s.identityId===frame.identityId&&this.active(w,s))});
       }else if(frame.type==='signal'){
-        exact(frame,['type','envelope']);const v=await verifySignal(frame.envelope,state.identityId,now);
+        const upgraded=Object.hasOwn(frame,'dispatch');
+        exact(frame,upgraded?['type','envelope','dispatch']:['type','envelope']);const v=await verifySignal(frame.envelope,state.identityId,now);
         if(!this.active(ws,state))return;
         this.prune(Date.now());requireThat(v.expiresAt>Date.now());
-        const replayKey=await hash(new TextEncoder().encode(JSON.stringify([v.from,v.id,v.signature])));
-        if(!this.active(ws,state))return;
-        requireThat(!this.replay.has(replayKey)&&this.replay.size<REPLAYS);
-        this.replay.set(replayKey,v.expiresAt);
-        // Durable replay reservation precedes dispatch, including across hibernation.
-        await this.save();if(!this.active(ws,state)||v.expiresAt<=Date.now())return;
+        if(upgraded){
+          const sequence=await verifyDispatch(frame.dispatch,v,state.identityId,state.connection,state.sequence||0);
+          if(!this.active(ws,state)||v.expiresAt<=Date.now())return;
+          // Hibernation attachment is authoritative for this socket; reserve before any send.
+          state.sequence=sequence;ws.serializeAttachment(state);
+        }else{
+          const replayKey=await hash(new TextEncoder().encode(JSON.stringify([v.from,v.id,v.signature])));
+          if(!this.active(ws,state))return;
+          requireThat(!this.replay.has(replayKey)&&this.replay.size<REPLAYS);
+          this.replay.set(replayKey,v.expiresAt);
+          // Legacy dispatch requires a successful durable reservation. Never degrade to memory-only.
+          try{requireThat(this.storageAvailable);await this.save();}catch{
+            this.storageAvailable=false;this.send(ws,{type:'error',code:'storage-unavailable',retryAfter:300,upgrade:'session-dispatch-v1'});this.close(ws);return;
+          }
+          if(!this.active(ws,state)||v.expiresAt<=Date.now())return;
+        }
         let sent=false;
         for(const [peer,peerState]of this.sessions)if(peerState.identityId===v.to&&this.active(peer,peerState))sent=this.send(peer,{type:'signal',envelope:v})||sent;
         if(!sent)this.send(ws,{type:'unreachable',identityId:v.to});
@@ -166,19 +196,18 @@ export class SeedDirectory {
           this.pendingCatalog.add(r.relayId);
         }
         this.flushCatalog(Date.now());
+        await this.optionalSave();await this.scheduleAlarm();
       }else if(frame.type==='keepalive'){
         exact(frame,['type']);this.send(ws,{type:'alive'});
       }else{throw new Error('Unsupported control type');}
       if(this.active(ws,state))ws.serializeAttachment(state);
-      await this.save();
-      await this.scheduleAlarm();
-    }catch{this.close(ws);await this.save();}
+    }catch{this.close(ws);}
   }
-  webSocketClose(ws) {this.sessions.delete(ws);this.autoKeepalive();try{ws.close(1000,'Closed');}catch{}}
+  webSocketClose(ws) {clearTimeout(this.authTimers.get(ws));this.authTimers.delete(ws);this.sessions.delete(ws);this.autoKeepalive();try{ws.close(1000,'Closed');}catch{}}
   webSocketError(ws) {this.close(ws);}
   async alarm() {
     await this.ready;const now=Date.now();
     for(const[ws,s]of this.sessions)if(!s.identityId&&s.deadline<=now)this.close(ws);
-    this.prune(now);this.flushCatalog(now);await this.save();await this.scheduleAlarm();
+    this.prune(now);this.flushCatalog(now);await this.optionalSave();await this.scheduleAlarm();
   }
 }

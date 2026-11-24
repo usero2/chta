@@ -1,0 +1,25 @@
+{
+  "envelope": {
+    "expiresAt": 1800000120000,
+    "from": "did:cht:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+    "id": "cht-control-direct-v1-0123456789abcdef0123456789abcdef-offer-0",
+    "issuedAt": 1800000000000,
+    "kind": "offer",
+    "payload": "{\"d\":\"v=0\\r\\na=fingerprint:sha-256 AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB\\r\\na=setup:actpass\\r\\n\",\"s\":\"0123456789abcdef0123456789abcdef\",\"t\":\"offer\",\"v\":1}",
+    "publicKey": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+    "session": "0123456789abcdef0123456789abcdef",
+    "signature": "8iWeeK--RoTuxaYXY0-NT-LlJNCBEMDzx-w6PNmR-QF38yz-78NEfiXXox-MjcYu4KB5gGOn66mKP-j5kuI-Dw",
+    "to": "did:cht:ae59cf774c2818064c56d0a07870af73c72e41563f09be52915088d66a5599f0",
+    "version": 1
+  },
+  "proof": {
+    "version": 1,
+    "seedId": "e0ba672185682a830d168e31cee185b9434b49b210a7ec7a435e78fcb2a532a5",
+    "connection": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+    "sequence": 1,
+    "envelopeHash": "c34a82f8ead198dbadd262b28b31bd3f717f93ea2bda11d6945de21f34e49988",
+    "publicKey": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+    "signature": "2xNwmGEFWaUKNnPyKJkqPdQqdfTt9S59c4DmT72ewMA4TFgq0XJ_0w8Q2qaCaf3ibaddiN5a5OagtWq9GNoEAg"
+  },
+  "canonical": "chta seed dispatch v1\u0000[1,\"e0ba672185682a830d168e31cee185b9434b49b210a7ec7a435e78fcb2a532a5\",\"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU\",1,\"c34a82f8ead198dbadd262b28b31bd3f717f93ea2bda11d6945de21f34e49988\"]"
+}

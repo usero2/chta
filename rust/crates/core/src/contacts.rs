@@ -167,6 +167,8 @@ impl IdentityManager {
                 "files-v2".to_owned(),
                 "groups-v1".to_owned(),
                 "peer-sessions-v2".to_owned(),
+                "delivery-v2".to_owned(),
+                "courier-v1".to_owned(),
             ],
             signature: String::new(),
         };

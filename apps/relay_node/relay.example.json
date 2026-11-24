@@ -1,0 +1,15 @@
+{
+  "tcp_enabled": false,
+  "listen_ip": "0.0.0.0",
+  "port": 4001,
+  "public_addresses": [],
+  "state_dir": "/var/lib/chta-relay",
+  "websocket": {
+    "listen": "0.0.0.0:4002",
+    "public_url": "wss://relay.example.com/cht",
+    "bootstrap_urls": [],
+    "max_clients": 128,
+    "bytes_per_minute": 67108864,
+    "allow_loopback": false
+  }
+}

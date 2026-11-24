@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import 'relay_crypto_bridge.dart';
 import 'relay_socket.dart';
+import 'relay_provider_policy.dart';
 
 typedef RelayConnector = Future<RelaySocket> Function(String endpoint);
 typedef RoutedFrame = void Function(
@@ -86,10 +87,18 @@ class RelayActivity {
 }
 
 class RelayNetwork extends ChangeNotifier {
-  RelayNetwork(this.crypto, {RelayConnector? connector, int Function()? clock})
-    : connector = connector ?? openRelaySocket,
-      _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
+  RelayNetwork(
+    this.crypto, {
+    RelayConnector? connector,
+    int Function()? clock,
+    this.bootstrapRelays = const {},
+    RelayProviderPolicy? providerPolicy,
+  }) : connector = connector ?? openRelaySocket,
+       providerPolicy = providerPolicy ?? RelayProviderPolicy(),
+       _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
   final RelayCryptoBridge crypto;
+  final Map<String, String> bootstrapRelays;
+  final RelayProviderPolicy providerPolicy;
   final RelayConnector connector;
   final int Function() _clock;
   final _activity = <String, RelayActivity>{};
@@ -200,7 +209,7 @@ class RelayNetwork extends ChangeNotifier {
         !_failures.containsKey(endpoint) ||
         _links.containsKey(endpoint) ||
         endpoint == hostedEndpoint ||
-        endpoint == activeEndpoint ||
+        _inUse(endpoint) ||
         now - firstUnavailable < relayUnavailableRemovalAge.inMilliseconds) {
       return;
     }
@@ -224,7 +233,21 @@ class RelayNetwork extends ChangeNotifier {
   bool _closed = false;
   bool _ticking = false;
   int connectionLimit = 50;
-  String? activeEndpoint;
+  String? _legacyActiveEndpoint;
+  String? get activeEndpoint =>
+      _legacyActiveEndpoint ?? _routeLeases.values.firstOrNull;
+  set activeEndpoint(String? endpoint) => _legacyActiveEndpoint = endpoint;
+  final _routeLeases = <Object, String>{};
+  void leaseRoute(Object owner, String? endpoint) {
+    if (endpoint == null) {
+      _routeLeases.remove(owner);
+    } else {
+      _routeLeases[owner] = endpoint;
+    }
+  }
+
+  bool _inUse(String endpoint) =>
+      endpoint == activeEndpoint || _routeLeases.containsValue(endpoint);
   int _catalogOffset = 0;
   int get connectingCount =>
       _links.values.where((link) => !link.registered).length;
@@ -235,7 +258,7 @@ class RelayNetwork extends ChangeNotifier {
     connectionLimit = value;
     for (final entry in _links.entries.toList().reversed) {
       if (_links.length <= connectionLimit) break;
-      if (entry.key == activeEndpoint) continue;
+      if (_inUse(entry.key)) continue;
       _links.remove(entry.key);
       unawaited(entry.value.subscription?.cancel());
       unawaited(entry.value.socket?.close());
@@ -283,17 +306,55 @@ class RelayNetwork extends ChangeNotifier {
   }
 
   RoutedFrame? onFrame;
+  final _courierRecords = StreamController<List<Object?>>.broadcast();
+  Stream<List<Object?>> get courierRecords => _courierRecords.stream;
+  bool supportsCourierSelf(String endpoint) =>
+      _links[endpoint]?.registered == true &&
+      _links[endpoint]?.courierSelfCapable == true;
+  List<Object?> _courierCatalog = const [];
+  void publishCouriers(List<Object?> records) {
+    if (_closed) return;
+    if (records.length > 8 || utf8.encode(jsonEncode(records)).length > 12000) {
+      throw const FormatException('Courier catalog too large');
+    }
+    _courierCatalog = List.unmodifiable(records);
+    for (final link
+        in _links.values
+            .where((l) => l.registered && l.courierCapable)
+            .take(3)) {
+      try {
+        link.socket?.send(
+          jsonEncode({'type': 'couriers', 'records': _courierCatalog}),
+        );
+      } catch (_) {
+        /* Normal heartbeat recovers this link. */
+      }
+    }
+  }
+
   final _frameListeners = <RoutedFrame>{};
   void addFrameListener(RoutedFrame listener) {
     if (!_closed) _frameListeners.add(listener);
   }
-  void removeFrameListener(RoutedFrame listener) => _frameListeners.remove(listener);
+
+  void removeFrameListener(RoutedFrame listener) =>
+      _frameListeners.remove(listener);
   ValueChanged<String>? onDisconnected;
   VoidCallback? onReady;
-  List<String> get online => _links.entries
-      .where((e) => e.value.registered)
-      .map((e) => e.key)
-      .toList();
+  List<String> get online => providerPolicy.order(
+    _links.entries.where((e) => e.value.registered).map((e) => e.key).toList(),
+    identityFor: (endpoint) => pins[endpoint],
+  );
+  int get activeRouteCount => online.where(_inUse).length;
+  int get warmRouteCount => online.length - activeRouteCount;
+  int get knownRelayCount => <String>{
+    ...seeds,
+    ...pins.keys,
+    ...records.values.map((r) => r['endpoint'] as String),
+  }.length;
+  int get configuredProviderCount => providerPolicy.independentDomains(
+    online.map((url) => pins[url]).whereType<String>(),
+  );
   bool get enabled =>
       seeds.isNotEmpty || records.isNotEmpty || _userLockedRelays.isNotEmpty;
   int get now => _clock();
@@ -420,6 +481,20 @@ class RelayNetwork extends ChangeNotifier {
       error = 'Could not load relays. Add a relay URL.';
     }
     if (_closed) return;
+    for (final entry in bootstrapRelays.entries) {
+      final endpoint = normalizePublicRelayUrl(entry.key);
+      if (pins[endpoint] != null && pins[endpoint] != entry.value) {
+        // Never silently overwrite a previously trusted, different identity.
+        error = 'A default relay identity changed. Check Connect.';
+        continue;
+      }
+      final known = _knows(endpoint);
+      pins[endpoint] = entry.value;
+      if (!seeds.contains(endpoint)) {
+        seeds.insert(0, endpoint);
+        _metadataChanged(endpoint, added: !known);
+      }
+    }
     _timer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => unawaited(tick()),
@@ -667,6 +742,11 @@ class RelayNetwork extends ChangeNotifier {
                 if (link.catalogSubscribed) 'subscribeCatalog': true,
               }),
             );
+            if (link.courierCapable && link.catalogSubscribed) {
+              link.socket!.send(
+                jsonEncode({'type': 'couriers', 'records': _courierCatalog}),
+              );
+            }
           } catch (_) {
             _disconnect(entry.key, link);
           }
@@ -676,6 +756,7 @@ class RelayNetwork extends ChangeNotifier {
       final sorted = records.entries.toList()
         ..sort((a, b) => a.key.compareTo(b.key));
       final candidates = <String>{
+        ...bootstrapRelays.keys,
         ..._preferredRoutes,
         ...seeds.take(1),
         ...sorted.map((e) => e.value['endpoint'] as String),
@@ -688,10 +769,7 @@ class RelayNetwork extends ChangeNotifier {
           continue;
         }
         final idle = _links.entries
-            .where(
-              (e) =>
-                  e.key != activeEndpoint && !_preferredRoutes.contains(e.key),
-            )
+            .where((e) => !_inUse(e.key) && !_preferredRoutes.contains(e.key))
             .lastOrNull;
         if (idle == null) break;
         _links.remove(idle.key);
@@ -700,7 +778,10 @@ class RelayNetwork extends ChangeNotifier {
       }
       var pending = connectingCount;
       var started = false;
-      for (final endpoint in candidates) {
+      for (final endpoint in providerPolicy.order(
+        candidates,
+        identityFor: (url) => pins[url] ?? bootstrapRelays[url],
+      )) {
         if (_links.length >= connectionLimit || pending >= 6) break;
         if (_links.containsKey(endpoint) ||
             (_failures[endpoint]?.$2 ?? 0) > now) {
@@ -716,6 +797,17 @@ class RelayNetwork extends ChangeNotifier {
     } finally {
       _ticking = false;
     }
+  }
+
+  Future<void> recoverNetwork({bool force = true}) async {
+    if (_closed) return;
+    for (final entry in _links.entries.toList()) {
+      if (force || now - entry.value.lastReceived > 30000) {
+        _disconnect(entry.key, entry.value);
+      }
+    }
+    _failures.clear();
+    await tick();
   }
 
   Future<void> _connect(String endpoint, _Link link) async {
@@ -743,6 +835,16 @@ class RelayNetwork extends ChangeNotifier {
                       throw const FormatException('Repeated relay challenge');
                     }
                     link.challenged = true;
+                    link.courierSelfCapable =
+                        (frame['capabilities'] as List?)?.contains(
+                          'courier-self-v1',
+                        ) ==
+                        true;
+                    link.courierCapable =
+                        (frame['capabilities'] as List?)?.contains(
+                          'courier-directory-v1',
+                        ) ==
+                        true;
                     final record = jsonDecode(
                       await crypto.inspectRelayRecord(
                         jsonEncode(frame['relay']),
@@ -799,6 +901,14 @@ class RelayNetwork extends ChangeNotifier {
                     }
                     if (link.registered) break;
                     link.registered = true;
+                    if (link.courierCapable) {
+                      socket.send(
+                        jsonEncode({
+                          'type': 'couriers',
+                          'records': _courierCatalog,
+                        }),
+                      );
+                    }
                     _metadataChanged(endpoint);
                     _failures.remove(endpoint);
                     _unavailableSince.remove(endpoint);
@@ -808,12 +918,24 @@ class RelayNetwork extends ChangeNotifier {
                     onReady?.call();
                   case 'catalog':
                     await _merge(frame['relays']);
+                  case 'couriers':
+                    if (link.registered &&
+                        link.courierCapable &&
+                        frame['records'] is List &&
+                        (frame['records'] as List).length <= 8 &&
+                        utf8.encode(text).length <= 16384) {
+                      _courierRecords.add(
+                        List<Object?>.from(frame['records'] as List),
+                      );
+                    }
                   case 'route' || 'unreachable':
                     if (link.registered) {
                       if (frame['type'] == 'route') _routeUsed(endpoint);
                       onFrame?.call(endpoint, frame);
                       for (final listener in _frameListeners.toList()) {
-                        try { listener(endpoint, frame); } catch (_) {
+                        try {
+                          listener(endpoint, frame);
+                        } catch (_) {
                           // One protocol consumer cannot disconnect the shared relay.
                         }
                       }
@@ -877,6 +999,7 @@ class RelayNetwork extends ChangeNotifier {
       await link.socket?.close();
     }
     _links.clear();
+    await _courierRecords.close();
   }
 }
 
@@ -885,6 +1008,8 @@ class _Link {
   RelaySocket? socket;
   StreamSubscription<String>? subscription;
   bool challenged = false;
+  bool courierCapable = false;
+  bool courierSelfCapable = false;
   bool registered = false;
   bool catalogSubscribed = false;
   String? relayId;

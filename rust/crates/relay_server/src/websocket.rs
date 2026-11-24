@@ -82,6 +82,7 @@ pub struct Hub {
     pub config: WebSocketConfig,
     key: SigningKey,
     directory: Mutex<RelayDirectory>,
+    couriers: Mutex<cht_relay_protocol::CourierCatalog>,
     clients: Mutex<Clients>,
     sequence: AtomicU64,
     catalog_offset: AtomicU64,
@@ -98,6 +99,7 @@ impl Hub {
             config,
             key,
             directory: Mutex::default(),
+            couriers: Mutex::default(),
             clients: Mutex::default(),
             sequence: AtomicU64::new(1),
             catalog_offset: AtomicU64::new(0),
@@ -278,7 +280,7 @@ pub async fn serve_connection(hub: Arc<Hub>, stream: TcpStream) -> RelayResult<(
     getrandom::fill(&mut random)?;
     let nonce = B64.encode(random);
     let record = hub.record();
-    timeout(Duration::from_secs(5), socket.send(Message::text(json!({"type":"challenge", "nonce":nonce, "relay":record, "relays":hub.catalog()["relays"]}).to_string()))).await??;
+    timeout(Duration::from_secs(5), socket.send(Message::text(json!({"type":"challenge", "nonce":nonce, "relay":record, "relays":hub.catalog()["relays"],"capabilities":["courier-directory-v1","courier-self-v1"]}).to_string()))).await??;
     let (tx, mut rx) = mpsc::channel::<String>(64);
     let mut registration: Option<Registration> = None;
     let mut directory_only = false;
@@ -353,6 +355,27 @@ pub async fn serve_connection(hub: Arc<Hub>, stream: TcpStream) -> RelayResult<(
                 )
                 .await??;
                 hub.merge(&value);
+            }
+            Some("couriers") if registration.is_some() => {
+                let object = value.as_object().ok_or("Invalid Courier request")?;
+                if object.len() != 2 {
+                    return Err("Unexpected Courier fields".into());
+                }
+                let records = value["records"]
+                    .as_array()
+                    .ok_or("Missing Courier records")?;
+                let batch = {
+                    let mut catalog = hub.couriers.lock().unwrap();
+                    catalog.merge(records, now(), hub.config.allow_loopback)?;
+                    catalog.batch(now())
+                };
+                timeout(
+                    Duration::from_secs(5),
+                    socket.send(Message::text(
+                        json!({"type":"couriers","records":batch}).to_string(),
+                    )),
+                )
+                .await??;
             }
             Some("directory") => {
                 wants_catalog = value["subscribeCatalog"].as_bool().unwrap_or(true);

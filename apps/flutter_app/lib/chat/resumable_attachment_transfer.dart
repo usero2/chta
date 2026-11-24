@@ -46,6 +46,8 @@ class ResumableAttachmentTransfer {
     required this.onOffer,
     required this.onCompleted,
     this.onProgress,
+    this.checkIncoming,
+    this.onReceipt,
     this.ackTimeout = const Duration(seconds: 45),
   });
   final String ownerId, peerId;
@@ -57,6 +59,8 @@ class ResumableAttachmentTransfer {
   final void Function(String id, TransferProgressSnapshot value, bool incoming)?
   onProgress;
   final Duration ackTimeout;
+  final void Function(String id)? checkIncoming;
+  final void Function(String id, int receivedAt)? onReceipt;
   static const prefix = 'chtfile2_';
   static const pieceSize = 8 * 1024;
   static bool isPacketId(String? id) => id?.startsWith(prefix) == true;
@@ -68,6 +72,22 @@ class ResumableAttachmentTransfer {
   bool get active => _outgoing.isNotEmpty || _incoming.isNotEmpty;
   void _guard(int generation) {
     if (_closed || generation != _generation) throw const TransferInterrupted();
+  }
+
+  void _guardSend(int generation, _Outgoing job) {
+    _guard(generation);
+    if (job.interruption case final error?) throw error;
+  }
+
+  void _guardIncoming(String id, _Incoming job, int generation) {
+    _guard(generation);
+    checkIncoming?.call(id);
+    if (!identical(_incoming[id], job)) throw const TransferInterrupted();
+  }
+
+  void interrupt(String id) {
+    _outgoing[id]?.interrupt(const TransferInterrupted('Transfer paused'));
+    _incoming.remove(id);
   }
 
   Future<void> _packet(Map<String, Object?> body) async {
@@ -127,14 +147,14 @@ class ResumableAttachmentTransfer {
     final clock = Stopwatch()..start();
     var baseline = 0;
     try {
-      _guard(generation);
+      _guardSend(generation, job);
       final ChunkedAttachmentState cached;
       try {
         cached = await bridge.chunkedAttachmentStatus(ownerId, ref.chunkedId!);
       } catch (_) {
         throw const TransferRejected('Cached file is missing or damaged');
       }
-      _guard(generation);
+      _guardSend(generation, job);
       if (!cached.completed ||
           cached.size != ref.size ||
           cached.digest != ref.digest ||
@@ -154,11 +174,11 @@ class ResumableAttachmentTransfer {
         ...refPresentation(ref),
       });
       var next = await job.resume.future.timeout(ackTimeout);
-      _guard(generation);
+      _guardSend(generation, job);
       baseline = next * ref.chunkSize!;
       final count = chunkCount(ref.size, ref.chunkSize!);
       while (next < count) {
-        _guard(generation);
+        _guardSend(generation, job);
         if (ref.size > ChatAttachment.relayMaxBytes && !isDirect()) {
           throw const TransferInterrupted('Waiting for a direct connection');
         }
@@ -167,7 +187,7 @@ class ResumableAttachmentTransfer {
           ref.chunkedId!,
           next,
         );
-        _guard(generation);
+        _guardSend(generation, job);
         final expected = (ref.size - next * ref.chunkSize!).clamp(
           0,
           ref.chunkSize!,
@@ -180,7 +200,7 @@ class ResumableAttachmentTransfer {
         job.expectingNext = next + 1;
         job.block = _completer<int>();
         for (var piece = 0; piece < parts; piece++) {
-          _guard(generation);
+          _guardSend(generation, job);
           if (ref.size > ChatAttachment.relayMaxBytes && !isDirect()) {
             throw const TransferInterrupted('Waiting for a direct connection');
           }
@@ -198,7 +218,7 @@ class ResumableAttachmentTransfer {
           });
         }
         next = await job.block!.future.timeout(ackTimeout);
-        _guard(generation);
+        _guardSend(generation, job);
         final done = (next * ref.chunkSize!).clamp(0, ref.size);
         _progress(
           id,
@@ -215,7 +235,7 @@ class ResumableAttachmentTransfer {
       final received = await job.done.future.timeout(
         const Duration(minutes: 10),
       );
-      _guard(generation);
+      _guardSend(generation, job);
       _progress(id, ref.size, ref.size, FileTransferPhase.completed, false);
       return received;
     } on TransferRejected {
@@ -307,6 +327,13 @@ class ResumableAttachmentTransfer {
   }
 
   void _control(Map<String, dynamic> value) {
+    if (value['type'] == 'complete') {
+      final received = value['receivedAt'];
+      if (received is! int || received < 0 || received > 8640000000000000) {
+        return;
+      }
+      onReceipt?.call(value['id'] as String, received);
+    }
     final job = _outgoing[value['id']];
     if (job == null) return;
     final next = value['next'];
@@ -346,6 +373,7 @@ class ResumableAttachmentTransfer {
     int generation,
   ) async {
     final id = value['id'] as String;
+    checkIncoming?.call(id);
     switch (value['type']) {
       case 'offer':
         final sentAt = value['sentAt'];
@@ -405,6 +433,7 @@ class ResumableAttachmentTransfer {
           value['sentAt'] is int ? value['sentAt'] as int : null,
         );
         _guard(generation);
+        checkIncoming?.call(id);
         final job = _Incoming(ref, state.contiguousChunks);
         _incoming[id] = job;
         if (state.completed) {
@@ -414,7 +443,7 @@ class ResumableAttachmentTransfer {
             localId,
             expectedDigest: ref.digest,
           );
-          _guard(generation);
+          _guardIncoming(id, job, generation);
           if (!verified.completed ||
               verified.digest != ref.digest ||
               verified.size != size) {
@@ -506,7 +535,7 @@ class ResumableAttachmentTransfer {
             job.next,
             blockBytes,
           );
-          _guard(generation);
+          _guardIncoming(id, job, generation);
           job.next++;
           job.pieces = null;
           job.blockDigest = null;
@@ -541,7 +570,7 @@ class ResumableAttachmentTransfer {
           job.ref.chunkedId!,
           expectedDigest: job.ref.digest,
         );
-        _guard(generation);
+        _guardIncoming(id, job, generation);
         if (!state.completed ||
             state.digest != job.ref.digest ||
             state.size != job.ref.size) {
@@ -552,8 +581,9 @@ class ResumableAttachmentTransfer {
   }
 
   Future<void> _complete(String id, _Incoming job, int generation) async {
+    _guardIncoming(id, job, generation);
     final received = await onCompleted(id, job.ref);
-    _guard(generation);
+    _guardIncoming(id, job, generation);
     _progress(
       id,
       job.ref.size,
@@ -594,7 +624,9 @@ class _Outgoing {
   final resume = _completer<int>(), done = _completer<int>();
   Completer<int>? block;
   int confirmed = 0, expectingNext = 0;
+  Object? interruption;
   void interrupt(Object error) {
+    interruption = error;
     if (!resume.isCompleted) resume.completeError(error);
     if (block?.isCompleted == false) block!.completeError(error);
     if (!done.isCompleted) done.completeError(error);

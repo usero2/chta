@@ -27,6 +27,7 @@ class GroupRoom extends StatelessWidget {
     this.disabledReason,
     this.error,
     this.onBack,
+    this.deliveryLabel,
     super.key,
   });
 
@@ -43,6 +44,7 @@ class GroupRoom extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback? onBack;
   final String? disabledReason, error;
+  final String? Function(GroupMessage)? deliveryLabel;
 
   @override
   Widget build(BuildContext context) => ColoredBox(
@@ -187,6 +189,9 @@ class GroupRoom extends StatelessWidget {
               ),
             ),
           MessageBubble(
+            media:
+                manifest?.mimeType.toLowerCase().startsWith('image/') == true ||
+                manifest?.mimeType.toLowerCase().startsWith('video/') == true,
             bubbleKey: Key('group-message-${message.key}'),
             text: message.text,
             incoming: incoming,
@@ -198,9 +203,10 @@ class GroupRoom extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(right: 4, top: 1),
               child: Text(
-                message.receipts.isEmpty
-                    ? 'Pending · 0/${message.recipients.length} delivered'
-                    : '${message.receipts.length}/${message.recipients.length} delivered',
+                deliveryLabel?.call(message) ??
+                    (message.receipts.isEmpty
+                        ? 'Pending · 0/${message.recipients.length} delivered'
+                        : '${message.receipts.length}/${message.recipients.length} delivered'),
                 key: Key('group-delivery-${message.key}'),
                 style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 11),
               ),

@@ -8,6 +8,66 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'legacy image uses an unframed media preview with its caption below',
+    (tester) async {
+      final png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN1kAAAAASUVORK5CYII=',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 240,
+              child: AttachmentContent(
+                incoming: false,
+                attachment: ChatAttachment(
+                  name: 'fixture.png',
+                  mimeType: 'image/png',
+                  bytes: png,
+                  caption: '**Caption** below',
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('media-caption')), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const Key('media-caption'))).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(find.byType(Image)).dy),
+      );
+      expect(find.text('fixture.png'), findsNothing);
+      expect(find.byTooltip('Save copy'), findsOneWidget);
+      expect(find.byTooltip('Cached'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets('generic file keeps its filename and original content controls', (
+    tester,
+  ) async {
+    final file = ChatAttachment(
+      name: 'fixture.bin',
+      mimeType: 'application/octet-stream',
+      bytes: Uint8List(3),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 240,
+            child: AttachmentContent(incoming: false, attachment: file),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('fixture.bin'), findsOneWidget);
+    expect(find.byKey(const Key('media-caption')), findsNothing);
+    expect(find.byTooltip('Save copy'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('cached legacy video reuses its history thumbnail', (
     tester,
   ) async {

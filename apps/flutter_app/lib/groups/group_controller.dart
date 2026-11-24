@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import '../chat/attachment_store.dart';
 import '../chat/chat_attachment.dart';
 import '../chat/chat_models.dart';
+import '../delivery/gap_repair.dart';
+import '../delivery/peer_gap_repair.dart' show ProtectedGapCursor;
 import '../notifications/incoming_notifications.dart';
 import 'group_blob_bridge.dart';
 import 'group_crypto_bridge.dart';
@@ -18,6 +20,9 @@ import 'swarm/swarm.dart';
 const _docPrefix = 'chta-group-doc-v1:', _ackPrefix = 'chta-group-job-ack-v1:';
 const _maxDocument = 4 * 1024 * 1024, _docPart = 8192, _pageMessages = 32;
 const _maxOutboxBytes = 16 * 1024 * 1024, _maxHistoryMessages = 10000;
+// Matches MAX_TEXT in the Rust group event signer, including JSON escaping.
+const _maxGroupTextPayloadBytes = 32768;
+const _courierCapability = 'chta-group-cap-v1:courier-v1';
 
 class GroupController extends ChangeNotifier {
   GroupController({
@@ -52,21 +57,43 @@ class GroupController extends ChangeNotifier {
   StreamSubscription<GroupPeerFrame>? _subscription;
   final _groups = <String, GroupView>{};
   final _rooms = <String, List<GroupMessage>>{};
+  final _pendingHistory = <GroupMessage>{};
+  bool isDurableMessage(GroupMessage message) =>
+      !_pendingHistory.contains(message);
   final _jobs = <String, GroupControlJob>{};
   final _invitations = <String, GroupInvitation>{};
   final _seenControls = <String>{},
       _left = <String>{},
       _completedFiles = <String>{};
   final _deleted = <String, Set<String>>{};
+  final _deletedBefore = <String, int>{};
   final _roomGenerations = <String, int>{};
   final _documents = <String, _DocumentAssembly>{};
   final _syncedPeers = <String>{};
+  final _repairs = <String, GapRepair>{};
+  final _repairTurns = <String, int>{}, _nextRepair = <String, int>{};
+  final _courierPeers = <String>{}, _capSent = <String>{};
+  bool _courierEnabled = false;
+  bool supportsCourier(String peer) => _courierPeers.contains(peer);
+  void setCourierEnabled(bool value) {
+    _courierEnabled = value;
+    if (value) unawaited(_pulse());
+  }
+
   Future<void> _serial = Future.value();
   Timer? _timer;
   bool _closed = false, _ready = false, _pulsing = false;
   int _generation = 0, _queued = 0;
   String? error;
+  void Function()? onGapRepaired;
   bool get ready => _ready;
+  bool get active => !_closed && _ready;
+  int conversationGeneration(String gid) => _roomGenerations[gid] ?? 0;
+  bool isDeletedDelivery(String gid, String sender, String id, int sentAt) =>
+      _closed ||
+      _deleted[gid]?.contains('$sender:$id') == true ||
+      (_deletedBefore[gid] != null && sentAt <= _deletedBefore[gid]!);
+  bool hasCompletedFile(String fileId) => _completedFiles.contains(fileId);
   List<GroupView> get groups => List.unmodifiable(_groups.values);
   List<GroupInvitation> get invitations =>
       List.unmodifiable(_invitations.values);
@@ -74,8 +101,20 @@ class GroupController extends ChangeNotifier {
   int get pendingJobBytes =>
       _jobs.values.fold(0, (sum, j) => sum + j.encodedBytes);
   GroupView? group(String id) => _groups[id];
-  List<GroupMessage> messagesFor(String id) =>
-      List.unmodifiable(_rooms[id] ?? const []);
+  List<GroupMessage> messagesFor(String id) {
+    final messages = _rooms[id] ?? const <GroupMessage>[];
+    if (!messages.any((m) => m.repaired)) return List.unmodifiable(messages);
+    final indices = List<int>.generate(messages.length, (i) => i);
+    indices.sort((a, b) {
+      final order = messages[a].sentAt.compareTo(messages[b].sentAt);
+      return order == 0 ? a.compareTo(b) : order;
+    });
+    return List.unmodifiable([for (final index in indices) messages[index]]);
+  }
+
+  List<GroupMessage> deliveryPage(String id, int offset) => List.unmodifiable(
+    (_rooms[id] ?? const <GroupMessage>[]).skip(offset).take(32),
+  );
   bool canSend(String id) =>
       _ready &&
       !_closed &&
@@ -104,7 +143,7 @@ class GroupController extends ChangeNotifier {
   Future<ChatAttachment> openFile(SwarmManifest manifest) =>
       cache.open(manifest);
   List<ConversationView> get conversations => groups.map((g) {
-    final last = _rooms[g.groupId]?.lastOrNull;
+    final last = messagesFor(g.groupId).lastOrNull;
     return ConversationView(
       id: g.groupId,
       title: g.name,
@@ -193,21 +232,29 @@ class GroupController extends ChangeNotifier {
       'completedFiles': _completedFiles.toList(),
       'deleted': {for (final e in _deleted.entries) e.key: e.value.toList()},
       'generations': _roomGenerations,
+      'deletedBefore': _deletedBefore,
+      'courierPeers': _courierPeers.toList(),
     });
   }
 
   Future<void> _saveRoom(String id, {List<GroupMessage>? source}) async {
     final messages = source ?? _rooms[id] ?? const <GroupMessage>[];
     for (var start = 0; start < messages.length; start += _pageMessages) {
-      await _write('g-room-${_roomKey(id)}-${start ~/ _pageMessages}', {
-        'messages': messages
-            .skip(start)
-            .take(_pageMessages)
-            .map((m) => m.toJson())
-            .toList(),
-      });
+      await _saveRoomPage(id, messages, start ~/ _pageMessages);
     }
   }
+
+  Future<void> _saveRoomPage(
+    String id,
+    List<GroupMessage> messages,
+    int page,
+  ) => _write('g-room-${_roomKey(id)}-$page', {
+    'messages': messages
+        .skip(page * _pageMessages)
+        .take(_pageMessages)
+        .map((m) => m.toJson())
+        .toList(),
+  });
 
   Future<void> initialize() => _run(() async {
     if (_ready) return;
@@ -225,6 +272,15 @@ class GroupController extends ChangeNotifier {
       _roomGenerations.addAll(
         _map(index['generations'] ?? {}).cast<String, int>(),
       );
+      _deletedBefore.addAll(
+        _map(index['deletedBefore'] ?? {}).cast<String, int>(),
+      );
+      final capabilities = (index['courierPeers'] as List? ?? const [])
+          .cast<String>();
+      if (capabilities.length > 1024) {
+        throw const FormatException('Too many group capabilities');
+      }
+      _courierPeers.addAll(capabilities);
       for (final e in _map(index['deleted'] ?? {}).entries) {
         _deleted[e.key] = (e.value as List).cast<String>().toSet();
       }
@@ -313,6 +369,12 @@ class GroupController extends ChangeNotifier {
     if (_closed) return;
     final online = _transport?.onlinePeers ?? <String>{};
     _syncedPeers.removeWhere((p) => !online.contains(p));
+    _capSent.removeWhere((p) => !online.contains(p));
+    for (final peer
+        in _repairs.keys.where((p) => !online.contains(p)).toList()) {
+      _repairs.remove(peer)?.close();
+      _nextRepair.remove(peer);
+    }
     for (final peer in online.difference(_syncedPeers)) {
       _syncedPeers.add(peer);
       unawaited(
@@ -358,6 +420,23 @@ class GroupController extends ChangeNotifier {
             await transport.connect(peer);
           } catch (_) {}
           if (_closed) return;
+        }
+        if (_courierEnabled) {
+          for (final peer in peers) {
+            if (transport.connected(peer) && !_capSent.contains(peer)) {
+              try {
+                await transport.send(peer, _courierCapability);
+                if (!_closed) _capSent.add(peer);
+              } catch (_) {}
+            }
+          }
+        }
+        for (final peer in peers) {
+          if (_courierEnabled &&
+              transport.connected(peer) &&
+              supportsCourier(peer)) {
+            _offerRepair(peer);
+          }
         }
         for (final job in _jobs.values.toList()) {
           if (!transport.connected(job.peerId) ||
@@ -606,15 +685,23 @@ class GroupController extends ChangeNotifier {
   }
 
   Future<bool> sendText(String gid, String text) async {
-    if (_closed || text.trim().isEmpty) return false;
+    final trimmed = text.trim();
+    if (_closed || trimmed.isEmpty) return false;
     try {
+      final payload = {'text': trimmed};
+      if (text.length > _maxGroupTextPayloadBytes ||
+          utf8.encode(jsonEncode(payload)).length > _maxGroupTextPayloadBytes) {
+        return await sendBatch(gid, '', [ChatAttachment.longMessage(text)]);
+      }
       return await _run(() async {
-        await _post(gid, 'message', {'text': text.trim()});
+        await _post(gid, 'message', payload);
         return true;
       });
-    } catch (_) {
+    } catch (caught) {
       if (!_closed) {
-        error = 'Could not save the message.';
+        error = caught is FormatException
+            ? caught.message
+            : 'Could not save the message.';
         _changed();
       }
       return false;
@@ -746,6 +833,22 @@ class GroupController extends ChangeNotifier {
   }
 
   Future<void> _receive(String peer, String text) async {
+    if (text.startsWith(gapRepairPrefix)) {
+      if (_courierEnabled && supportsCourier(peer)) {
+        await _repair(peer).receive(text);
+      }
+      return;
+    }
+    if (text == _courierCapability) {
+      if (_courierPeers.length < 1024 &&
+          groups.any((g) => canSend(g.groupId) && g.contains(peer))) {
+        if (_courierPeers.add(peer)) {
+          await _saveIndex();
+          _offerRepair(peer);
+        }
+      }
+      return;
+    }
     if (text.startsWith(_ackPrefix)) {
       final id = text.substring(_ackPrefix.length),
           job = _jobs[text.substring(_ackPrefix.length)];
@@ -903,7 +1006,13 @@ class GroupController extends ChangeNotifier {
     }
   }
 
-  Future<void> _event(String peer, String source) async {
+  Future<void> _event(
+    String peer,
+    String source, {
+    int? receivedAt,
+    Map<String, Object?>? deliveryEnvelope,
+    bool repair = false,
+  }) async {
     final e = await crypto.groupCall('inspect', {'event': source});
     final gid = e['groupId'] as String,
         sender = e['sender'] as String,
@@ -925,8 +1034,14 @@ class GroupController extends ChangeNotifier {
           m.senderId == ownerId &&
           m.recipients.contains(peer) &&
           payload['receivedAt'] is int) {
+        final previous = m.receipts[peer];
         m.receipts.putIfAbsent(peer, () => payload['receivedAt'] as int);
-        await _saveRoom(gid);
+        try {
+          await _saveRoom(gid);
+        } catch (_) {
+          if (previous == null) m.receipts.remove(peer);
+          rethrow;
+        }
       }
       return;
     }
@@ -944,11 +1059,14 @@ class GroupController extends ChangeNotifier {
       return;
     }
     final key = '$sender:$id';
-    if (_deleted[gid]?.contains(key) == true) return;
+    if (isDeletedDelivery(gid, sender, id, e['sentAt'] as int)) return;
     final room = _rooms.putIfAbsent(gid, () => []);
     final existing = room.where((m) => m.key == key).firstOrNull;
     GroupMessage message;
     if (existing != null) {
+      if (repair && existing.event != source) {
+        throw const FormatException('Conflicting group repair event');
+      }
       message = existing;
     } else {
       final manifest = e['kind'] == 'file'
@@ -972,7 +1090,10 @@ class GroupController extends ChangeNotifier {
         text: manifest?.caption ?? manifest?.name ?? payload['text'] as String,
         event: source,
         sentAt: e['sentAt'] as int,
-        receivedAt: DateTime.now().millisecondsSinceEpoch,
+        receivedAt: repair
+            ? null
+            : receivedAt ?? DateTime.now().millisecondsSinceEpoch,
+        repaired: repair,
         recipients: const [],
         manifest: manifest,
       );
@@ -981,8 +1102,19 @@ class GroupController extends ChangeNotifier {
       }
       room.add(message);
     }
-    await _saveRoom(gid);
+    message.deliveryEnvelope ??= deliveryEnvelope;
+    _pendingHistory.add(message);
+    if (repair) {
+      await _saveRoomPage(gid, room, room.indexOf(message) ~/ _pageMessages);
+    } else {
+      await _saveRoom(gid);
+    }
     await _saveIndex();
+    _pendingHistory.remove(message);
+    if (repair) {
+      if (message.manifest != null) swarm.register(message.manifest!);
+      return;
+    }
     if (message.manifest != null) {
       swarm.register(message.manifest!);
       if (_completedFiles.contains(message.manifest!.fileId)) {
@@ -994,6 +1126,7 @@ class GroupController extends ChangeNotifier {
         peerId: gid,
         displayName: '${g.name} · ${message.senderName}',
         messageId: key,
+        messageText: message.text,
       );
     }
   }
@@ -1007,7 +1140,8 @@ class GroupController extends ChangeNotifier {
       'payload': jsonEncode({
         'messageId': message.id,
         'senderId': message.senderId,
-        'receivedAt': DateTime.now().millisecondsSinceEpoch,
+        'receivedAt':
+            message.receivedAt ?? DateTime.now().millisecondsSinceEpoch,
       }),
       'now': DateTime.now().millisecondsSinceEpoch,
     });
@@ -1043,7 +1177,7 @@ class GroupController extends ChangeNotifier {
         if (message == null) return;
         _completedFiles.add(manifest.fileId);
         try {
-          if (message.senderId != ownerId) {
+          if (message.senderId != ownerId && !message.repaired) {
             await _receipt(message);
           }
           await _saveIndex();
@@ -1052,7 +1186,7 @@ class GroupController extends ChangeNotifier {
           rethrow;
         }
         _changed();
-        if (message.senderId != ownerId) {
+        if (message.senderId != ownerId && !message.repaired) {
           await notifications?.notifyIncoming(
             peerId: manifest.groupId,
             displayName:
@@ -1060,6 +1194,12 @@ class GroupController extends ChangeNotifier {
             messageId: message.key,
             fileName: manifest.name,
             kind: IncomingNotificationKind.file,
+            markdownSize: manifest.size,
+            loadMarkdown:
+                manifest.mimeType.toLowerCase() ==
+                    ChatAttachment.markdownMimeType
+                ? () => openFile(manifest)
+                : null,
           );
         }
       }).catchError((Object _) {}),
@@ -1091,6 +1231,8 @@ class GroupController extends ChangeNotifier {
   }
 
   Future<void> clearConversation(String gid) => _run(() async {
+    _pendingHistory.removeWhere((m) => m.groupId == gid);
+    _deletedBefore[gid] = DateTime.now().millisecondsSinceEpoch;
     _roomGenerations[gid] = (_roomGenerations[gid] ?? 0) + 1;
     final deleted = _deleted.putIfAbsent(gid, () => {});
     deleted.addAll((_rooms[gid] ?? []).map((m) => m.key));
@@ -1099,12 +1241,252 @@ class GroupController extends ChangeNotifier {
     await _saveIndex();
     _changed();
   });
+  Future<void> saveDeliveryMetadata(
+    GroupMessage message, {
+    Map<String, Object?>? envelope,
+    String? peer,
+    String? jobId,
+  }) => _run(() async {
+    if (!canSend(message.groupId) ||
+        !(_rooms[message.groupId]?.contains(message) ?? false) ||
+        isDeletedDelivery(
+          message.groupId,
+          message.senderId,
+          message.id,
+          message.sentAt,
+        )) {
+      throw StateError('Group message changed');
+    }
+    if (peer != null &&
+        (jobId == null ||
+            !message.recipients.contains(peer) ||
+            !_groups[message.groupId]!.contains(peer))) {
+      throw StateError('Group recipient changed');
+    }
+    message.deliveryEnvelope ??= envelope;
+    if (peer != null) message.courierJobs.putIfAbsent(peer, () => jobId!);
+    final room = _rooms[message.groupId]!,
+        page = room.indexOf(message) ~/ _pageMessages;
+    await _write('g-room-${_roomKey(message.groupId)}-$page', {
+      'messages': room
+          .skip(page * _pageMessages)
+          .take(_pageMessages)
+          .map((m) => m.toJson())
+          .toList(),
+    });
+  });
+  Future<void> acceptDelivery(
+    String peer,
+    String source,
+    Map<String, Object?> envelope,
+    int receivedAt, {
+    SwarmManifest? file,
+  }) => _run(() async {
+    final event = _map(jsonDecode(source)), gid = event['groupId'] as String;
+    if (!canSend(gid) ||
+        isDeletedDelivery(
+          gid,
+          peer,
+          event['id'] as String,
+          event['sentAt'] as int,
+        )) {
+      throw StateError('Group unavailable');
+    }
+    if (file != null) {
+      if (!(await cache.status(file)).complete) {
+        throw StateError('Group file not committed');
+      }
+      _completedFiles.add(file.fileId);
+    }
+    await _event(
+      peer,
+      source,
+      receivedAt: receivedAt,
+      deliveryEnvelope: envelope,
+    );
+    final saved = _rooms[gid]
+        ?.where((m) => m.id == event['id'] && m.senderId == peer)
+        .firstOrNull;
+    if (saved == null || saved.deliveryEnvelope == null) {
+      throw StateError('Group history not committed');
+    }
+    if (file != null) {
+      await notifications?.notifyIncoming(
+        peerId: gid,
+        displayName: '${_groups[gid]!.name} · ${saved.senderName}',
+        messageId: saved.key,
+        fileName: file.name,
+        kind: IncomingNotificationKind.file,
+        markdownSize: file.size,
+        loadMarkdown:
+            file.mimeType.toLowerCase() == ChatAttachment.markdownMimeType
+            ? () => openFile(file)
+            : null,
+      );
+    }
+    _changed();
+  });
+  Future<void> recordCourierReceipt(
+    String gid,
+    String id,
+    String peer,
+    int receivedAt,
+  ) => _run(() async {
+    final message = _rooms[gid]
+        ?.where((m) => m.id == id && m.senderId == ownerId)
+        .firstOrNull;
+    if (message == null || !message.recipients.contains(peer)) return;
+    final previous = message.receipts[peer];
+    message.receipts.putIfAbsent(peer, () => receivedAt);
+    final removed = _jobs.values
+        .where(
+          (j) =>
+              j.peerId == peer &&
+              j.body['type'] == 'event' &&
+              j.body['source'] == message.event,
+        )
+        .toList();
+    final next = {..._jobs};
+    for (final job in removed) {
+      next.remove(job.id);
+    }
+    try {
+      await _saveRoom(gid);
+      await _saveIndex(jobs: next);
+    } catch (_) {
+      if (previous == null) message.receipts.remove(peer);
+      rethrow;
+    }
+    _jobs
+      ..clear()
+      ..addAll(next);
+    for (final job in removed) {
+      unawaited(
+        blobs
+            .deleteGroupBlob(ownerId, 'g-job-${job.id}')
+            .catchError((Object _) {}),
+      );
+    }
+    _changed();
+  });
   Future<void> flush() => _serial;
+  (String, int)? _repairScope(String scope) {
+    final match = RegExp(r'^(group:[0-9a-f]{64}):([1-9][0-9]{0,15})$')
+        .firstMatch(scope);
+    if (match == null) return null;
+    final epoch = int.tryParse(match[2]!);
+    return epoch == null ? null : (match[1]!, epoch);
+  }
+
+  Future<bool> _authorizeRepair(String peer, String scope) async {
+    final binding = _repairScope(scope);
+    if (!active ||
+        !_courierEnabled ||
+        _transport?.connected(peer) != true ||
+        binding == null ||
+        !canSend(binding.$1) ||
+        _groups[binding.$1]?.contains(peer) != true) {
+      return false;
+    }
+    final checked = await crypto.groupCall('authorize', {
+      'peerId': peer,
+      'groupId': binding.$1,
+      'epoch': binding.$2,
+    });
+    return active &&
+        _transport?.connected(peer) == true &&
+        checked['allowed'] == true;
+  }
+
+  GapRepair _repair(String peer) => _repairs.putIfAbsent(peer, () {
+    final cursor = ProtectedGapCursor(blobs, ownerId, peer);
+    return GapRepair(
+      send: (frame) => _transport!.send(peer, frame),
+      authorize: (scope) => _authorizeRepair(peer, scope),
+      records: (scope) {
+        final (gid, epoch) = _repairScope(scope)!;
+        return [
+          for (final m in (_rooms[gid] ?? const <GroupMessage>[]).reversed.take(
+            GapRepair.maxRecords,
+          ))
+            if ((jsonDecode(m.event) as Map)['epoch'] == epoch &&
+                m.senderId != peer &&
+                _groups[gid]?.contains(m.senderId) == true)
+              GapRecord(m.key, m.event),
+        ];
+      },
+      // Retry an in-memory insert after any failed page write by validating and
+      // committing that exact record again before advancing the checkpoint.
+      contains: (scope, id) =>
+          _rooms[_repairScope(scope)!.$1]?.any(
+            (m) =>
+                m.key == id && !_uncommittedRepairs.contains('$scope\u0000$id'),
+          ) ==
+          true,
+      commit: (scope, row) async {
+        final (gid, epoch) = _repairScope(scope)!;
+        final event = await crypto.groupCall('inspect', {'event': row.source});
+        final author = event['sender'] as String, id = event['id'] as String;
+        if (event['groupId'] != gid ||
+            epoch != event['epoch'] ||
+            row.id != '$author:$id' ||
+            author == ownerId ||
+            !['file', 'message'].contains(event['kind'])) {
+          throw const FormatException('Group repair event mismatch');
+        }
+        if (!await _authorizeRepair(peer, scope)) {
+          throw StateError('Group repair scope changed');
+        }
+        final key = '$scope\u0000${row.id}';
+        _uncommittedRepairs.add(key);
+        await _event(author, row.source, repair: true);
+        _uncommittedRepairs.remove(key);
+        if (_rooms[gid]?.any((m) => m.key == row.id && m.repaired) == true) {
+          onGapRepaired?.call();
+        }
+        _changed();
+      },
+      checkpoint: cursor.checkpoint,
+      resume: cursor.resume,
+    );
+  });
+  final _uncommittedRepairs = <String>{};
+  void _offerRepair(String peer) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if ((_nextRepair[peer] ?? 0) > now) return;
+    _nextRepair[peer] = now + 30000;
+    final scopes = <String>{};
+    for (final g in _groups.values) {
+      if (!canSend(g.groupId) || !g.contains(peer)) continue;
+      final room = _rooms[g.groupId];
+      if (room == null) continue;
+      for (final m in room.reversed.take(GapRepair.maxRecords)) {
+        if (m.senderId == peer) continue;
+        final epoch = (jsonDecode(m.event) as Map)['epoch'];
+        scopes.add('${g.groupId}:$epoch');
+      }
+    }
+    if (scopes.isEmpty) return;
+    final turn = _repairTurns[peer] ?? 0;
+    _repairTurns[peer] = (turn + 1) % scopes.length;
+    unawaited(
+      _repair(peer)
+          .offer(scopes.elementAt(turn % scopes.length))
+          .catchError((Object _) {
+            _nextRepair.remove(peer);
+          }),
+    );
+  }
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
     _generation++;
     _timer?.cancel();
+    for (final repair in _repairs.values) {
+      repair.close();
+    }
+    _repairs.clear();
     await _subscription?.cancel();
     _transport?.removeListener(_transportChanged);
     await _transport?.close();

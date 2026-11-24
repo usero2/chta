@@ -8,8 +8,14 @@ import '../chat/chat_controller.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_shell.dart';
 import '../chat/peer_history.dart';
+import '../chat/messaging_service.dart';
+import '../courier/courier_service.dart';
+import '../delivery/courier_delivery_adapter.dart';
+import '../delivery/delivery_crypto_bridge.dart';
 import '../chat/peer_history_store.dart';
 import '../chat/attachment_store.dart';
+import '../chat/cache_policy.dart';
+import '../chat/managed_attachment_cache.dart';
 import '../chat/widgets/conversation_list.dart';
 import '../chat/widgets/contact_details_sheet.dart';
 import '../groups/group_blob_bridge.dart';
@@ -28,10 +34,15 @@ import '../notifications/incoming_notifications.dart';
 import '../notifications/peer_history_notifications.dart';
 import '../p2p/connection_page.dart';
 import '../relay/relay_network.dart';
+import '../relay/default_relays.dart';
+import '../seed/seed_client.dart';
+import '../seed/seed_crypto_bridge.dart';
+import 'routed_contact_bridge.dart';
 import '../profile/profile_controller.dart';
 import '../profile/profile_page.dart';
 import '../profile/profile_store.dart';
 import '../routing/app_router.dart';
+import '../runtime/app_runtime.dart';
 import 'account_controller.dart';
 import 'account_models.dart';
 import 'android_session_bridge.dart';
@@ -542,7 +553,10 @@ class _AuthenticatedHome extends StatefulWidget {
   State<_AuthenticatedHome> createState() => _AuthenticatedHomeState();
 }
 
-class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
+class _AuthenticatedHomeState extends State<_AuthenticatedHome>
+    with WidgetsBindingObserver {
+  String? runtimeOwner;
+  Future<void>? switchingIdentity;
   final connectionPageKey = GlobalKey<ConnectionPageState>();
   late final PeerHistory peerHistory;
   late final IncomingNotifications notifications;
@@ -564,29 +578,57 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   String? targetGroupId;
   bool exiting = false;
   ContactRequestController? friendRequests;
+  MessagingService? messaging;
+  late final CachePolicy cachePolicy;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.router.addListener(_routeChanged);
     _readRoute();
     unawaited(widget.accountController.rememberRoute(widget.router.path));
     widget.chatController.initialize();
     notifications = IncomingNotifications(
       identityId: widget.accountController.identity!.id,
+      settings: widget.bridge is GroupBlobBridge
+          ? widget.bridge as GroupBlobBridge
+          : null,
     );
     unawaited(notifications.initialize());
+    cachePolicy = CachePolicy(
+      ownerId: widget.accountController.identity!.id,
+      settings: widget.bridge is GroupBlobBridge
+          ? widget.bridge as GroupBlobBridge
+          : null,
+    );
+    unawaited(cachePolicy.initialize().catchError((Object _) {}));
     peerHistory = PeerHistory(
       attachments: kIsWeb || widget.accountController.bridge is AttachmentBridge
-          ? createAttachmentStore(bridge: widget.accountController.bridge)
+          ? createAttachmentStore(
+              bridge: widget.accountController.bridge,
+              cachePolicy: cachePolicy,
+            )
           : null,
       store:
           widget.peerHistoryStore ??
           createPeerHistoryStore(
             identityBridge: widget.accountController.desktop,
+            roomBlobs: widget.bridge is GroupBlobBridge
+                ? widget.bridge as GroupBlobBridge
+                : null,
           ),
     );
     peerHistory.addListener(_historyChanged);
+    runtimeOwner =
+        '${widget.accountController.identity!.id}:${identityHashCode(this)}';
+    unawaited(
+      AppRuntime.instance?.attach(
+        runtimeOwner!,
+        flush: _flushForBackground,
+        lock: _switchIdentity,
+      ),
+    );
     _loadHistory();
     _loadChatContacts();
     final bridge = widget.bridge;
@@ -613,7 +655,10 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         ownerId: widget.accountController.identity!.id,
         crypto: bridge as GroupCryptoBridge,
         blobs: bridge as GroupBlobBridge,
-        attachments: createAttachmentStore(bridge: bridge),
+        attachments: createAttachmentStore(
+          bridge: bridge,
+          cachePolicy: cachePolicy,
+        ),
         displayName: () => widget.profileController.name,
         notifications: notifications,
       );
@@ -623,6 +668,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
           .initialize()
           .then((_) {
             if (mounted) {
+              messaging?.courier?.attachGroups(controller);
               setState(() {});
               unawaited(_attachGroupTransport());
             }
@@ -924,6 +970,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       builder: (context, constraints) {
         final wide = showSidebar && constraints.maxWidth > 720;
         final room = GroupRoom(
+          deliveryLabel: messaging?.courier?.groupLabelFor,
           group: group,
           ownId: controller.ownerId,
           messages: controller.messagesFor(id),
@@ -968,7 +1015,87 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   Future<void> _loadHistory() async {
     try {
       await peerHistory.load(widget.accountController.identity!.id);
+      try {
+        await cachePolicy.reconcile(peerHistory.cacheReferences);
+      } on CachePolicyException {
+        /* Chat remains available; Profile exposes cache errors. */
+      }
       if (!mounted) return;
+      final bridge = widget.bridge;
+      if (bridge is RelayCryptoBridge && bridge is GroupCryptoBridge) {
+        final owner = widget.accountController.identity!.id;
+        final relayConfig = configuredDataRelays();
+        final network = RelayNetwork(
+          bridge as RelayCryptoBridge,
+          bootstrapRelays: relayConfig.pins,
+          providerPolicy: relayConfig.policy,
+        );
+        final seed = bridge is SeedCryptoBridge
+            ? SeedClient(
+                account: bridge,
+                relayCrypto: bridge as RelayCryptoBridge,
+                signalCrypto: bridge as SeedCryptoBridge,
+                network: network,
+                multiPeer: true,
+              )
+            : null;
+        final managedCache = managedChunkCache(bridge, cachePolicy);
+        final courier =
+            bridge is DeliveryCryptoBridge && bridge is GroupBlobBridge
+            ? CourierDeliveryAdapter(
+                service: CourierService(
+                  ownerId: owner,
+                  crypto: bridge as DeliveryCryptoBridge,
+                  storage: bridge as GroupBlobBridge,
+                  budget: cachePolicy,
+                  network: network,
+                  seed: seed,
+                  canHost:
+                      !kIsWeb &&
+                      [
+                        TargetPlatform.windows,
+                        TargetPlatform.macOS,
+                        TargetPlatform.linux,
+                      ].contains(defaultTargetPlatform),
+                  isCurrent: () => mounted && peerHistory.ownerId == owner,
+                ),
+                history: peerHistory,
+                cache: managedCache,
+                contacts: () => chatContacts,
+                isCurrent: () => mounted && peerHistory.ownerId == owner,
+              )
+            : null;
+        final service = MessagingService(
+          ownerId: owner,
+          account: bridge,
+          network: network,
+          history: peerHistory,
+          seed: seed,
+          cache: managedCache,
+          courier: courier,
+          ownCard: () => bridge is RoutedContactBridge
+              ? (bridge as RoutedContactBridge).contactCardWithRelays(
+                  displayName: widget.profileController.name,
+                  avatar: widget.profileController.contactAvatar,
+                  relayUrls: network.contactRelayUrls,
+                )
+              : bridge.contactCard(
+                  displayName: widget.profileController.name,
+                  avatar: widget.profileController.contactAvatar,
+                ),
+        );
+        messaging = service;
+        if (groups?.ready == true) courier?.attachGroups(groups!);
+        relayNetwork = network;
+        service.addListener(_messagingChanged);
+        if (seed != null) friendRequests?.attach(seed);
+        unawaited(
+          service.start().catchError((Object caught) {
+            if (mounted) setState(() => historyError = caught);
+          }),
+        );
+        unawaited(_attachGroupTransport());
+      }
       historyNotifications = PeerHistoryNotifications(
         history: peerHistory,
         notifications: notifications,
@@ -984,26 +1111,47 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     if (mounted) setState(() {});
   }
 
+  void _messagingChanged() {
+    if (mounted) {
+      setState(() => onlinePeers = messaging?.onlinePeers ?? const {});
+    }
+  }
+
   Future<void> _loadChatContacts() async {
     final contacts = await widget.bridge.contacts();
     if (mounted) {
       if (historyReady) peerHistory.rememberContacts(contacts);
       setState(() => chatContacts = contacts);
+      await messaging?.refreshContacts();
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (runtimeOwner case final owner?) {
+      unawaited(AppRuntime.instance?.detach(owner));
+    }
     widget.router.removeListener(_routeChanged);
     historyNotifications?.dispose();
     notifications.dispose();
     peerHistory.removeListener(_historyChanged);
+    messaging?.removeListener(_messagingChanged);
+    unawaited(messaging?.close());
     peerHistory.dispose();
+    cachePolicy.dispose();
     groups?.removeListener(_groupsChanged);
     unawaited(groups?.close());
     friendRequests?.removeListener(_requestsChanged);
     unawaited(friendRequests?.close());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      unawaited(messaging?.resumeNetwork());
+    }
   }
 
   void _readRoute() {
@@ -1063,11 +1211,52 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     widget.router.go(contactChatRoute(contact.identityId));
   }
 
-  Future<void> _switchIdentity() async {
+  Future<void> _switchIdentity() => switchingIdentity ??= _lockCurrentSession()
+      .whenComplete(() => switchingIdentity = null);
+
+  Future<void> _lockCurrentSession() => notifications.withChangesPaused(
+    () => cachePolicy.withChangesPaused(_lockSession),
+  );
+
+  Future<void> _lockSession() async {
+    final identity = widget.accountController.identity;
+    await _flushForBackground();
+    if (!mounted || !identical(widget.accountController.identity, identity)) {
+      return;
+    }
+    if (runtimeOwner case final owner?) {
+      await AppRuntime.instance?.detach(owner);
+    }
+    if (!mounted || !identical(widget.accountController.identity, identity)) {
+      return;
+    }
+    final navigator = Navigator.maybeOf(context, rootNavigator: true);
+    await widget.accountController.lock();
+    if (navigator != null && navigator.mounted) {
+      // Viewers on the root navigator can outlive the unlocked account view.
+      navigator.popUntil((route) => route.isFirst);
+    }
+  }
+
+  Future<void> _flushForBackground() => notifications.withChangesPaused(
+    () => cachePolicy.withChangesPaused(_flushSession),
+  );
+
+  Future<void> _flushSession() async {
+    await notifications.flush();
     await friendRequests?.flush();
     await groups?.flush();
     await peerHistory.flush();
-    await widget.accountController.lock();
+    try {
+      await cachePolicy.flush();
+    } on CachePolicyException {
+      /* Initial reservations are already protected; lock may retain conservative usage. */
+    }
+    if (peerHistory.error != null) {
+      throw StateError('History could not be saved');
+    }
+    await widget.accountController.rememberRoute(widget.router.path);
+    await widget.accountController.flushSessionWrites();
   }
 
   Future<void> _setPinLock(bool enabled) async {
@@ -1077,16 +1266,18 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     await widget.accountController.setPinLock(enabled);
   }
 
-  Future<void> _closeApp() async {
+  Future<void> _closeApp() => notifications.withChangesPaused(
+    () => cachePolicy.withChangesPaused(_closeSession),
+  );
+
+  Future<void> _closeSession() async {
     if (exiting) return;
     exiting = true;
     try {
-      await groups?.flush();
-      await peerHistory.flush();
-      await widget.accountController.rememberRoute(widget.router.path);
-      await widget.accountController.flushSessionWrites();
-      if (widget.accountController.pinLockEnabled) {
-        await widget.accountController.lock();
+      await _flushForBackground();
+      if (widget.accountController.pinLockEnabled &&
+          AppRuntime.instance?.running != true) {
+        await _switchIdentity();
       }
       await SystemNavigator.pop();
     } catch (_) {
@@ -1173,6 +1364,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         index == 0 && conversationIdFromRoute(widget.router.path) != null;
     final connectionPage = ConnectionPage(
       key: connectionPageKey,
+      messaging: messaging,
       onRelayNetworkReady: (network) {
         if (mounted && !identical(network, relayNetwork)) {
           setState(() => relayNetwork = network);
@@ -1290,6 +1482,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 else
                   connectionPage,
                 ProfilePage(
+                  cachePolicy: cachePolicy,
+                  courier: messaging?.courier?.service,
                   notifications: notifications,
                   controller: widget.profileController,
                   identity: widget.accountController.identity!,

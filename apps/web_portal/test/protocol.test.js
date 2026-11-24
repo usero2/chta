@@ -4,8 +4,31 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { SEED_ID, verifyProof, verifySignal, verifyRecord, publicEndpoint } from '../src/protocol.js';
 import { identity, now, proof, signal, groupSignal, contactSignal, record, sdp } from './helpers.js';
+import { verifyDispatch } from '../src/protocol.js';
+import { dispatch } from './helpers.js';
 const alice = identity(), bob = identity();
 const did = `did:cht:${bob.id}`;
+
+test('dispatch binds channel, safe monotonic sequence, seed, owner and exact envelope', async () => {
+  const nonce=Buffer.alloc(32,5).toString('base64url');
+  for(const e of [signal(alice,did),groupSignal(alice,did),contactSignal(alice,did)]) {
+    const p=dispatch(alice,e,nonce);
+    assert.equal(await verifyDispatch(p,e,e.from,nonce,0),1);
+    for(const change of [{version:2},{seedId:'0'.repeat(64)},{connection:Buffer.alloc(32,6).toString('base64url')},
+      {sequence:0},{sequence:1.5},{sequence:Number.MAX_SAFE_INTEGER+1},{sequence:2},{envelopeHash:'0'.repeat(64)},
+      {signature:p.signature.slice(1)},{publicKey:bob.publicKey},{extra:true}]) {
+      await assert.rejects(verifyDispatch({...p,...change},e,e.from,nonce,0));
+    }
+    await assert.rejects(verifyDispatch(p,e,e.from,nonce,1));
+    await assert.rejects(verifyDispatch(p,{...e,payload:'changed'},e.from,nonce,0));
+    await assert.rejects(verifyDispatch(p,e,did,nonce,0));
+  }
+});
+test('Rust/JS dispatch fixture uses identical digest and signature bytes', async () => {
+  const f=JSON.parse(await readFile(new URL('./fixtures/seed-dispatch.json',import.meta.url),'utf8'));
+  assert.equal(await verifyDispatch(f.proof,f.envelope,f.envelope.from,f.proof.connection,0),1);
+  assert.equal(f.canonical,'chta seed dispatch v1\0'+JSON.stringify([1,SEED_ID,f.proof.connection,1,f.proof.envelopeHash]));
+});
 
 test('contact setup verifies isolated encrypted setup kinds without allowing content fields', async () => {
   for (const kind of ['request','received','accepted','declined']) {

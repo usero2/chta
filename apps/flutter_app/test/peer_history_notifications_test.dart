@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cht/chat/attachment_ref.dart';
+import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/notifications/incoming_notifications.dart';
@@ -63,6 +64,56 @@ void main() {
   void bind() => observer = PeerHistoryNotifications(
     history: history,
     notifications: notifications,
+  );
+
+  test(
+    'opted-in previews show text from the message and Markdown file',
+    () async {
+      await notifications.setShowMessagePreview(true);
+      bind();
+      history.add('alice', message('plain-test'));
+      final attachment = ChatAttachment.longMessage('private message ' * 1000);
+      history.add(
+        'alice',
+        PeerMessage(
+          id: 'markdown-preview-test',
+          text: attachment.previewLabel,
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          attachment: attachment,
+        ),
+      );
+      await settle();
+      expect(
+        backend.shown.singleWhere((n) => n.messageId == 'plain-test').body,
+        'secret text',
+      );
+      final preview = backend.shown
+          .singleWhere((n) => n.messageId == 'markdown-preview-test')
+          .body;
+      expect(preview, startsWith('private message '));
+      expect(preview.length, 160);
+    },
+  );
+
+  test(
+    'Markdown generated from a message hides its title by default',
+    () async {
+      bind();
+      final attachment = ChatAttachment.longMessage('private message ' * 1000);
+      history.add(
+        'alice',
+        PeerMessage(
+          id: 'markdown-test',
+          text: attachment.previewLabel,
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          attachment: attachment,
+        ),
+      );
+      await settle();
+      expect(backend.shown.single.body, 'New message');
+    },
   );
 
   test(

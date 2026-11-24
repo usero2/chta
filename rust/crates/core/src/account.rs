@@ -60,10 +60,22 @@ pub struct AccountCore {
 }
 
 impl AccountCore {
+    pub fn delivery_call(&self, operation:&str,args:serde_json::Value)->Result<serde_json::Value,String>{
+        let identity=self.identity.as_ref().ok_or("Unlock an identity before delivery")?;
+        crate::delivery::call(identity,&self.contacts,&self.groups,operation,args)
+    }
     pub fn contact_request_call(&self, operation: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
         let identity = self.identity.as_ref().ok_or("Unlock an identity before contact setup")?;
         crate::contact_requests::call(identity, &self.contacts, operation, args)
     }
+    pub fn sign_seed_dispatch(&self, seed_id: &str, connection: &str, sequence: u64, envelope_json: &str) -> Result<String, String> {
+        if envelope_json.len() > 15_500 { return Err("Seed envelope too large".into()); }
+        let identity = self.identity.as_ref().ok_or("Identity unavailable")?;
+        let envelope = serde_json::from_str(envelope_json).map_err(|_|"Invalid seed envelope")?;
+        let proof = crate::seed_dispatch::SeedDispatch::signed(&identity.signing_key(), seed_id, connection, sequence, &envelope)?;
+        serde_json::to_string(&proof).map_err(|e|e.to_string())
+    }
+
     pub fn sign_seed_signal(
         &self,
         peer_id: &str,

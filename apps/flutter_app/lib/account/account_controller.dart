@@ -30,6 +30,7 @@ class AccountController extends ChangeNotifier {
   Object? sessionError;
   int _sessionGeneration = 0;
   Future<void> _sessionWrites = Future.value();
+  Future<void>? _locking;
   AndroidSessionBridge? get _session =>
       bridge is AndroidSessionBridge &&
           (bridge as AndroidSessionBridge).supportsRememberedSession
@@ -206,15 +207,25 @@ class AccountController extends ChangeNotifier {
     }
   }
 
-  Future<void> lock() async {
-    _sessionGeneration++;
-    await _sessionWrites;
-    await desktop!.lockIdentity();
-    identity = null;
-    pendingIdentity = null;
-    pinLockEnabled = true;
-    rememberedRoute = null;
-    await showIdentityList();
+  Future<void> lock() =>
+      _locking ??= _lock().whenComplete(() => _locking = null);
+
+  Future<void> _lock() async {
+    working = true;
+    notifyListeners();
+    try {
+      _sessionGeneration++;
+      await _sessionWrites;
+      await desktop!.lockIdentity();
+      identity = null;
+      pendingIdentity = null;
+      pinLockEnabled = true;
+      rememberedRoute = null;
+      await showIdentityList();
+    } finally {
+      working = false;
+      notifyListeners();
+    }
   }
 
   Future<void> _readSessionPreferences() async {

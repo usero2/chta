@@ -1,0 +1,30 @@
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: apps/relay_node/Dockerfile
+    restart: unless-stopped
+    environment:
+      CHT_RELAY_KEY_PASSWORD_FILE: /run/secrets/relay_password
+    secrets:
+      - relay_password
+    volumes:
+      - ./relay.example.json:/etc/chta/relay.json:ro
+      - relay_state:/var/lib/chta-relay
+  tls:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - tls_state:/data
+    depends_on:
+      - relay
+secrets:
+  relay_password:
+    file: ./.local/relay-key-password
+volumes:
+  relay_state:
+  tls_state:

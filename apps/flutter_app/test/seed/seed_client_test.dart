@@ -28,7 +28,15 @@ Future<void> flush() async {
   }
 }
 
-class Crypto implements SeedCryptoBridge, RelayCryptoBridge {
+class Crypto
+    implements SeedCryptoBridge, RelayCryptoBridge, SeedDispatchCryptoBridge {
+  @override
+  Future<String> signSeedDispatch(
+    String seedId,
+    String connection,
+    int sequence,
+    String envelopeJson,
+  ) async => jsonEncode({'sequence': sequence, 'connection': connection});
   Completer<String>? gate;
   @override
   Future<String> relayProof(String nonce, String relayId) async =>
@@ -130,6 +138,125 @@ Map<String, dynamic> envelope({String from = peer, String id = 'control-1'}) =>
       'expiresAt': 2000,
     };
 void main() {
+  test('Courier discovery negotiates capability and preserves legacy registration frames', () async {
+    for (final capable in [false, true]) {
+      final crypto = Crypto(),
+          account = Account(),
+          socket = Socket(),
+          network = RelayNetwork(Crypto());
+      final client = SeedClient(
+        account: account,
+        relayCrypto: crypto,
+        signalCrypto: crypto,
+        network: network,
+        connector: (_) async => socket,
+        clock: () => 1000,
+      );
+      final seen = <List<Object?>>[];
+      final sub = client.courierRecords.listen(seen.add);
+      await client.start(owner);
+      socket.receive({
+        'type': 'challenge',
+        'protocol': 'chta-seed',
+        'version': 1,
+        'seedId': seedId,
+        'nonce': 'A' * 43,
+        'capabilities': capable ? ['courier-directory-v1'] : [],
+      });
+      await flush();
+      socket.receive({
+        'type': 'registered',
+        'protocol': 'chta-seed',
+        'version': 1,
+      });
+      await flush();
+      client.publishCouriers([
+        {'synthetic': 'metadata'},
+      ]);
+      expect(socket.sent.any((f) => f['type'] == 'couriers'), capable);
+      if (capable) {
+        socket.receive({
+          'type': 'couriers',
+          'records': [
+            {'synthetic': 'untrusted'},
+          ],
+        });
+        await flush();
+        expect(seen.single.single, {'synthetic': 'untrusted'});
+      }
+      await sub.cancel();
+      await client.close();
+      await network.close();
+    }
+  });
+  test('multi-peer signaling delivers authorized controls without switching selected room', () async {
+    final crypto = Crypto(),
+        account = Account()
+          ..savedContacts.addAll([contact(peer), contact(other)]),
+        socket = Socket();
+    final network = RelayNetwork(crypto);
+    final client = SeedClient(
+      account: account,
+      relayCrypto: crypto,
+      signalCrypto: crypto,
+      network: network,
+      multiPeer: true,
+      connector: (_) async => socket,
+      clock: () => 1000,
+    );
+    final received = <SeedVerifiedSignal>[];
+    final subscription = client.signals.listen(received.add);
+    try {
+      await client.start(owner);
+      client.selectContact(contact(peer));
+      socket.receive({
+        'type': 'challenge',
+        'protocol': 'chta-seed',
+        'version': 1,
+        'seedId': seedId,
+        'nonce': 'A' * 43,
+      });
+      await flush();
+      socket.receive({
+        'type': 'registered',
+        'protocol': 'chta-seed',
+        'version': 1,
+      });
+      await flush();
+      socket.receive({
+        'type': 'signal',
+        'envelope': envelope(from: other, id: 'other-answer'),
+      });
+      await flush();
+      expect(received.single.peerId, other);
+      expect(client.selectedPeer, peer);
+      await client.sendPeerSignal(
+        other,
+        'cht-control-direct-v1-test',
+        '{"v":1,"t":"ice"}',
+      );
+      expect((socket.sent.last['envelope'] as Map)['to'], other);
+      account.savedContacts.removeWhere((c) => c.identityId == other);
+      socket.receive({
+        'type': 'signal',
+        'envelope': envelope(from: other, id: 'removed'),
+      });
+      await flush();
+      expect(received.length, 1);
+      await expectLater(
+        client.sendPeerSignal(
+          other,
+          'cht-control-direct-v1-test',
+          '{"v":1,"t":"ice"}',
+        ),
+        throwsStateError,
+      );
+    } finally {
+      await subscription.cancel();
+      await client.close();
+      await network.close();
+    }
+  });
   late Crypto crypto;
   late Socket socket;
   late RelayNetwork network;
@@ -159,7 +286,7 @@ void main() {
     await client.close();
     await network.close();
   });
-  Future<void> register() async {
+  Future<void> register({bool upgraded = false}) async {
     await client.start(owner);
     client.selectContact(contact(peer));
     socket.receive({
@@ -168,6 +295,7 @@ void main() {
       'version': 1,
       'seedId': seedId,
       'nonce': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      if (upgraded) 'capabilities': ['session-dispatch-v1'],
     });
     await flush();
     socket.receive({
@@ -178,6 +306,36 @@ void main() {
     await flush();
   }
 
+  test('updated seed wraps direct and contact sends in one monotonic dispatch stream', () async {
+    await register(upgraded: true);
+    await client.sendSignal(
+      'cht-control-direct-v1-session-offer-1',
+      jsonEncode({'v': 1, 't': 'offer'}),
+    );
+    await client.sendContactRequest({
+      'version': 2,
+      'topic': 'contacts',
+      'from': owner,
+      'to': other,
+    });
+    final frames = socket.sent.where((f) => f['type'] == 'signal').toList();
+    expect(frames.map((f) => (f['dispatch'] as Map)['sequence']), [1, 2]);
+  });
+  test(
+    'legacy quota failure has explicit status and stays backed off',
+    () async {
+      await register();
+      socket.receive({
+        'type': 'error',
+        'code': 'storage-unavailable',
+        'retryAfter': 300,
+        'upgrade': 'session-dispatch-v1',
+      });
+      await flush();
+      expect(client.registered, isFalse);
+      expect(client.status, contains('update'));
+    },
+  );
   test('contact setup reaches its review stream without trusting or selecting an unknown peer', () async {
     await register();
     final packets = <Map<String, Object?>>[], chats = <SeedVerifiedSignal>[];

@@ -6,20 +6,7 @@ import 'attachment_export_stub.dart'
     as platform;
 import 'chat_attachment.dart';
 
-/// Keep exports inside the chosen folder on Windows, including NTFS streams.
-String safeAttachmentExportName(String name) {
-  var result = name
-      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
-      .replaceFirst(RegExp(r'[. ]+$'), '');
-  if (result.isEmpty) result = 'attachment';
-  if (RegExp(
-    r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',
-    caseSensitive: false,
-  ).hasMatch(result)) {
-    result = '_$result';
-  }
-  return result;
-}
+export 'chat_attachment.dart' show safeAttachmentExportName;
 
 Future<void> exportStreamedAttachment(ChatAttachment attachment) =>
     platform.exportStreamedAttachment(attachment);

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import 'chat_attachment.dart';
+import 'resumable_attachment_transfer.dart' show TransferInterrupted;
 
 typedef PacketSender = Future<void> Function(
   String packetId,
@@ -42,6 +43,23 @@ class AttachmentTransfer {
   final Map<String, _Incoming> _incoming = {};
   final Map<String, _Completed> _completed = {};
   bool _disposed = false;
+  final _sending = <String, Object>{};
+  bool canSendPacket(String id) {
+    final end = id.lastIndexOf('_');
+    return id.startsWith(_idPrefix) &&
+        end > _idPrefix.length &&
+        _sending.containsKey(id.substring(_idPrefix.length, end));
+  }
+
+  void interrupt(String transferId) {
+    _sending.remove(transferId);
+    for (final entry in _pending.entries.toList()) {
+      if (entry.key.startsWith('$_idPrefix${transferId}_') &&
+          !entry.value.isCompleted) {
+        entry.value.completeError(const TransferInterrupted('Transfer paused'));
+      }
+    }
+  }
 
   AttachmentTransfer({
     required this.sendPacket,
@@ -95,10 +113,22 @@ class AttachmentTransfer {
     final count = (attachment.bytes.length + chunkSize - 1) ~/ chunkSize;
     final total = count == 0 ? 1 : count;
     validateOutgoing(transferId, attachment);
+    if (_sending.containsKey(transferId)) {
+      throw const TransferInterrupted('Transfer already running');
+    }
+    final token = Object();
+    _sending[transferId] = token;
+    void guard() {
+      if (!identical(_sending[transferId], token)) {
+        throw const TransferInterrupted('Transfer paused');
+      }
+    }
+
     int? receipt;
     var acknowledged = 0;
     try {
       for (var base = 0; base < total; base += _windowSize) {
+        guard();
         _validatePolicy(attachment.bytes.length);
         final jobs = <Future<_AckResult>>[];
         final window = <String, Completer<int?>>{};
@@ -106,6 +136,7 @@ class AttachmentTransfer {
         try {
           final limit = (base + _windowSize).clamp(0, total);
           for (var i = base; i < limit; i++) {
+            guard();
             if (_disposed) throw StateError('Transfer disposed');
             final start = i * chunkSize;
             final end = (start + chunkSize).clamp(0, attachment.bytes.length);
@@ -147,6 +178,7 @@ class AttachmentTransfer {
                   'data': base64Encode(attachment.bytes.sublist(start, end)),
                 });
             await sendPacket(id, text, sentAt);
+            guard();
             if (failure.isCompleted) {
               final result = await failure.future;
               Error.throwWithStackTrace(result.error!, result.stack!);
@@ -183,10 +215,13 @@ class AttachmentTransfer {
           }
         }
       }
+      guard();
       return receipt;
     } catch (error) {
       onFailure?.call(transferId, error);
       rethrow;
+    } finally {
+      if (identical(_sending[transferId], token)) _sending.remove(transferId);
     }
   }
 

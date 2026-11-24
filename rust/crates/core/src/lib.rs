@@ -4,6 +4,8 @@ mod android_storage;
 mod chat;
 mod contacts;
 mod contact_requests;
+mod delivery;
+mod courier;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop_vault;
 pub mod device_sync;
@@ -15,6 +17,7 @@ mod identity;
 mod native;
 mod secure_session;
 pub mod seed_signal;
+pub mod seed_dispatch;
 pub use cht_relay_protocol as relay_directory;
 mod wasm;
 

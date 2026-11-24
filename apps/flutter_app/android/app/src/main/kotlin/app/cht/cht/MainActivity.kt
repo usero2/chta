@@ -2,6 +2,7 @@ package app.cht.cht
 
 import android.app.Activity
 import android.content.Intent
+import android.content.Context
 import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -9,6 +10,7 @@ import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.EventChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.OutputStream
@@ -20,6 +22,19 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : FlutterActivity() {
+    override fun provideFlutterEngine(context: Context): FlutterEngine? = ChatRuntime.engine
+
+    override fun shouldDestroyEngineWithHost(): Boolean = !ChatRuntime.running
+
+    override fun onDestroy() {
+        if (!ChatRuntime.running && ChatRuntime.engine === flutterEngine) {
+            ChatRuntime.engine = null
+            ChatRuntime.channel = null
+            ChatRuntime.networkMonitor?.onCancel(null)
+            ChatRuntime.networkMonitor = null
+        }
+        super.onDestroy()
+    }
     override fun popSystemNavigator(): Boolean {
         moveTaskToBack(true)
         return true
@@ -35,9 +50,28 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        ChatRuntime.engine = flutterEngine
+        val appContext = applicationContext
+        val networkMonitor = ChatRuntime.networkMonitor ?: ChatNetworkMonitor(appContext).also { ChatRuntime.networkMonitor = it }
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/network").setStreamHandler(networkMonitor)
+        ChatRuntime.channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/runtime").apply {
+            setMethodCallHandler { call, result ->
+                if (call.method != "configure") result.notImplemented()
+                else try {
+                    result.success(ChatRuntime.configure(appContext,
+                        call.argument<Boolean>("active") == true,
+                        call.argument<Boolean>("enabled"),
+                        call.argument<Boolean>("showLockAction")))
+                } catch (_: Exception) {
+                    result.error("background_unavailable", "Could not start background reception", null)
+                }
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/platform").setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
+                    "networkState" -> result.success(networkMonitor.snapshot())
+                    "availableStorage" -> result.success(android.os.StatFs(filesDir.absolutePath).availableBytes)
                     "storageConfiguration" -> result.success(storageConfiguration())
                     "createAttachmentExport" -> {
                         check(attachmentExportResult == null && attachmentOutput == null && exportResult == null) { "An export is already open" }

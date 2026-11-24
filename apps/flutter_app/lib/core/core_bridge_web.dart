@@ -12,10 +12,13 @@ import '../chat/chunked_attachment_bridge.dart';
 import 'core_bridge.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../seed/seed_crypto_bridge.dart';
+import '../delivery/delivery_crypto_bridge.dart';
 import '../groups/group_crypto_bridge.dart';
 import '../groups/group_blob_bridge.dart';
 import '../contact_requests/contact_request_bridge.dart';
 
+@JS('chtCore.deliveryCall')
+external JSPromise<JSString> _deliveryCall(JSString operation, JSString args);
 @JS('chtCore.contactRequestCall')
 external JSPromise<JSString> _contactRequestCall(
   JSString operation,
@@ -59,6 +62,13 @@ external JSPromise<JSString> _signSeedSignal(
   JSString messageId,
   JSString text,
   JSNumber now,
+);
+@JS('chtCore.signSeedDispatch')
+external JSPromise<JSString> _signSeedDispatch(
+  JSString seedId,
+  JSString connection,
+  JSNumber sequence,
+  JSString envelopeJson,
 );
 @JS('chtCore.inspectSeedSignal')
 external JSPromise<JSString> _inspectSeedSignal(
@@ -181,11 +191,20 @@ class _WebCoreBridge
         DesktopIdentityBridge,
         RelayCryptoBridge,
         SeedCryptoBridge,
+        SeedDispatchCryptoBridge,
+        DeliveryCryptoBridge,
         RoutedContactBridge,
         BrowserChunkedStorageHost,
         GroupCryptoBridge,
         ContactRequestBridge,
         GroupBlobBridge {
+  @override
+  Future<Map<String, Object?>> deliveryCall(
+    String operation,
+    Map<String, Object?> args,
+  ) async => _decodeMap(
+    (await _deliveryCall(operation.toJS, jsonEncode(args).toJS).toDart).toDart,
+  );
   @override
   Future<Map<String, Object?>> contactRequestCall(
     String operation,
@@ -294,6 +313,18 @@ class _WebCoreBridge
   @override
   Future<String> relayProof(String nonce, String relayId) async =>
       (await _relayProof(nonce.toJS, relayId.toJS).toDart).toDart;
+  @override
+  Future<String> signSeedDispatch(
+    String seedId,
+    String connection,
+    int sequence,
+    String envelopeJson,
+  ) async => (await _signSeedDispatch(
+    seedId.toJS,
+    connection.toJS,
+    sequence.toJS,
+    envelopeJson.toJS,
+  ).toDart).toDart;
   @override
   Future<String> signSeedSignal(
     String peerId,

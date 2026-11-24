@@ -119,6 +119,12 @@ pub struct WasmAccountCore {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_class = AccountCore)]
 impl WasmAccountCore {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = deliveryCall)]
+    pub fn delivery_call(&self,operation:&str,args_json:&str)->Result<String,wasm_bindgen::JsValue>{
+        if args_json.len()>4*1024*1024{return Err(wasm_bindgen::JsValue::from_str("Delivery arguments too large"));}
+        let args=serde_json::from_str(args_json).map_err(|_|wasm_bindgen::JsValue::from_str("Invalid delivery arguments"))?;
+        self.inner.delivery_call(operation,args).and_then(|v|serde_json::to_string(&v).map_err(|_|"Invalid delivery result".into())).map_err(|e|wasm_bindgen::JsValue::from_str(&e))
+    }
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = contactRequestCall)]
     pub fn contact_request_call(&self, operation: &str, args_json: &str) -> Result<String, wasm_bindgen::JsValue> {
         if args_json.len() > 32768 { return Err(wasm_bindgen::JsValue::from_str("Contact arguments too large")); }
@@ -206,6 +212,12 @@ impl WasmAccountCore {
         self.inner
             .relay_proof_json(nonce, relay_id)
             .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = signSeedDispatch)]
+    pub fn sign_seed_dispatch(&self, seed_id: &str, connection: &str, sequence: f64, envelope_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+        let sequence = crate::seed_signal::safe_time(sequence).map_err(|e| wasm_bindgen::JsValue::from_str(&e))?;
+        self.inner.sign_seed_dispatch(seed_id, connection, sequence, envelope_json).map_err(|e| wasm_bindgen::JsValue::from_str(&e))
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = signSeedSignal)]

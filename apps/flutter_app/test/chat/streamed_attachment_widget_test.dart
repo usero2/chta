@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cht/chat/attachment_source.dart';
 import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/attachment_ref.dart';
@@ -8,6 +10,98 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('streamed Markdown opens in the in-app reader', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AttachmentContent(
+            incoming: true,
+            attachment: ChatAttachment.fromSource(
+              name: 'Long message.md',
+              mimeType: 'text/markdown',
+              source: _MarkdownSource(),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Long message.md'));
+    await tester.pumpAndSettle();
+    expect(find.text('ข้อความยาว 😀', findRichText: true), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Markdown card previews 300 characters with Read more below', (
+    tester,
+  ) async {
+    final excerpt = 'ก้👩‍💻' * 150;
+    final fullText = '$excerpt\n\n# Full Markdown document';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: AttachmentContent(
+              incoming: true,
+              attachment: ChatAttachment.fromSource(
+                name: 'Long message.md',
+                mimeType: 'text/markdown',
+                source: _MarkdownSource(fullText),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final preview = find.text('$excerpt…');
+    final readMore = find.widgetWithText(TextButton, 'Read more');
+    expect(preview, findsOneWidget);
+    expect(
+      find.text('Full Markdown document', findRichText: true),
+      findsNothing,
+    );
+    expect(
+      tester.getTopLeft(readMore).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(preview).dy),
+    );
+    await tester.ensureVisible(readMore);
+    await tester.tap(readMore);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Full Markdown document', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'whitespace caption adds no empty footer to streamed visual media',
+    (tester) async {
+      Widget page(String? caption) => MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 240,
+              child: AttachmentContent(
+                incoming: false,
+                attachment: ChatAttachment.fromSource(
+                  name: 'huge.jpg',
+                  mimeType: 'image/jpeg',
+                  source: _Source(),
+                  caption: caption,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(page(null));
+      final without = tester.getSize(find.byType(AttachmentContent)).height;
+      await tester.pumpWidget(page('  \n '));
+      expect(tester.getSize(find.byType(AttachmentContent)).height, without);
+      expect(tester.takeException(), isNull);
+    },
+  );
   testWidgets(
     'incoming chunked card waits for completion then opens automatically',
     (tester) async {
@@ -70,6 +164,22 @@ void main() {
     expect(find.text('huge.jpg'), findsWidgets);
     expect(find.byType(Image), findsNothing);
   });
+}
+
+class _MarkdownSource implements AttachmentSource {
+  _MarkdownSource([String text = '# ข้อความยาว 😀'])
+    : bytes = utf8.encode(text);
+  final List<int> bytes;
+  @override
+  int get length => bytes.length;
+  @override
+  String get key => 'markdown-fixture';
+  @override
+  Stream<List<int>> openRead({int start = 0, int? end}) async* {
+    final part = bytes.sublist(start, end);
+    yield part.sublist(0, 6);
+    yield part.sublist(6);
+  }
 }
 
 class _PendingHistory extends PeerHistory {

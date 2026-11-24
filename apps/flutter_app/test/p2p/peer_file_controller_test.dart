@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cht/account/account_models.dart';
 import 'package:cht/chat/chunked_attachment_bridge.dart';
 import 'package:cht/chat/peer_history.dart';
+import 'package:cht/chat/attachment_ref.dart';
 import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/p2p/peer_file_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +19,129 @@ ContactView friend(String id) => ContactView(
   capabilities: const ['files-v2'],
 );
 void main() {
+  test('authenticated late V2 completion updates paused history but cannot recreate deleted messages', () async {
+    final history = PeerHistory();
+    await history.load('z-owner');
+    const id = 'late-completion-fixture';
+    final message = PeerMessage(
+      id: id,
+      text: 'file',
+      incoming: false,
+      status: DeliveryStatus.failed,
+      deliveryPaused: true,
+      failureReason: 'Cancelled',
+      attachmentRef: AttachmentRef(
+        name: 'empty.bin',
+        mimeType: 'application/octet-stream',
+        size: 0,
+        digest: _emptyHash,
+        chunkedId: 'late-cache-fixture',
+        chunkSize: 262144,
+      ),
+    );
+    history.add('a-peer', message);
+    var receipts = 0;
+    final controller = PeerFileController(
+      ownerId: 'z-owner',
+      cache: _CompletedCache(),
+      history: history,
+      sendEncryptedControl: (_, _) async {},
+      sendFallbackPacket: (_, _, _) async {},
+      onPacket: (_, _, _) async {},
+      onReceipt: (id, time) {
+        receipts++;
+        history.setStatus(
+          'a-peer',
+          id,
+          DeliveryStatus.delivered,
+          receivedAtMilliseconds: time,
+        );
+      },
+      peerFactory: FakeFactory(),
+    );
+    try {
+      await controller.updatePeer(
+        friend('a-peer'),
+        encryptedAuthenticated: true,
+      );
+      Future<void> complete(int time) => controller.receiveFilePacket(
+        'chtfile2_late',
+        jsonEncode({'v': 2, 'type': 'complete', 'id': id, 'receivedAt': time}),
+        direct: false,
+      );
+      await complete(-1);
+      expect(receipts, 0);
+      await complete(777);
+      expect(message.status, DeliveryStatus.delivered);
+      expect(message.deliveryPaused, isFalse);
+      expect(message.receivedAtMilliseconds, 777);
+      await history.clearConversation('a-peer');
+      await complete(777);
+      expect(receipts, 1);
+      expect(history.messagesFor('a-peer'), isEmpty);
+    } finally {
+      await controller.close();
+      history.dispose();
+    }
+  });
+  for (final receiptFails in [false, true]) {
+    test(
+      'durably completed streamed receive removes active progress even if receipt fails $receiptFails',
+      () async {
+        final history = PeerHistory();
+        await history.load('z-owner');
+        final packets = <String>[];
+        final controller = PeerFileController(
+          ownerId: 'z-owner',
+          cache: _CompletedCache(),
+          history: history,
+          sendEncryptedControl: (_, _) async {},
+          sendFallbackPacket: (_, text, _) async {
+            packets.add(text);
+            if (receiptFails &&
+                (jsonDecode(text) as Map)['type'] == 'complete') {
+              throw StateError('Synthetic receipt transport failure');
+            }
+          },
+          onPacket: (_, _, _) async {},
+          onReceipt: (_, _) {},
+          peerFactory: FakeFactory(),
+        );
+        try {
+          await controller.updatePeer(
+            friend('a-peer'),
+            encryptedAuthenticated: true,
+          );
+          await controller.receiveFilePacket(
+            'chtfile2_offer',
+            jsonEncode({
+              'v': 2,
+              'type': 'offer',
+              'id': 'file-progress-fixture-0001',
+              'name': 'empty.bin',
+              'mimeType': 'application/octet-stream',
+              'size': 0,
+              'chunkSize': 262144,
+              'digest': _emptyHash,
+            }),
+            direct: false,
+          );
+          expect(
+            history.messagesFor('a-peer').single.status,
+            DeliveryStatus.delivered,
+          );
+          expect(
+            packets.map((p) => (jsonDecode(p) as Map)['type']),
+            contains('complete'),
+          );
+          expect(controller.progress, isEmpty);
+        } finally {
+          await controller.close();
+          history.dispose();
+        }
+      },
+    );
+  }
   test(
     'either identity can initiate Direct using signed seed signaling',
     () async {
@@ -321,6 +445,15 @@ void main() {
 
 const _emptyHash =
     'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+class _CompletedCache extends _Cache {
+  @override
+  Future<ChunkedAttachmentState> finishChunkedAttachment(
+    String owner,
+    String id, {
+    String? expectedDigest,
+  }) => beginChunkedAttachment(owner, id, 0, 262144, digest: expectedDigest);
+}
 
 class _Cache implements ChunkedAttachmentBridge {
   @override

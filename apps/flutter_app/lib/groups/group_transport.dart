@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../p2p/direct_file_link.dart';
+import '../delivery/delivery_router.dart';
 import '../relay/relay_network.dart';
 import 'group_crypto_bridge.dart';
 import 'group_framing.dart';
@@ -120,7 +121,7 @@ class GroupTransport extends ChangeNotifier {
     if (_closed || _peers.length >= 64) {
       throw StateError('Group peer limit reached');
     }
-    final p = _GroupPeer(id);
+    final p = _GroupPeer(id, _clock);
     p.link = DirectFileLink(
       ownIdentityId: ownerId,
       allowEitherInitiator: true,
@@ -175,8 +176,8 @@ class GroupTransport extends ChangeNotifier {
     if (_closed) return;
     unawaited(
       _run(p, () async {
-        if (p.route == '@direct' && !p.link.ready ||
-            p.link.ready && p.route != '@direct') {
+        if (p.route == '@direct' && !p.link.ready) {
+          p.router.failed('@direct');
           await _reset(p);
         }
         await _attempt(p);
@@ -244,10 +245,33 @@ class GroupTransport extends ChangeNotifier {
 
   Future<void> _attempt(_GroupPeer p) async {
     if (_closed || p.ready || _clock() - p.lastAttempt < 5000) return;
-    final route = p.link.ready ? '@direct' : network.online.firstOrNull;
+    if (p.session != null && p.route != null) {
+      p.router.failed(p.route!);
+      // Retire the unanswered attempt once. Keeping it through cooldown
+      // penalizes the same attempt on every tick and can strand a sole relay.
+      await _reset(p);
+    }
+    final route = p.router
+        .rank([
+          DeliveryRoute(
+            id: '@direct',
+            kind: DeliveryRouteKind.direct,
+            authenticated: p.link.ready,
+            send: () async {},
+          ),
+          for (final endpoint in network.online)
+            DeliveryRoute(
+              id: endpoint,
+              kind: DeliveryRouteKind.relay,
+              authenticated: true,
+              send: () async {},
+            ),
+        ])
+        .firstOrNull
+        ?.id;
     if (route == null) return;
     if (!await _allowed(p.id)) return;
-    await _reset(p);
+    if (p.session != null) await _reset(p);
     p.lastAttempt = _clock();
     p.route = route;
     p.session = groupRandomId();
@@ -330,7 +354,7 @@ class GroupTransport extends ChangeNotifier {
     }
     if (route == '@direct') {
       if (!p.link.ready) throw StateError('Direct group channel unavailable');
-      await p.link.send(source).timeout(_operationTimeout);
+      await p.link.send(source).timeout(const Duration(seconds: 2));
     } else {
       if (!network.send(route, {
         'type': 'route',
@@ -525,6 +549,7 @@ class GroupTransport extends ChangeNotifier {
           if (!_current(p, session)) return;
           if (result['established'] == true) {
             p.ready = true;
+            p.router.receivedOn(route);
             p.lastReceived = _clock();
             p.lastPing = _clock();
             notifyListeners();
@@ -548,6 +573,7 @@ class GroupTransport extends ChangeNotifier {
             return;
           }
           p.lastReceived = _clock();
+          p.router.receivedOn(route);
           final text = result['text'] as String;
           Object? control;
           try {
@@ -610,6 +636,7 @@ class GroupTransport extends ChangeNotifier {
         await _wire(p, fragment);
       }
     } catch (_) {
+      if (p.route != null) p.router.failed(p.route!);
       if (session != null && _current(p, session)) await _reset(p);
       rethrow;
     }
@@ -636,8 +663,10 @@ class GroupTransport extends ChangeNotifier {
 }
 
 class _GroupPeer {
-  _GroupPeer(this.id);
+  _GroupPeer(this.id, int Function() clock)
+    : router = DeliveryRouter(clock: clock);
   final String id;
+  final DeliveryRouter router;
   late final DirectFileLink link;
   StreamSubscription<String>? subscription;
   Future<void> serial = Future.value();

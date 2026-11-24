@@ -292,17 +292,37 @@ class SessionAccount extends Account implements GroupCryptoBridge {
 }
 
 void main() {
-  test('upgraded saved contacts use fresh v2 cards and ignore unproven probe', () async {
+  test('new Courier catalogs require negotiated support and never replace private routed-frame handlers', () async {
+    final hub = Hub(a, 'relay-a'),
+        network = RelayNetwork(
+          Crypto('did:cht:${'a' * 64}'),
+          connector: hub.connect,
+        );
+    final seen = <List<Object?>>[];
+    final sub = network.courierRecords.listen(seen.add);
+    await network.initialize();
+    await network.addContactRoutes([a]);
+    await until(() => network.online.isNotEmpty);
+    network.publishCouriers([
+      {'hint': 'not sent to legacy relay'},
+    ]);
+    expect(hub.sockets.single.closed, isFalse);
+    await sub.cancel();
+    await network.close();
+  });
+  test('file send guards persist across lost-ACK relay retries', () async {
     final hub = Hub(a, 'relay-a');
     final left = RelayNetwork(Crypto('alice'), connector: hub.connect);
     final right = RelayNetwork(Crypto('bob'), connector: hub.connect);
+    var now = 100000, allowed = true;
     final alice = RelayChat(
-      SessionAccount('alice', 'bob', staleSavedCapabilities: true),
+      Account('alice', 'bob'),
       left,
       ownCard: () async => 'alice',
+      clock: () => now,
     );
     final bob = RelayChat(
-      SessionAccount('bob', 'alice', staleSavedCapabilities: true),
+      Account('bob', 'alice'),
       right,
       ownCard: () async => 'bob',
     );
@@ -312,25 +332,100 @@ void main() {
       alice.select('bob');
       bob.select('alice');
       await until(() => alice.authenticated && bob.authenticated);
+      await alice.sendMessage(
+        'file-packet',
+        'file data',
+        123,
+        isCurrent: () => allowed,
+      );
       alice.drainEvents();
-      right.send(a, {
-        'type': 'route',
-        'to': 'alice',
-        'session': RelayChat.randomId(),
-        'packet': RelayChat.randomId(),
-        'body': {'type': 'probe', 'contactCard': 'bob'},
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      allowed = false;
+      now += 5000;
+      await alice.tick();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        alice.drainEvents().where(
+          (e) => e.type == 'sent' && e.messageId == 'file-packet',
+        ),
+        isEmpty,
+      );
       expect(alice.authenticated, isTrue);
-      expect(alice.state, 'connected');
-      expect(alice.drainEvents().where((e) => e.type == 'connection'), isEmpty);
-      await bob.sendMessage('still-live', 'hello', 123);
-      await until(() => alice.events.any((e) => e.messageId == 'still-live'));
+      await alice.sendMessage('text-after-pause', 'text', 124);
+      await until(
+        () => bob.events.any((e) => e.messageId == 'text-after-pause'),
+      );
     } finally {
       await alice.close();
       await bob.close();
     }
   });
+  test(
+    'resume keeps a healthy socket; a network handover replaces it',
+    () async {
+      final hub = Hub(a, 'relay-a');
+      final network = RelayNetwork(Crypto('alice'), connector: hub.connect);
+      try {
+        await network.addSeed(a);
+        await until(() => network.online.contains(a));
+        final original = hub.sockets.single;
+        await network.recoverNetwork(force: false);
+        expect(original.closed, isFalse);
+        expect(hub.sockets.length, 1);
+        await network.recoverNetwork();
+        await until(
+          () => hub.sockets.length == 2 && network.online.contains(a),
+        );
+        expect(original.closed, isTrue);
+      } finally {
+        await network.close();
+      }
+    },
+  );
+  test(
+    'upgraded saved contacts use fresh v2 cards and ignore unproven probe',
+    () async {
+      final hub = Hub(a, 'relay-a');
+      final left = RelayNetwork(Crypto('alice'), connector: hub.connect);
+      final right = RelayNetwork(Crypto('bob'), connector: hub.connect);
+      final alice = RelayChat(
+        SessionAccount('alice', 'bob', staleSavedCapabilities: true),
+        left,
+        ownCard: () async => 'alice',
+      );
+      final bob = RelayChat(
+        SessionAccount('bob', 'alice', staleSavedCapabilities: true),
+        right,
+        ownCard: () async => 'bob',
+      );
+      try {
+        await left.addSeed(a);
+        await right.addSeed(a);
+        alice.select('bob');
+        bob.select('alice');
+        await until(() => alice.authenticated && bob.authenticated);
+        alice.drainEvents();
+        right.send(a, {
+          'type': 'route',
+          'to': 'alice',
+          'session': RelayChat.randomId(),
+          'packet': RelayChat.randomId(),
+          'body': {'type': 'probe', 'contactCard': 'bob'},
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(alice.authenticated, isTrue);
+        expect(alice.state, 'connected');
+        expect(
+          alice.drainEvents().where((e) => e.type == 'connection'),
+          isEmpty,
+        );
+        await bob.sendMessage('still-live', 'hello', 123);
+        await until(() => alice.events.any((e) => e.messageId == 'still-live'));
+      } finally {
+        await alice.close();
+        await bob.close();
+      }
+    },
+  );
 
   test('peer restart promotes v2 candidate without connecting state', () async {
     final hub = Hub(a, 'relay-a');
@@ -708,7 +803,7 @@ void main() {
         expect(alice.authenticated, isFalse);
         expect(bob.authenticated, isFalse);
         for (var i = 0; i < 10; i++) {
-          netB.onFrame!(a, {
+          bob.acceptFrame(a, {
             'type': 'route',
             'from': 'alice',
             'session': RelayChat.randomId(),

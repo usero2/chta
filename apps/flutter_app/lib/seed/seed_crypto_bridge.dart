@@ -10,3 +10,13 @@ abstract interface class SeedCryptoBridge {
 
   Future<String> inspectSeedSignal(String source, String expectedPeer, int now);
 }
+
+/// Optional capability for updated seed servers. Keys remain in the Rust core.
+abstract interface class SeedDispatchCryptoBridge {
+  Future<String> signSeedDispatch(
+    String seedId,
+    String connection,
+    int sequence,
+    String envelopeJson,
+  );
+}

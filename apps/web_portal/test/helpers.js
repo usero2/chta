@@ -6,6 +6,12 @@ export const identity = () => {
   return { privateKey, publicKey: raw.toString('base64url'), id: createHash('sha256').update(raw).digest('hex') };
 };
 export const signed = (key, domain, tuple) => sign(null, Buffer.from(domain + JSON.stringify(tuple)), key.privateKey).toString('base64url');
+export function dispatch(key, envelope, connection, sequence = 1, seedId = 'e0ba672185682a830d168e31cee185b9434b49b210a7ec7a435e78fcb2a532a5') {
+  const tuple = ['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt','publicKey','signature'].map(k => envelope[k] ?? null);
+  const envelopeHash = createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
+  return {version:1,seedId,connection,sequence,envelopeHash,publicKey:key.publicKey,
+    signature:signed(key,'chta seed dispatch v1\0',[1,seedId,connection,sequence,envelopeHash])};
+}
 export function contactSignal(key, to, changes = {}) {
   const session = '0123456789abcdef0123456789abcdef';
   const kind = changes.kind ?? 'request';
@@ -37,4 +43,12 @@ export function record(key, changes = {}) {
   const value = { version: 1, relayId: key.id, publicKey: key.publicKey, endpoint: 'wss://relay.example.com/cht', issuedAt: now, expiresAt: now + 900000, ...changes };
   value.signature = signed(key, 'cht relay directory v1\0', ['version','relayId','publicKey','endpoint','issuedAt','expiresAt'].map(k => value[k]));
   return value;
+}
+
+export function advertisement(root=identity(),node=identity(),now=Date.now()){
+  const certificate={version:1,ownerId:`did:cht:${root.id}`,rootPublicKey:root.publicKey,nodeId:node.id,signingPublicKey:node.publicKey,createdAt:now};
+  certificate.signature=signed(root,'chta courier node certificate v1\0',Object.values(certificate));
+  const body={freeBytes:1073741824,maxPackageBytes:262144,nodeId:node.id,ownerId:certificate.ownerId,routes:['wss://relay.example.com/cht'],version:1};
+  const c={version:1,kind:'advertisement',signerId:node.id,publicKey:node.publicKey,certificate,challenge:'A'.repeat(43),body,issuedAt:now,expiresAt:now+900000};
+  c.signature=signed(node,'chta courier control v1\0',Object.values(c));return c;
 }

@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chta-data-relay-local",
+  "main": "src/data-worker.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "observability": {"enabled": false},
+  "durable_objects": {"bindings": [{"name": "DATA_RELAY", "class_name": "DataRelay"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["DataRelay"]}],
+  "env": {
+    "relay1": {
+      "name": "chta-data-relay-1",
+      "routes": [{"pattern": "relay1.chta.app", "custom_domain": true}],
+      "durable_objects": {"bindings": [{"name": "DATA_RELAY", "class_name": "DataRelay"}]},
+      "vars": {"RELAY_ENDPOINT": "wss://relay1.chta.app/cht", "RELAY_LOCATION": "apac", "RELAY_MAX_SOCKETS": "256"}
+    },
+    "relay2": {
+      "name": "chta-data-relay-2",
+      "routes": [{"pattern": "relay2.chta.app", "custom_domain": true}],
+      "durable_objects": {"bindings": [{"name": "DATA_RELAY", "class_name": "DataRelay"}]},
+      "vars": {"RELAY_ENDPOINT": "wss://relay2.chta.app/cht", "RELAY_LOCATION": "enam", "RELAY_MAX_SOCKETS": "256"}
+    },
+    "relay3": {
+      "name": "chta-data-relay-3",
+      "routes": [{"pattern": "relay3.chta.app", "custom_domain": true}],
+      "durable_objects": {"bindings": [{"name": "DATA_RELAY", "class_name": "DataRelay"}]},
+      "vars": {"RELAY_ENDPOINT": "wss://relay3.chta.app/cht", "RELAY_LOCATION": "weur", "RELAY_MAX_SOCKETS": "256"}
+    }
+  }
+}

@@ -9,6 +9,124 @@ import 'package:cht/chat/chunked_attachment_bridge.dart';
 import 'package:cht/chat/resumable_attachment_transfer.dart';
 
 void main() {
+  test('recipient pause during a durable chunk write withholds ACK and resumes verified bytes', () async {
+    final cache = _GatedCache(), responses = <Map<String, dynamic>>[];
+    var paused = false, completed = 0;
+    const id = 'recipient-pause-fixture';
+    final digest = sha256.convert([1]).toString();
+    final receiver = ResumableAttachmentTransfer(
+      ownerId: 'owner',
+      peerId: 'peer',
+      bridge: cache,
+      isDirect: () => true,
+      checkIncoming: (_) {
+        if (paused) throw const TransferInterrupted('Paused by recipient');
+      },
+      onOffer: (_, _, _) async {},
+      onCompleted: (_, _) async {
+        completed++;
+        return 777;
+      },
+      sendPacket: (_, text) async {
+        responses.add((jsonDecode(text) as Map).cast<String, dynamic>());
+      },
+    );
+    final offer = {
+      'v': 2,
+      'type': 'offer',
+      'id': id,
+      'name': 'fixture.bin',
+      'mimeType': 'application/octet-stream',
+      'size': 1,
+      'digest': digest,
+      'chunkSize': 1,
+    };
+    Future<void> receive(Map<String, Object?> value) => receiver.receive(
+      '${ResumableAttachmentTransfer.prefix}fixture',
+      jsonEncode(value),
+      direct: true,
+    );
+    await receive(offer);
+    final writing = receive({
+      'v': 2,
+      'type': 'part',
+      'id': id,
+      'block': 0,
+      'part': 0,
+      'parts': 1,
+      'blockDigest': digest,
+      'data': base64Encode([1]),
+    });
+    await cache.entered.future;
+    paused = true;
+    receiver.interrupt(id);
+    cache.gate.complete();
+    await writing;
+    expect(responses.where((v) => v['type'] == 'ack'), isEmpty);
+    expect(responses.last['retryable'], isTrue);
+    expect(completed, 0);
+    paused = false;
+    await receive(offer);
+    expect(responses.last['type'], 'resume');
+    expect(responses.last['next'], 1);
+    await receive({'v': 2, 'type': 'finish', 'id': id});
+    expect(completed, 1);
+    expect(responses.last['type'], 'complete');
+    receiver.dispose();
+  });
+  test(
+    'interrupting one file stops its remaining parts and permits resume',
+    () async {
+      final cache = _Cache();
+      const id = 'interrupt-transfer-01', cacheId = 'interrupt-cache-01';
+      final data = Uint8List(16384);
+      await cache.beginChunkedAttachment('owner', cacheId, data.length, 16384);
+      await cache.writeChunkedAttachment('owner', cacheId, 0, data);
+      final state = await cache.finishChunkedAttachment('owner', cacheId);
+      late ResumableAttachmentTransfer transfer;
+      var parts = 0;
+      transfer = ResumableAttachmentTransfer(
+        ownerId: 'owner',
+        peerId: 'peer',
+        bridge: cache,
+        isDirect: () => true,
+        onOffer: (_, _, _) async {},
+        onCompleted: (_, _) async => 1,
+        sendPacket: (packet, text) async {
+          final value = jsonDecode(text) as Map;
+          if (value['type'] == 'offer') {
+            await transfer.receive(
+              '${ResumableAttachmentTransfer.prefix}reply_1',
+              jsonEncode({'v': 2, 'id': id, 'type': 'resume', 'next': 0}),
+              direct: true,
+            );
+          }
+          if (value['type'] == 'part') {
+            parts++;
+            transfer.interrupt(id);
+          }
+        },
+      );
+      final ref = AttachmentRef(
+        name: 'fixture.bin',
+        mimeType: 'application/octet-stream',
+        size: data.length,
+        digest: state.digest!,
+        chunkedId: cacheId,
+        chunkSize: 16384,
+      );
+      await expectLater(
+        transfer.send(id, ref),
+        throwsA(isA<TransferInterrupted>()),
+      );
+      expect(parts, 1);
+      expect(
+        (await cache.chunkedAttachmentStatus('owner', cacheId)).completed,
+        isTrue,
+      );
+      transfer.dispose();
+    },
+  );
   test(
     'durable blocks resume after interruption and never buffer a file',
     () async {
@@ -225,6 +343,21 @@ void main() {
       transfer.dispose();
     },
   );
+}
+
+class _GatedCache extends _Cache {
+  final gate = Completer<void>(), entered = Completer<void>();
+  @override
+  Future<void> writeChunkedAttachment(
+    String owner,
+    String id,
+    int index,
+    Uint8List bytes,
+  ) async {
+    if (!entered.isCompleted) entered.complete();
+    await gate.future;
+    await super.writeChunkedAttachment(owner, id, index, bytes);
+  }
 }
 
 class _Cache implements ChunkedAttachmentBridge {

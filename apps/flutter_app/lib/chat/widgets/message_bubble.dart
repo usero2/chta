@@ -70,6 +70,7 @@ class MessageBubble extends StatelessWidget {
     this.content,
     this.bubbleKey,
     this.showReceivedTime = true,
+    this.media = false,
   });
 
   final String text;
@@ -80,6 +81,23 @@ class MessageBubble extends StatelessWidget {
   final Widget? content;
   final Key? bubbleKey;
   final bool showReceivedTime;
+  final bool media;
+
+  static final _lineBreak = RegExp(r'\r\n?|\n');
+
+  Widget _textContent() {
+    final color = incoming ? const Color(0xFFECECEC) : const Color(0xFF0B0B0B);
+    final breakAfterPreview = _lineBreak.allMatches(text).skip(19).firstOrNull;
+    if (breakAfterPreview == null || breakAfterPreview.end == text.length) {
+      return ChatMarkdown(text: text, color: color);
+    }
+    return _ExpandableMessageText(
+      key: ValueKey(text),
+      text: text,
+      previewEnd: breakAfterPreview.start,
+      color: color,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -87,19 +105,18 @@ class MessageBubble extends StatelessWidget {
       child: Container(
         key: bubbleKey,
         constraints: const BoxConstraints(maxWidth: 520),
-        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
-        decoration: BoxDecoration(
-          color: incoming ? const Color(0xFF2A2A2A) : const Color(0xFF9AE585),
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child:
-            content ??
-            ChatMarkdown(
-              text: text,
-              color: incoming
-                  ? const Color(0xFFECECEC)
-                  : const Color(0xFF0B0B0B),
-            ),
+        padding: media
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
+        decoration: media
+            ? null
+            : BoxDecoration(
+                color: incoming
+                    ? const Color(0xFF2A2A2A)
+                    : const Color(0xFF9AE585),
+                borderRadius: BorderRadius.circular(18),
+              ),
+        child: content ?? _textContent(),
       ),
     );
     final times = Column(
@@ -176,5 +193,47 @@ class MessageBubble extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+class _ExpandableMessageText extends StatefulWidget {
+  const _ExpandableMessageText({
+    super.key,
+    required this.text,
+    required this.previewEnd,
+    required this.color,
+  });
+
+  final String text;
+  final int previewEnd;
+  final Color color;
+
+  @override
+  State<_ExpandableMessageText> createState() => _ExpandableMessageTextState();
+}
+
+class _ExpandableMessageTextState extends State<_ExpandableMessageText> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      ChatMarkdown(
+        text: _expanded
+            ? widget.text
+            : widget.text.substring(0, widget.previewEnd),
+        color: widget.color,
+      ),
+      TextButton(
+        onPressed: () => setState(() => _expanded = !_expanded),
+        style: TextButton.styleFrom(
+          foregroundColor: widget.color,
+          visualDensity: VisualDensity.compact,
+        ),
+        child: Text(_expanded ? 'Show less' : 'Read more'),
+      ),
+    ],
   );
 }

@@ -3,8 +3,13 @@ import 'package:flutter/material.dart';
 import 'incoming_notifications.dart';
 
 class NotificationSettingsTile extends StatefulWidget {
-  const NotificationSettingsTile({required this.notifications, super.key});
+  const NotificationSettingsTile({
+    required this.notifications,
+    this.enabled = true,
+    super.key,
+  });
   final IncomingNotifications notifications;
+  final bool enabled;
   @override
   State<NotificationSettingsTile> createState() =>
       _NotificationSettingsTileState();
@@ -13,15 +18,26 @@ class NotificationSettingsTile extends StatefulWidget {
 class _NotificationSettingsTileState extends State<NotificationSettingsTile> {
   bool _requesting = false;
   bool _denied = false;
+  bool _error = false;
 
-  Future<void> _enable() async {
-    setState(() => _requesting = true);
-    final allowed = await widget.notifications.requestPermissions();
-    if (!mounted) return;
+  Future<void> _change(bool value, {bool preview = false}) async {
     setState(() {
-      _requesting = false;
-      _denied = !allowed;
+      _requesting = true;
+      _denied = false;
+      _error = false;
     });
+    try {
+      if (preview) {
+        await widget.notifications.setShowMessagePreview(value);
+      } else {
+        final allowed = await widget.notifications.setEnabled(value);
+        if (mounted) setState(() => _denied = value && !allowed);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = true);
+    } finally {
+      if (mounted) setState(() => _requesting = false);
+    }
   }
 
   @override
@@ -30,23 +46,33 @@ class _NotificationSettingsTileState extends State<NotificationSettingsTile> {
     builder: (context, _) => Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ListTile(
+        SwitchListTile.adaptive(
+          key: const Key('notifications-toggle'),
           contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.notifications_outlined),
           title: const Text('Notifications'),
-          subtitle: Text(
-            widget.notifications.enabled ? 'On' : 'Messages and files',
-          ),
-          trailing: widget.notifications.enabled
+          subtitle: Text(widget.notifications.enabled ? 'On' : 'Off'),
+          value: widget.notifications.enabled,
+          onChanged:
+              _requesting || !widget.enabled || !widget.notifications.canChange
               ? null
-              : TextButton(
-                  key: const Key('enable-notifications'),
-                  onPressed: _requesting ? null : _enable,
-                  child: Text(_requesting ? 'Enabling…' : 'Enable'),
-                ),
+              : _change,
+        ),
+        SwitchListTile.adaptive(
+          key: const Key('notification-preview-toggle'),
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Show message preview'),
+          value: widget.notifications.showMessagePreview,
+          onChanged:
+              _requesting || !widget.enabled || !widget.notifications.canChange
+              ? null
+              : (value) => _change(value, preview: true),
         ),
         if (_denied && !widget.notifications.enabled)
           const Text('Allow notifications in system settings.'),
+        if (_error)
+          const Text('Could not save notification settings. Try again.'),
+        if (!_error && widget.notifications.unavailable)
+          const Text('Notifications are unavailable. Try again.'),
         const SizedBox(height: 16),
       ],
     ),

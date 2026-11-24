@@ -10,9 +10,11 @@ import 'profile/profile_controller.dart';
 import 'profile/profile_store.dart';
 import 'routing/app_router.dart';
 import 'startup/app_bootstrap.dart';
+import 'runtime/app_runtime.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppRuntime.install();
   runApp(AppBootstrap(load: _loadApp));
 }
 

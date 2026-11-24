@@ -30,11 +30,24 @@ function times(v, now, ttl, skew) {
   requireThat(Number.isSafeInteger(v.issuedAt) && v.issuedAt >= 0 && Number.isSafeInteger(v.expiresAt) && v.expiresAt >= 0);
   requireThat(v.issuedAt <= now + skew && v.expiresAt > now && v.expiresAt > v.issuedAt && v.expiresAt - v.issuedAt <= ttl);
 }
-export async function verifyProof(p, nonce) {
+export async function verifyProof(p, nonce, relayId = SEED_ID) {
   exact(p,['identityId','publicKey','signature']);
   requireThat(DID.test(p.identityId)); decode(nonce,32);
-  await signature(p.publicKey,p.signature,`cht relay registration v1\0${SEED_ID}\0${nonce}`,p.identityId.slice(8));
+  await signature(p.publicKey,p.signature,`cht relay registration v1\0${relayId}\0${nonce}`,p.identityId.slice(8));
   return p.identityId;
+}
+export async function verifyDispatch(p,envelope,identityId,connection,previousSequence) {
+  exact(p,['version','seedId','connection','sequence','envelopeHash','publicKey','signature']);
+  requireThat(p.version===1 && p.seedId===SEED_ID && p.connection===connection);
+  decode(connection,32);
+  requireThat(Number.isSafeInteger(previousSequence) && previousSequence>=0 &&
+    Number.isSafeInteger(p.sequence) && p.sequence>previousSequence &&
+    typeof identityId==='string' && DID.test(identityId) && envelope?.from===identityId &&
+    p.publicKey===envelope.publicKey && bytes(JSON.stringify(envelope))<=15500);
+  const tuple=['version','topic','from','to','session','id','kind','payload','issuedAt','expiresAt','publicKey','signature'].map(k=>envelope[k]??null);
+  requireThat(p.envelopeHash===await hash(utf8.encode(JSON.stringify(tuple))));
+  await signature(p.publicKey,p.signature,'chta seed dispatch v1\0'+JSON.stringify([1,p.seedId,p.connection,p.sequence,p.envelopeHash]),identityId.slice(8));
+  return p.sequence;
 }
 function payload(v) {
   requireThat(typeof v.payload === 'string' && bytes(v.payload) <= 11264);

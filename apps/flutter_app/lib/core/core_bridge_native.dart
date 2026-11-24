@@ -15,6 +15,7 @@ import '../profile/contact_avatar.dart';
 import '../p2p/p2p_bridge_factory.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../seed/seed_crypto_bridge.dart';
+import '../delivery/delivery_crypto_bridge.dart';
 import '../chat/chat_models.dart';
 import '../chat/attachment_store.dart';
 import '../chat/chunked_attachment_bridge.dart';
@@ -41,6 +42,8 @@ class _NativeCoreBridge
         InitializableCoreBridge,
         RelayCryptoBridge,
         SeedCryptoBridge,
+        SeedDispatchCryptoBridge,
+        DeliveryCryptoBridge,
         AttachmentBridge,
         ChunkedAttachmentBridge,
         AndroidSessionBridge,
@@ -48,6 +51,12 @@ class _NativeCoreBridge
         GroupCryptoBridge,
         ContactRequestBridge,
         GroupBlobBridge {
+  @override
+  Future<Map<String, Object?>> deliveryCall(
+    String operation,
+    Map<String, Object?> args,
+  ) async =>
+      _map(_invoke('deliveryCall', {'operation': operation, 'args': args}));
   @override
   Future<Map<String, Object?>> contactRequestCall(
     String operation,
@@ -225,6 +234,20 @@ class _NativeCoreBridge
   @override
   Future<String> relayProof(String nonce, String relayId) async =>
       _invoke('relayProof', {'nonce': nonce, 'relayId': relayId})! as String;
+  @override
+  Future<String> signSeedDispatch(
+    String seedId,
+    String connection,
+    int sequence,
+    String envelopeJson,
+  ) async =>
+      _invoke('signSeedDispatch', {
+            'seedId': seedId,
+            'connection': connection,
+            'sequence': sequence,
+            'envelopeJson': envelopeJson,
+          })!
+          as String;
   @override
   Future<String> signSeedSignal(
     String peerId,

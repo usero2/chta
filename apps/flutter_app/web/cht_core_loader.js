@@ -491,6 +491,11 @@ async function verifyChunkedProgress(database, ownerId, id, manifest) {
 }
 
 const operations = {
+  deliveryCall: async (operation, args) => {
+    await ready;
+    if (!account.hasIdentity()) throw new Error('Unlock an identity before delivery');
+    return account.deliveryCall(operation, args);
+  },
   contactRequestCall: async (operation, args) => {
     await ready;
     if (!account.hasIdentity()) throw new Error('Unlock an identity before contact setup');
@@ -801,6 +806,10 @@ const operations = {
   relayProof: async (nonce, relayId) => {
     await ready;
     return account.relayProof(nonce, relayId);
+  },
+  signSeedDispatch: async (seedId, connection, sequence, envelopeJson) => {
+    await ready;
+    return account.signSeedDispatch(seedId, connection, sequence, envelopeJson);
   },
   signSeedSignal: async (peerId, messageId, text, now) => {
     await ready;

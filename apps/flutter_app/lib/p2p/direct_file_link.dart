@@ -447,6 +447,17 @@ class DirectFileLink {
     });
   }
 
+  Future<void> recoverNetwork() async {
+    if (_closed) return;
+    final peer = _peerId;
+    final available = _signalingAvailable;
+    final request = ++_bindRequest;
+    await _reset();
+    if (_closed || request != _bindRequest || peer != _peerId) return;
+    _notify();
+    await bind(peer, signalingAvailable: available);
+  }
+
   void _notify() {
     onChanged?.call();
     if (!_changes.isClosed) {

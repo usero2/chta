@@ -2,9 +2,11 @@ import 'dart:convert';
 
 import 'package:cht/account/account_controller.dart';
 import 'package:cht/account/account_models.dart';
+import 'package:cht/account/desktop_identity_bridge.dart';
 import 'package:cht/account/contacts_page.dart';
 import 'package:cht/app.dart';
 import 'package:cht/chat/chat_controller.dart';
+import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/chat_models.dart';
 import 'package:cht/chat/widgets/conversation_list.dart';
 import 'package:cht/chat/peer_history.dart';
@@ -18,11 +20,62 @@ import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_avatar.dart';
 import 'package:cht/profile/profile_store.dart';
 import 'package:cht/routing/app_router.dart';
+import 'package:cht/runtime/app_runtime.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 
+import '../runtime/app_runtime_test.dart' show FakeRuntime;
+
 void main() {
+  testWidgets('notification lock dismisses the open Markdown reader', (
+    tester,
+  ) async {
+    final bridge = _LockAccountBridge();
+    final account = AccountController(bridge);
+    final runtime = AppRuntime(bridge: FakeRuntime());
+    AppRuntime.instance = runtime;
+    addTearDown(() {
+      AppRuntime.instance = null;
+      runtime.dispose();
+    });
+    final store = _HistoryTestStore();
+    final saved = PeerHistory(store: store);
+    await saved.load('did:cht:current');
+    saved.add(
+      'did:cht:alice',
+      PeerMessage(
+        id: 'markdown-lock-test',
+        text: 'Stored document',
+        incoming: true,
+        status: DeliveryStatus.delivered,
+        attachment: ChatAttachment.longMessage(
+          'Test excerpt ${' ' * 300}\n\n# Private fixture',
+        ),
+      ),
+    );
+    await saved.flush();
+    saved.dispose();
+    await tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: account,
+        profileController: ProfileController(_ProfileTestStore()),
+        peerHistoryStore: store,
+        router: AppRouter(initialPath: '/chats/did%3Acht%3Aalice'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Read more'));
+    await tester.pumpAndSettle();
+    expect(find.text('Private fixture', findRichText: true), findsOneWidget);
+    expect(await runtime.handle('lockRequested'), isTrue);
+    await tester.pumpAndSettle();
+    expect(account.status, AccountStatus.chooseIdentity);
+    expect(find.text('Private fixture', findRichText: true), findsNothing);
+  });
+
   testWidgets(
     'an unknown friend request is reviewed from chat before reciprocal trust',
     (tester) async {
@@ -600,6 +653,20 @@ class _HistoryTestStore implements PeerHistoryStore {
   Future<void> save(String ownerId, String source) async {
     values[ownerId] = source;
   }
+}
+
+class _LockAccountBridge extends _AccountTestBridge
+    implements DesktopIdentityBridge {
+  _LockAccountBridge() : super(hasExistingIdentity: true);
+
+  @override
+  Future<List<SavedIdentityView>> savedIdentities() async => [];
+
+  @override
+  Future<void> lockIdentity() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _RequestAccountBridge extends _GroupAccountBridge

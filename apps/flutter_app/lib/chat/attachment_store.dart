@@ -9,6 +9,8 @@ import 'attachment_source.dart';
 import 'chat_attachment.dart';
 import 'chunked_attachment_bridge.dart';
 import 'chunked_file_cache.dart';
+import 'cache_policy.dart';
+import 'managed_attachment_cache.dart';
 import 'attachment_store_stub.dart'
     if (dart.library.io) 'attachment_store_native.dart'
     if (dart.library.js_interop) 'attachment_store_web.dart';
@@ -23,14 +25,26 @@ abstract interface class AttachmentStore {
   Future<ChatAttachment> read(String ownerId, AttachmentRef ref);
 }
 
-AttachmentStore createAttachmentStore({Object? bridge}) {
+class MissingAttachmentException extends StateError {
+  MissingAttachmentException() : super('Attachment is missing from cache');
+}
+
+AttachmentStore createAttachmentStore({
+  Object? bridge,
+  CachePolicy? cachePolicy,
+}) {
   final legacy = bridge is AttachmentBridge
       ? BridgeAttachmentStore(bridge)
       : createPlatformAttachmentStore();
-  final chunks = createChunkedAttachmentBridge(bridge: bridge);
-  return chunks == null
+  final chunks = cachePolicy == null
+      ? createChunkedAttachmentBridge(bridge: bridge)
+      : managedChunkCache(bridge, cachePolicy);
+  final store = chunks == null
       ? legacy
       : HybridAttachmentStore(legacy, ChunkedFileCache(chunks));
+  return cachePolicy == null
+      ? store
+      : BudgetedAttachmentStore(store, cachePolicy);
 }
 
 /// Routes legacy byte attachments through their original cache and durable
@@ -44,12 +58,17 @@ class HybridAttachmentStore implements AttachmentStore {
   Future<AttachmentRef> put(String ownerId, ChatAttachment file) async {
     if (!file.isStreamed) return legacy.put(ownerId, file);
     final id = _newChunkedId();
-    final state = await cache.importStream(
-      ownerId,
-      id,
-      file.size,
-      file.openRead(),
-    );
+    final ChunkedAttachmentState state;
+    try {
+      state = await cache.importStream(ownerId, id, file.size, file.openRead());
+    } catch (_) {
+      // This ID was created only for this unpublished local import, never for
+      // a received/paused job. Release its reservation only after deletion.
+      try {
+        await cache.bridge.deleteChunkedAttachment(ownerId, id);
+      } catch (_) {}
+      rethrow;
+    }
     return AttachmentRef(
       name: file.name,
       mimeType: file.mimeType,
@@ -137,7 +156,7 @@ class BridgeAttachmentStore implements AttachmentStore {
   @override
   Future<ChatAttachment> read(String ownerId, AttachmentRef ref) async {
     final data = await bridge.loadPeerAttachment(ownerId, ref.digest);
-    if (data == null) throw StateError('Attachment is missing from cache');
+    if (data == null) throw MissingAttachmentException();
     if (data.length > ((ChatAttachment.maxBytes + 2) ~/ 3) * 4) {
       throw const FormatException('Invalid cached attachment');
     }

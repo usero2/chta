@@ -9,7 +9,31 @@ class FileTransferStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (snapshot.phase == FileTransferPhase.completed) {
+      return const SizedBox.shrink();
+    }
     final theme = Theme.of(context);
+    if (snapshot.phase == FileTransferPhase.failed) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.error_outline, size: 16, color: theme.colorScheme.error),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              'Transfer failed',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    if (snapshot.phase == FileTransferPhase.sending &&
+        snapshot.confirmedBytes >= snapshot.totalBytes) {
+      return const TransferReceiptStatus();
+    }
     final phase = switch (snapshot.phase) {
       FileTransferPhase.preparing => 'Preparing',
       FileTransferPhase.sending => 'Sending',
@@ -58,6 +82,32 @@ class FileTransferStatus extends StatelessWidget {
       ),
     );
   }
+}
+
+class TransferReceiptStatus extends StatelessWidget {
+  const TransferReceiptStatus({super.key});
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Waiting for receipt',
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(strokeWidth: 1.5),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            'Waiting for receipt',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 String _size(int bytes) {

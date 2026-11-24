@@ -23,6 +23,27 @@ PeerMessage message(String id) => PeerMessage(
 );
 
 void main() {
+  test('replayed attachment stays deleted after a lost receipt and history restart',()async {
+    final bridge=_Bridge(),store=_History();
+    final history=PeerHistory(store:store,attachments:BridgeAttachmentStore(bridge));await history.load('alice');
+    await history.addAttachment('friend',message('deleted-file'));await history.clearConversation('friend');history.dispose();
+    final restored=PeerHistory(store:store,attachments:BridgeAttachmentStore(bridge));await restored.load('alice');
+    await restored.addAttachment('friend',message('deleted-file'));
+    expect(restored.messagesFor('friend'),isEmpty);restored.dispose();
+  });
+  test('deleting a conversation during cache write cannot resurrect attachment or queue intent',()async {
+    final bridge=_Bridge()..gate=Completer<void>(),store=_History();
+    final history=PeerHistory(store:store,attachments:BridgeAttachmentStore(bridge));await history.load('alice');
+    final file=message('delete-in-flight')..queuedForDelivery=true;
+    final saving=history.addAttachment('friend',file);
+    await Future<void>.delayed(Duration.zero);
+    final clearing=history.clearConversation('friend');
+    final checked=expectLater(saving,throwsStateError);
+    bridge.gate!.complete();await checked;await clearing;
+    expect(history.messagesFor('friend'),isEmpty);expect(history.queuedMessages,isEmpty);
+    final restored=PeerHistory(store:store);await restored.load('alice');expect(restored.messagesFor('friend'),isEmpty);
+    history.dispose();restored.dispose();
+  });
   test(
     'failed legacy migration cannot bypass owner switch or disposal',
     () async {

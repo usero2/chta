@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cht/chat/attachment_export.dart';
@@ -6,9 +7,22 @@ import 'package:cht/chat/chat_attachment.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'long Markdown uses a safe name derived from its first 30 characters',
+    () {
+      final prefix = 'ก้😀${'x' * 25}';
+      final text = '$prefix/:\u007f\nMore Markdown';
+      final attachment = ChatAttachment.longMessage(text);
+      expect(attachment.name, '${prefix}___.md');
+      expect(utf8.decode(attachment.bytes), text);
+    },
+  );
+
   test('export filename removes Windows streams and reserved device names', () {
     expect(safeAttachmentExportName('photo.jpg:secret'), 'photo.jpg_secret');
     expect(safeAttachmentExportName('CON.txt'), '_CON.txt');
+    expect(safeAttachmentExportName('COM¹.txt'), '_COM¹.txt');
+    expect(safeAttachmentExportName('CON .note.md'), '_CON .note.md');
     expect(safeAttachmentExportName('report. '), 'report');
     expect(safeAttachmentExportName('../outside'), '.._outside');
   });

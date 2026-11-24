@@ -1,9 +1,15 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../account/account_models.dart';
 import '../notifications/incoming_notifications.dart';
 import '../notifications/notification_settings_tile.dart';
+import '../chat/cache_policy.dart';
+import '../chat/widgets/cache_settings_tile.dart';
+import '../courier/courier_service.dart';
+import '../delivery/courier_settings_tile.dart';
+import '../runtime/app_runtime.dart';
 import 'profile_controller.dart';
 import 'profile_store.dart';
 
@@ -16,6 +22,8 @@ class ProfilePage extends StatefulWidget {
     this.onPinLockChanged,
     this.onLockApp,
     this.notifications,
+    this.cachePolicy,
+    this.courier,
     super.key,
   });
 
@@ -26,6 +34,8 @@ class ProfilePage extends StatefulWidget {
   final Future<void> Function(bool)? onPinLockChanged;
   final Future<void> Function()? onLockApp;
   final IncomingNotifications? notifications;
+  final CachePolicy? cachePolicy;
+  final CourierService? courier;
 
   @override
   State<ProfilePage> createState() => _ProfilePageState();
@@ -147,8 +157,62 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
             ),
           const Divider(height: 40),
+          if (AppRuntime.instance case final runtime?)
+            AnimatedBuilder(
+              animation: runtime,
+              builder: (context, _) => Column(
+                children: [
+                  SwitchListTile.adaptive(
+                    key: const Key('profile-background-reception'),
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Keep receiving in background'),
+                    subtitle: Text(
+                      runtime.error ??
+                          (runtime.running
+                              ? (runtime.notificationVisible
+                                    ? (runtime.showLockAction &&
+                                              !kIsWeb &&
+                                              defaultTargetPlatform ==
+                                                  TargetPlatform.android
+                                          ? 'On · Lock app to stop'
+                                          : 'On')
+                                    : 'On · Enable the background notification in system settings')
+                              : 'Off'),
+                    ),
+                    value: runtime.enabled,
+                    onChanged: saving
+                        ? null
+                        : (value) => _run(() async {
+                            if (value && !runtime.notificationVisible) {
+                              await widget.notifications?.requestPermissions();
+                            }
+                            await runtime.setEnabled(value);
+                          }),
+                  ),
+                  if (!kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.android)
+                    SwitchListTile.adaptive(
+                      key: const Key('profile-background-lock-action'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Show Lock app in notification'),
+                      value: runtime.showLockAction,
+                      onChanged: saving
+                          ? null
+                          : (value) =>
+                                _run(() => runtime.setShowLockAction(value)),
+                    ),
+                ],
+              ),
+            ),
           if (widget.notifications != null)
-            NotificationSettingsTile(notifications: widget.notifications!),
+            NotificationSettingsTile(
+              notifications: widget.notifications!,
+              enabled: !saving,
+            ),
+          if (widget.cachePolicy case final policy?)
+            CacheSettingsTile(policy: policy, enabled: !saving),
+          if (widget.courier case final courier?)
+            CourierSettingsTile(service: courier),
           if (widget.pinLockEnabled != null &&
               widget.onPinLockChanged != null) ...[
             SwitchListTile.adaptive(

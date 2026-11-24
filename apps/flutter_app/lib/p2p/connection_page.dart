@@ -1,4 +1,8 @@
 import 'dart:async';
+
+import '../chat/delivery_feedback.dart';
+import '../delivery/courier_settings_tile.dart';
+
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -21,7 +25,9 @@ import '../chat/attachment_export.dart';
 import '../chat/attachment_transfer.dart';
 import '../chat/chunked_attachment_bridge.dart';
 import '../chat/resumable_attachment_transfer.dart';
-import '../chat/widgets/file_transfer_status.dart';
+import '../chat/widgets/message_transfer_status.dart';
+import '../chat/widgets/file_transfer_actions.dart';
+import '../chat/managed_attachment_cache.dart';
 import '../chat/media_batch.dart';
 import '../chat/media_item.dart';
 import '../chat/media_thumbnail.dart';
@@ -39,6 +45,7 @@ import 'peer_file_controller.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
 import '../relay/relay_chat.dart';
+import '../chat/messaging_service.dart';
 import '../relay/relay_host.dart';
 import '../relay/relay_qr.dart';
 import '../relay/relay_peer_sync.dart';
@@ -68,6 +75,7 @@ class ConnectionPage extends StatefulWidget {
     this.profileController,
     this.chatController,
     this.peerHistory,
+    this.messaging,
     this.onRoomSelected,
     this.onBackToChats,
     this.onCreateGroup,
@@ -99,6 +107,7 @@ class ConnectionPage extends StatefulWidget {
   final ProfileController? profileController;
   final ChatController? chatController;
   final PeerHistory? peerHistory;
+  final MessagingService? messaging;
   final ValueChanged<String>? onRoomSelected;
   final VoidCallback? onBackToChats;
   final VoidCallback? onCreateGroup;
@@ -121,6 +130,7 @@ class ConnectionPage extends StatefulWidget {
 
 class ConnectionPageState extends State<ConnectionPage> {
   void cancelConversationWork(String id) {
+    widget.messaging?.cancelConversation(id);
     fileController?.cancelPendingFor(id);
     relayChat?.cancelPendingFor(id);
     if (_selectedFileContact?.identityId == id) {
@@ -154,6 +164,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   void _reportOnlinePeers() {
     if (!mounted) return;
     final online = <String>{
+      ...?widget.messaging?.onlinePeers,
       if (authenticated && peerIdentityId != null) peerIdentityId!,
       if (fileController?.ready == true && fileController?.peerId != null)
         fileController!.peerId!,
@@ -233,7 +244,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     bridge = widget.bridge ?? createP2pBridge();
     initializingRelays = widget.accountBridge is RelayCryptoBridge;
     history = widget.peerHistory ?? PeerHistory();
-    unawaited(_initializeFileController());
+    if (widget.messaging == null) unawaited(_initializeFileController());
     attachments = AttachmentTransfer(
       maxTransferBytes: () => usingRelayChat
           ? ChatAttachment.relayMaxBytes
@@ -316,6 +327,13 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<void> _updateFilePeer(bool secured) async {
+    if (widget.messaging != null) {
+      final id = widget.targetContactId;
+      relayChat = widget.messaging!.relayFor(id);
+      fileController = widget.messaging!.filesFor(id);
+      seedClient?.selectContact(_selectedFileContact);
+      return;
+    }
     final contact = _selectedFileContact;
     seedClient?.selectContact(contact);
     final actualPeer = peerIdentityId;
@@ -394,7 +412,7 @@ class ConnectionPageState extends State<ConnectionPage> {
           ),
         );
       } else if (history.error != null) {
-        history.changed();
+        history.changed(peer);
       }
       await history.flush();
       if (history.error != null) {
@@ -455,6 +473,24 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<void> _initializeRelays() async {
+    final service = widget.messaging;
+    if (service != null) {
+      relayNetwork = service.network;
+      seedClient = service.seed;
+      relayHost = widget.relayHostFactory();
+      relayHost?.addListener(_hostChanged);
+      relayConnectionLimit.text = '${service.network.connectionLimit}';
+      service.addListener(_sharedChanged);
+      relayNetwork!.addListener(_historyChanged);
+      initializingRelays = false;
+      widget.onRelayNetworkReady?.call(service.network);
+      if (service.seed != null) widget.onSeedReady?.call(service.seed!);
+      if (service.network.hostEnabled && relayHost != null) {
+        unawaited(_startPublicRelay());
+      }
+      await _connectAutomatically(force: true);
+      return;
+    }
     final account = widget.accountBridge;
     if (account is! RelayCryptoBridge || !mounted) return;
     final network = RelayNetwork(
@@ -536,6 +572,26 @@ class ConnectionPageState extends State<ConnectionPage> {
     if (!mounted) return;
     unawaited(_updateFilePeer(authenticated));
     setState(() {});
+  }
+
+  void _sharedChanged() {
+    if (!mounted) return;
+    final service = widget.messaging!;
+    final id = widget.targetContactId;
+    relayChat = service.relayFor(id);
+    fileController = service.filesFor(id);
+    peerIdentityId = id;
+    authenticated = relayChat?.authenticated == true;
+    connectionState = service.isOnline(id ?? '') ? 'connected' : 'connecting';
+    transferProgress
+      ..clear()
+      ..addAll(service.outgoingProgressFor(id));
+    incomingProgress
+      ..clear()
+      ..addAll(service.incomingProgressFor(id));
+    if (service.isOnline(id ?? '')) _clearRecoveredConnectionError();
+    setState(() {});
+    _reportOnlinePeers();
   }
 
   Future<bool> _acceptIncomingSeedPeer(String id) async {
@@ -755,9 +811,11 @@ class ConnectionPageState extends State<ConnectionPage> {
       automaticConnectionAttempted = false;
       seedClient?.selectContact(null);
       _loadTargetContact();
-      unawaited(
-        fileController?.updatePeer(null, encryptedAuthenticated: false),
-      );
+      if (widget.messaging == null) {
+        unawaited(
+          fileController?.updatePeer(null, encryptedAuthenticated: false),
+        );
+      }
     }
   }
 
@@ -765,16 +823,17 @@ class ConnectionPageState extends State<ConnectionPage> {
   void dispose() {
     widget.requests?.removeListener(_requestsChanged);
     attachments.dispose();
-    unawaited(fileController?.close());
+    if (widget.messaging == null) unawaited(fileController?.close());
     timer?.cancel();
     answerTimer?.cancel();
     bridge.close();
     relaySync?.dispose();
     seedClient?.removeListener(_seedChanged);
     unawaited(_seedSignals?.cancel());
-    unawaited(seedClient?.close());
+    if (widget.messaging == null) unawaited(seedClient?.close());
     relayNetwork?.removeListener(_historyChanged);
-    unawaited(relayChat?.close());
+    if (widget.messaging == null) unawaited(relayChat?.close());
+    widget.messaging?.removeListener(_sharedChanged);
     relayHost?.removeListener(_hostChanged);
     unawaited(relayHost?.shutdown());
     history.removeListener(_historyChanged);
@@ -792,6 +851,20 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<void> _poll() async {
+    if (widget.messaging != null) {
+      if (!mounted || polling) return;
+      polling = true;
+      try {
+        if (bridge.supportsListening) {
+          nativeListener = await bridge.listenerStatus();
+        }
+        if (mounted) _sharedChanged();
+      } catch (_) {
+      } finally {
+        polling = false;
+      }
+      return;
+    }
     if (polling) return;
     polling = true;
     final generation = peerGeneration;
@@ -970,7 +1043,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                 expectedGeneration: roomGeneration,
               );
               if (existing != null && history.error != null) {
-                history.changed();
+                history.changed(peerIdentityId ?? widget.targetContactId);
               }
               receipts.add((event.messageId!, receivedAt));
             case 'sent':
@@ -1673,9 +1746,10 @@ class ConnectionPageState extends State<ConnectionPage> {
       if (mounted) setState(() => targetContact = null);
       return;
     }
-    if ((authenticated && peerIdentityId != targetId) ||
-        (connectionAttemptPeerId != null &&
-            connectionAttemptPeerId != targetId)) {
+    if (widget.messaging == null &&
+        ((authenticated && peerIdentityId != targetId) ||
+            (connectionAttemptPeerId != null &&
+                connectionAttemptPeerId != targetId))) {
       await _resetFlow();
     }
     try {
@@ -1707,6 +1781,17 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<void> _connectAutomatically({bool force = false}) async {
+    if (widget.messaging != null) {
+      final id = widget.targetContactId;
+      if (!mounted || id == null) return;
+      try {
+        await widget.messaging!.reconnect(id);
+        if (mounted) _sharedChanged();
+      } catch (caught) {
+        if (mounted) setState(() => error = 'Could not connect. Retrying.');
+      }
+      return;
+    }
     if (!mounted || working || initializingRelays) return;
     final contact = targetContact;
     if (!(bridge.supportsAutomaticContact ||
@@ -2123,6 +2208,33 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<bool> _send({PeerMessage? retry, String? value}) async {
+    if (widget.messaging != null) {
+      final id = widget.targetContactId;
+      if (id == null) return false;
+      try {
+        if (retry != null) {
+          await widget.messaging!.queueMessage(id, retry);
+        } else {
+          final draft = value ?? messageInput.text;
+          final text = draft.trim();
+          if (text.isEmpty) return false;
+          await widget.messaging!.queueText(
+            id,
+            RelayChat.messageFits(draft) ? text : draft,
+          );
+        }
+        if (mounted) setState(() => error = null);
+        return true;
+      } on FormatException catch (caught) {
+        if (mounted) setState(() => error = caught.message);
+        return false;
+      } catch (_) {
+        if (mounted) {
+          setState(() => error = 'Could not save message. Try again.');
+        }
+        return false;
+      }
+    }
     if (retry?.hasAttachment == true) {
       final peer = widget.targetContactId ?? peerIdentityId;
       final generation = peerGeneration;
@@ -2146,9 +2258,18 @@ class ConnectionPageState extends State<ConnectionPage> {
         return false;
       }
     }
-    final text = retry?.text ?? (value ?? messageInput.text).trim();
+    final draft = value ?? messageInput.text;
+    final text = retry?.text ?? draft.trim();
     if (text.isEmpty) return false;
     final peer = widget.targetContactId ?? peerIdentityId;
+    if (retry == null && peer != null && !RelayChat.messageFits(draft)) {
+      try {
+        return await _sendBatch('', [ChatAttachment.longMessage(draft)]);
+      } on FormatException catch (caught) {
+        if (mounted) setState(() => error = caught.message);
+        return false;
+      }
+    }
     final message =
         retry ??
         PeerMessage(
@@ -2159,7 +2280,7 @@ class ConnectionPageState extends State<ConnectionPage> {
         );
     if (retry == null) _recordMessage(message);
     message.status = DeliveryStatus.pending;
-    history.changed();
+    history.changed(peer);
     try {
       await _sendPacket(
         message.id,
@@ -2181,7 +2302,7 @@ class ConnectionPageState extends State<ConnectionPage> {
           error = 'Message not sent. Reconnect and retry.';
           technicalError = caught;
         });
-        history.changed();
+        history.changed(peer);
       }
       return false;
     }
@@ -2198,6 +2319,30 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   Future<bool> _sendBatch(String text, List<ChatAttachment> files) async {
+    if (widget.messaging != null) {
+      final peer = widget.targetContactId;
+      if (peer == null) return false;
+      final batchId = 'batch_${RelayChat.randomId()}';
+      final batch = prepareMediaBatch(text, files, batchId);
+      try {
+        final queued = [
+          for (var i = 0; i < batch.files.length; i++)
+            PeerMessage(
+              id: '${batchId}_$i',
+              text: batch.files[i].previewLabel,
+              incoming: false,
+              status: DeliveryStatus.pending,
+              attachment: batch.files[i],
+              queuedForDelivery: true,
+            ),
+        ];
+        await widget.messaging!.queueBatch(peer, queued);
+        return true;
+      } catch (_) {
+        if (mounted) setState(() => error = 'Could not save files. Try again.');
+        return false;
+      }
+    }
     if (_sendingBatch || attachmentUsesRelay != null) return false;
     final peer = widget.targetContactId ?? peerIdentityId;
     final generation = peerGeneration;
@@ -2285,6 +2430,26 @@ class ConnectionPageState extends State<ConnectionPage> {
     String? expectedPeer,
     int? expectedGeneration,
   }) async {
+    if (widget.messaging != null) {
+      final peer = expectedPeer ?? widget.targetContactId;
+      if (peer == null) return false;
+      try {
+        final message =
+            retry ??
+            PeerMessage(
+              id: 'file-${RelayChat.randomId()}',
+              text: attachment.previewLabel,
+              incoming: false,
+              status: DeliveryStatus.pending,
+              attachment: attachment,
+            );
+        await widget.messaging!.queueMessage(peer, message);
+        return true;
+      } catch (_) {
+        if (mounted) setState(() => error = 'Could not save file. Try again.');
+        return false;
+      }
+    }
     final peer = expectedPeer ?? widget.targetContactId ?? peerIdentityId;
     final generation = expectedGeneration ?? peerGeneration;
     if (peer == null || !_isPeer(peer, generation)) return false;
@@ -2360,7 +2525,7 @@ class ConnectionPageState extends State<ConnectionPage> {
       if (retry == null) {
         await history.addAttachment(peer, message);
       } else {
-        history.changed();
+        history.changed(peer);
       }
       _guardPeer(peer, generation);
       final receivedAt = await attachments.send(
@@ -2523,6 +2688,20 @@ class ConnectionPageState extends State<ConnectionPage> {
         final message = group.first;
         final album =
             message.hasAttachment && _mediaItem(message).groupKey != null;
+        final hasTransferStatus = group.any(
+          (item) => MessageTransferStatus.visibleFor(
+            item,
+            snapshot: fileController?.progress[item.id],
+            legacyProgress: transferProgress[item.id],
+          ),
+        );
+        final peer = widget.targetContactId ?? peerIdentityId ?? '';
+        final courier = widget.messaging?.courier;
+        final courierLabel =
+            message.courierJobId != null ||
+                widget.messaging?.isOnline(peer) == false
+            ? courier?.labelFor(peer, message)
+            : null;
         return Column(
           crossAxisAlignment: message.incoming
               ? CrossAxisAlignment.start
@@ -2530,6 +2709,9 @@ class ConnectionPageState extends State<ConnectionPage> {
           children: [
             MessageBubble(
               text: message.text,
+              media: const {'image', 'video'}.contains(
+                message.attachment?.kind ?? message.attachmentRef?.kind,
+              ),
               incoming: message.incoming,
               sentAtMilliseconds: message.sentAtMilliseconds,
               receivedAtMilliseconds: message.receivedAtMilliseconds,
@@ -2558,34 +2740,69 @@ class ConnectionPageState extends State<ConnectionPage> {
                       message: message,
                     ),
             ),
-            if (fileController?.progress[message.id] != null)
-              SizedBox(
-                width: 220,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: FileTransferStatus(
-                    snapshot: fileController!.progress[message.id]!,
-                  ),
-                ),
-              ),
-            if (transferProgress.containsKey(message.id))
-              SizedBox(
-                width: 180,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: LinearProgressIndicator(
-                          value: transferProgress[message.id],
+            if (message.queuedForDelivery &&
+                !message.deliveryPaused &&
+                message.status != DeliveryStatus.delivered &&
+                (!hasTransferStatus || courierLabel != null))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6, right: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.schedule, size: 11),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        courierLabel ??
+                            deliveryFeedback(
+                              message.status,
+                              needsDirect:
+                                  (message.attachmentRef?.size ??
+                                          message.attachment?.size ??
+                                          0) >
+                                      ChatAttachment.relayMaxBytes &&
+                                  fileController?.ready != true,
+                              online:
+                                  widget.messaging?.isOnline(
+                                    widget.targetContactId ??
+                                        peerIdentityId ??
+                                        '',
+                                  ) ==
+                                  true,
+                            ) ??
+                            '',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF8E8E93),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Text('${(transferProgress[message.id]! * 100).round()}%'),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
+            for (final item in group) ...[
+              MessageTransferStatus(
+                message: item,
+                snapshot: fileController?.progress[item.id],
+                legacyProgress: transferProgress[item.id],
+              ),
+              if (widget.messaging case final service?)
+                FileTransferActions(
+                  message: item,
+                  onPause: () => service.pauseFile(
+                    widget.targetContactId ?? peerIdentityId ?? '',
+                    item.id,
+                  ),
+                  onResume: () => service.resumeFile(
+                    widget.targetContactId ?? peerIdentityId ?? '',
+                    item.id,
+                  ),
+                  onCancel: () => service.cancelFile(
+                    widget.targetContactId ?? peerIdentityId ?? '',
+                    item.id,
+                  ),
+                ),
+            ],
           ],
         );
       },
@@ -2709,6 +2926,9 @@ class ConnectionPageState extends State<ConnectionPage> {
                           ),
                         );
                         if (confirmed == true) {
+                          widget.messaging?.cancelConversation(
+                            contact.identityId,
+                          );
                           fileController?.cancelPendingFor(contact.identityId);
                           relayChat?.cancelPendingFor(contact.identityId);
                           if (_selectedFileContact?.identityId ==
@@ -2753,8 +2973,46 @@ class ConnectionPageState extends State<ConnectionPage> {
                 style: TextStyle(color: Colors.redAccent),
               ),
             ),
-          if (connected) ...[
+          if (connected ||
+              widget.messaging != null && targetContact?.verified == true) ...[
+            if (!connected)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                child: Row(
+                  children: [
+                    Icon(Icons.schedule, size: 14),
+                    SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Waiting for connection. Messages will send automatically.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Expanded(child: _peerMessageList()),
+            if (history.attachments case BudgetedAttachmentStore(
+              policy: final policy,
+            ))
+              AnimatedBuilder(
+                animation: policy,
+                builder: (context, _) => policy.error == null
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 6,
+                        ),
+                        child: Text(
+                          policy.error!,
+                          key: const Key('cache-error'),
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ),
+              ),
             if (error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -2828,6 +3086,11 @@ class ConnectionPageState extends State<ConnectionPage> {
                       !relayNetwork!.enabled &&
                       canScanRelayQr
                 ? 'Scan the other device\'s relay QR to connect.'
+                : widget.messaging?.courier?.canQueue(
+                        widget.targetContactId ?? peerIdentityId ?? '',
+                      ) ==
+                      true
+                ? 'Messages can wait for this friend in Courier.'
                 : relayNetwork?.enabled == true
                 ? 'Reconnecting. Keep both apps online.'
                 : !kIsWeb && bridge.supportsAutomaticContact
@@ -3423,8 +3686,18 @@ class ConnectionPageState extends State<ConnectionPage> {
 
   Widget _relayNetworkPage() => Scaffold(
     appBar: AppBar(title: const Text('Connect')),
-    body: ListView(padding: _connectPadding, children: [_relaySettings()]),
+    body: ListView(
+      padding: _connectPadding,
+      children: [_relaySettings(), _courierSettings()],
+    ),
   );
+
+  Widget _courierSettings() {
+    final service = widget.messaging?.courier?.service;
+    return service == null
+        ? const SizedBox.shrink()
+        : CourierSettingsTile(service: service);
+  }
 
   Widget _nativeListenerPage() {
     final status = nativeListener;
@@ -3435,6 +3708,7 @@ class ConnectionPageState extends State<ConnectionPage> {
         padding: _connectPadding,
         children: [
           _relaySettings(),
+          _courierSettings(),
           const SizedBox(height: 12),
           Card(
             color: listening ? const Color(0xFF172116) : null,
