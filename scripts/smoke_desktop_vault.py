@@ -36,7 +36,7 @@ def main():
     call = bridge(library)
     if len(sys.argv) > 2:
         owner = sys.argv[2]
-        assert any(item["id"] == owner for item in call("listSavedIdentities"))
+        assert any(item["identityId"] == owner for item in call("listSavedIdentities"))
         call("unlockIdentity", expect_ok=False, identityId=owner, pin="000000")
         assert call("unlockIdentity", identityId=owner, pin=PIN)["id"] == owner
         assert call("loadPeerHistory", ownerId=owner) == HISTORY

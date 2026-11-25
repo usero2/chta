@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-packages-${{ github.ref }}
+  group: desktop-packages-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

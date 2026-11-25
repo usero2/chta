@@ -38,6 +38,10 @@ case "$platform" in
       printf "ci-only-password" | gnome-keyring-daemon --unlock
       export XDG_DATA_HOME="$1/state"
       python3 "$2/scripts/smoke_desktop_vault.py" "$3/libcht_core.so"
+      status=0
+      timeout 8 xvfb-run -a "$3/chta" || status=$?
+      test "$status" -eq 124
+      echo "Verified native Flutter window starts"
     ' smoke "$scratch" "$source_root" "$bundle"
     mv "$bundle" "$scratch/$name"
     tar -czf "dist-desktop/$name.tar.gz" -C "$scratch" "$name"
