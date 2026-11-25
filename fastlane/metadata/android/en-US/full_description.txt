@@ -1,0 +1,5 @@
+Use chta to chat one-to-one or in private groups. Messages and attachments are end-to-end encrypted. Share photos, videos, audio, and documents, or format a longer message with Markdown.
+
+Create an identity on your device and save your 24-word recovery phrase. Add a friend by scanning their QR code or pasting their contact card.
+
+chta tries to connect directly. If a direct route is unavailable, a reachable relay can forward encrypted traffic. The discovery service helps devices find one another and handles temporary connection metadata.

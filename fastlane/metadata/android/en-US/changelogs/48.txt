@@ -1,0 +1,1 @@
+Added a Privacy Policy link and an identity deletion request link in Profile.
