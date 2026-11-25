@@ -1,11 +1,14 @@
 mod account;
-#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "android", target_os = "linux", target_os = "macos", test)
+))]
 mod android_storage;
 mod chat;
-mod contacts;
 mod contact_requests;
-mod delivery;
+mod contacts;
 mod courier;
+mod delivery;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop_vault;
 pub mod device_sync;
@@ -16,8 +19,8 @@ mod identity;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 mod secure_session;
-pub mod seed_signal;
 pub mod seed_dispatch;
+pub mod seed_signal;
 pub use cht_relay_protocol as relay_directory;
 mod wasm;
 

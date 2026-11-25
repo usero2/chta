@@ -294,7 +294,10 @@ class _NativeCoreBridge
   }
 
   _NativeCoreBridge() {
-    final executableDirectory = File(Platform.resolvedExecutable).parent.path;
+    final executableDirectory = File(Platform.resolvedExecutable).parent;
+    final libraryDirectory = Platform.isMacOS
+        ? '${executableDirectory.parent.path}/Frameworks'
+        : executableDirectory.path;
     final libraryName = Platform.isWindows
         ? 'cht_core.dll'
         : Platform.isMacOS
@@ -303,7 +306,7 @@ class _NativeCoreBridge
     final library = DynamicLibrary.open(
       Platform.isAndroid
           ? libraryName
-          : '$executableDirectory${Platform.pathSeparator}$libraryName',
+          : '$libraryDirectory${Platform.pathSeparator}$libraryName',
     );
     _call = library.lookupFunction<_CallNative, _CallDart>('cht_call');
     _free = library.lookupFunction<_FreeNative, _FreeDart>('cht_free_string');

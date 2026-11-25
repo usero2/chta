@@ -7,6 +7,7 @@ import 'package:cht/profile/profile_store.dart';
 import 'package:cht/notifications/incoming_notifications.dart';
 import 'package:cht/runtime/app_runtime.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../runtime/app_runtime_test.dart' show FakeRuntime;
@@ -52,6 +53,37 @@ void main() {
     await tester.tap(find.byKey(key));
     await tester.pump();
   }
+
+  testWidgets('profile opens the privacy and identity deletion pages', (
+    tester,
+  ) async {
+    final opened = <String>[];
+    const channel = MethodChannel('plugins.flutter.io/url_launcher');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      expect(call.method, 'launch');
+      opened.add(call.arguments['url'] as String);
+      return true;
+    });
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      );
+    });
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await showProfile(tester);
+    await tapControl(tester, const Key('profile-privacy-policy'));
+    await tapControl(tester, const Key('profile-delete-identity'));
+    expect(opened, [
+      'https://chta.app/privacy',
+      'https://chta.app/delete-identity',
+    ]);
+  });
 
   testWidgets('Android can hide the lock action while reception stays on', (
     tester,
@@ -195,6 +227,10 @@ void main() {
   testWidgets('pending PIN save disables profile actions and lock controls', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     final persistence = Completer<void>();
     var locks = 0;
     await showProfile(

@@ -1,0 +1,65 @@
+name: Desktop packages
+
+on:
+  push:
+    branches: [release/desktop-48]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            flutter_arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+            flutter_arch: arm64
+          - runner: macos-15
+            platform: macos-universal
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      FLUTTER_VERSION: 3.47.9
+      FLUTTER_REVISION: c197ca5199e9ee5661e865596c9c07294dfab51c
+      RUST_VERSION: 1.99.1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev \
+            libdbus-1-dev libmpv-dev libpulse-dev libgl-dev gnome-keyring dbus-x11 xvfb xauth
+      - name: Set up Flutter and Rust
+        shell: bash
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" \
+            https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - name: Build and verify package
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+          FLUTTER_ARCH: ${{ matrix.flutter_arch }}
+        run: bash scripts/package_desktop.sh "$PACKAGE_PLATFORM" "${FLUTTER_ARCH:-}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.platform }}
+          path: dist-desktop/chta-*
+          if-no-files-found: error
+          retention-days: 7

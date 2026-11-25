@@ -4,19 +4,36 @@ use chacha20poly1305::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn protect(
     device_key: &[u8],
     bytes: &[u8],
     context: &[u8],
     encrypt: bool,
 ) -> Result<Vec<u8>, String> {
+    protect_with_domain(
+        b"cht android storage v1",
+        device_key,
+        bytes,
+        context,
+        encrypt,
+    )
+}
+
+pub(crate) fn protect_with_domain(
+    domain: &[u8],
+    device_key: &[u8],
+    bytes: &[u8],
+    context: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
     if device_key.len() != 32 {
-        return Err("Invalid Android storage key".to_owned());
+        return Err("Invalid storage key".to_owned());
     }
     let mut key = Zeroizing::new([0u8; 32]);
-    hkdf::Hkdf::<sha2::Sha256>::new(Some(b"cht android storage v1"), device_key)
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(domain), device_key)
         .expand(context, &mut *key)
-        .map_err(|_| "Invalid Android protection context")?;
+        .map_err(|_| "Invalid storage protection context")?;
     let cipher = XChaCha20Poly1305::new_from_slice(&*key).map_err(|_| "Invalid storage key")?;
     if encrypt {
         let mut nonce = [0u8; 24];
@@ -29,14 +46,14 @@ pub(crate) fn protect(
                     aad: context,
                 },
             )
-            .map_err(|_| "Unable to encrypt Android data")?;
+            .map_err(|_| "Unable to encrypt stored data")?;
         let mut output = vec![1];
         output.extend_from_slice(&nonce);
         output.extend_from_slice(&ciphertext);
         Ok(output)
     } else {
         if bytes.len() < 41 || bytes[0] != 1 {
-            return Err("Invalid encrypted Android data".to_owned());
+            return Err("Invalid encrypted data".to_owned());
         }
         cipher
             .decrypt(
@@ -46,7 +63,7 @@ pub(crate) fn protect(
                     aad: context,
                 },
             )
-            .map_err(|_| "Unable to unlock protected Android data".to_owned())
+            .map_err(|_| "Unable to unlock protected data".to_owned())
     }
 }
 

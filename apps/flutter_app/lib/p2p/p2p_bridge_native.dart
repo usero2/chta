@@ -22,14 +22,17 @@ class _NativeP2pBridge implements P2pBridge {
 
   void _ensureLibrary() {
     if (_call != null) return;
-    final directory = File(Platform.resolvedExecutable).parent.path;
+    final executableDirectory = File(Platform.resolvedExecutable).parent;
+    final libraryDirectory = Platform.isMacOS
+        ? '${executableDirectory.parent.path}/Frameworks'
+        : executableDirectory.path;
     final libraryName = Platform.isWindows
         ? 'cht_mesh.dll'
         : Platform.isMacOS
         ? 'libcht_mesh.dylib'
         : 'libcht_mesh.so';
     final library = DynamicLibrary.open(
-      '$directory${Platform.pathSeparator}$libraryName',
+      '$libraryDirectory${Platform.pathSeparator}$libraryName',
     );
     _call = library.lookupFunction<_CallNative, _CallDart>('cht_mesh_call');
     _free = library.lookupFunction<_FreeNative, _FreeDart>(

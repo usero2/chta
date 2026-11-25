@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../account/account_models.dart';
 import '../notifications/incoming_notifications.dart';
@@ -67,6 +68,18 @@ class _ProfilePageState extends State<ProfilePage> {
     } finally {
       if (mounted) setState(() => saving = false);
     }
+  }
+
+  Future<void> _openPrivacyPage(String path) async {
+    final url = Uri.https('chta.app', path);
+    try {
+      if (await launchUrl(url, mode: LaunchMode.externalApplication)) return;
+    } catch (_) {
+      // Show the address if a browser cannot open it.
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Open $url in your browser.')));
   }
 
   @override
@@ -253,6 +266,23 @@ class _ProfilePageState extends State<ProfilePage> {
           SelectableText(widget.identity.id),
           const SizedBox(height: 8),
           const Text('Only a thumbnail is shared with friends.'),
+          const Divider(height: 40),
+          ListTile(
+            key: const Key('profile-privacy-policy'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.privacy_tip_outlined),
+            title: const Text('Privacy Policy'),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: saving ? null : () => _openPrivacyPage('/privacy'),
+          ),
+          ListTile(
+            key: const Key('profile-delete-identity'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.person_remove_outlined),
+            title: const Text('Request identity deletion'),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: saving ? null : () => _openPrivacyPage('/delete-identity'),
+          ),
           const Divider(height: 40),
           FutureBuilder<PackageInfo>(
             future: packageInfo,

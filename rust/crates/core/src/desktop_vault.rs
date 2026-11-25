@@ -215,6 +215,8 @@ pub(crate) struct DesktopVault {
     root: PathBuf,
     #[cfg(target_os = "android")]
     wrapping_key: Option<Zeroizing<Vec<u8>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    desktop_key: std::cell::OnceCell<Zeroizing<Vec<u8>>>,
 }
 
 impl DesktopVault {
@@ -242,6 +244,8 @@ impl DesktopVault {
             root,
             #[cfg(target_os = "android")]
             wrapping_key: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            desktop_key: std::cell::OnceCell::new(),
         }
     }
 
@@ -265,8 +269,56 @@ impl DesktopVault {
                 .ok_or("Android secure storage has not been initialized")?;
             crate::android_storage::protect(device_key, bytes, entropy, encrypt)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return crate::android_storage::protect_with_domain(
+            b"chta desktop storage v1",
+            self.desktop_key(encrypt)?,
+            bytes,
+            entropy,
+            encrypt,
+        );
+        #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos")))]
         protect(bytes, entropy, encrypt)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn desktop_key(&self, encrypt: bool) -> Result<&[u8], String> {
+        if let Some(key) = self.desktop_key.get() {
+            return Ok(key);
+        }
+
+        fs::create_dir_all(&self.root).map_err(io_error)?;
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join("keyring.lock"))
+            .map_err(io_error)?;
+        lock.lock().map_err(io_error)?;
+        let unavailable = || {
+            if cfg!(target_os = "macos") {
+                "Unlock your login Keychain to use chta".to_owned()
+            } else {
+                "Unlock a Secret Service keyring in your desktop session to use chta".to_owned()
+            }
+        };
+        let entry = keyring::Entry::new("app.cht.cht", "desktop-vault-key-v1")
+            .map_err(|_| unavailable())?;
+        let key = match entry.get_secret() {
+            Ok(value) => Zeroizing::new(value),
+            Err(keyring::Error::NoEntry) if encrypt && self.list()?.is_empty() => {
+                let mut value = Zeroizing::new(vec![0u8; 32]);
+                getrandom::fill(&mut value).map_err(|error| error.to_string())?;
+                entry.set_secret(&value).map_err(|_| unavailable())?;
+                value
+            }
+            Err(keyring::Error::NoEntry) => return Err("Desktop vault key is missing".into()),
+            Err(_) => return Err(unavailable()),
+        };
+        if key.len() != 32 {
+            return Err("Invalid desktop vault key".into());
+        }
+        Ok(self.desktop_key.get_or_init(|| key))
     }
 
     pub fn load_history(&self, id: &str) -> Result<String, String> {
@@ -351,16 +403,35 @@ impl DesktopVault {
     }
 
     pub fn from_environment() -> Result<Self, String> {
-        let base = std::env::var_os("APPDATA")
-            .or_else(|| {
-                if cfg!(windows) {
-                    None
-                } else {
-                    Some(std::env::temp_dir().into_os_string())
-                }
-            })
-            .ok_or("Windows application data directory is unavailable")?;
-        Ok(Self::new(PathBuf::from(base).join("cht")))
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let base = if cfg!(target_os = "macos") {
+                home.map(|path| path.join("Library").join("Application Support"))
+            } else {
+                std::env::var_os("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .or_else(|| home.map(|path| path.join(".local").join("share")))
+            };
+            let base = base
+                .filter(|path| path.is_absolute())
+                .ok_or("Desktop application data directory is unavailable")?;
+            Ok(Self::new(base.join("chta")))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let base = std::env::var_os("APPDATA")
+                .or_else(|| {
+                    if cfg!(windows) {
+                        None
+                    } else {
+                        Some(std::env::temp_dir().into_os_string())
+                    }
+                })
+                .ok_or("Windows application data directory is unavailable")?;
+            Ok(Self::new(PathBuf::from(base).join("cht")))
+        }
     }
 
     fn identity_path(&self, id: &str) -> Result<PathBuf, String> {
@@ -650,7 +721,12 @@ fn protect(bytes: &[u8], entropy: &[u8], encrypt: bool) -> Result<Vec<u8>, Strin
     Ok(copy)
 }
 
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(not(any(
+    windows,
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos"
+)))]
 fn protect(_: &[u8], _: &[u8], _: bool) -> Result<Vec<u8>, String> {
     Err("PIN identity storage is currently available on Windows Desktop only".to_owned())
 }
