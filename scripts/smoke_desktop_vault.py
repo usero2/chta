@@ -50,7 +50,7 @@ def main():
     call("lockIdentity")
     assert not call("hasIdentity")
     call("loadPeerHistory", expect_ok=False, ownerId=owner)
-    subprocess.run([sys.executable, __file__, library, owner], check=True)
+    subprocess.run([sys.executable, __file__, library, owner], check=True, timeout=60)
     print("Verified desktop keyring, PIN and encrypted history across restarts")
 
 

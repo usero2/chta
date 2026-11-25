@@ -407,7 +407,9 @@ impl DesktopVault {
         {
             let home = std::env::var_os("HOME").map(PathBuf::from);
             let base = if cfg!(target_os = "macos") {
-                home.map(|path| path.join("Library").join("Application Support"))
+                std::env::var_os("CHTA_MAC_DATA_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| home.map(|path| path.join("Library").join("Application Support")))
             } else {
                 std::env::var_os("XDG_DATA_HOME")
                     .map(PathBuf::from)

@@ -71,11 +71,28 @@ case "$platform" in
     done
     codesign --force --sign - --entitlements "$app_root/macos/Runner/Release.entitlements" "$app"
     codesign --verify --deep --strict "$app"
-    lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/chta"
+    lipo "$app/Contents/MacOS/chta" -verify_arch x86_64 arm64
     for library in "$app/Contents/Frameworks/"libcht*.dylib; do
-      lipo -verify_arch x86_64 arm64 "$library"
+      lipo "$library" -verify_arch x86_64 arm64
     done
-    python3 "$source_root/scripts/smoke_desktop_vault.py" "$app/Contents/Frameworks/libcht_core.dylib"
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+      (
+        temporary_keychain="$scratch/desktop-smoke.keychain-db"
+        original_keychain=$(security default-keychain -d user | sed 's/^[[:space:]]*"//;s/"$//' || true)
+        cleanup_keychain() {
+          if [[ -n "$original_keychain" ]]; then
+            security default-keychain -d user -s "$original_keychain"
+          fi
+          security delete-keychain "$temporary_keychain"
+        }
+        security create-keychain -p ci-only-password "$temporary_keychain"
+        trap cleanup_keychain EXIT
+        security unlock-keychain -p ci-only-password "$temporary_keychain"
+        security default-keychain -d user -s "$temporary_keychain"
+        export CHTA_MAC_DATA_HOME="$scratch/state"
+        python3 "$source_root/scripts/smoke_desktop_vault.py" "$app/Contents/Frameworks/libcht_core.dylib"
+      )
+    fi
     mkdir "$scratch/disk"
     ditto "$app" "$scratch/disk/chta.app"
     cp LICENSE "$scratch/disk/LICENSE"
