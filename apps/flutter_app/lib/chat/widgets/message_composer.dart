@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -39,6 +42,41 @@ class _MessageComposerState extends State<MessageComposer> {
   bool _picking = false;
   bool _formatting = false;
   bool _preview = false;
+
+  bool get _isNativeDesktop =>
+      !kIsWeb &&
+      switch (defaultTargetPlatform) {
+        TargetPlatform.windows ||
+        TargetPlatform.macOS ||
+        TargetPlatform.linux => true,
+        _ => false,
+      };
+
+  KeyEventResult _handleInputKey(FocusNode node, KeyEvent event) {
+    const enter = SingleActivator(LogicalKeyboardKey.enter);
+    const numpadEnter = SingleActivator(LogicalKeyboardKey.numpadEnter);
+    const controlEnter = SingleActivator(
+      LogicalKeyboardKey.enter,
+      control: true,
+    );
+    final keyboard = HardwareKeyboard.instance;
+    final desktopEnter =
+        _isNativeDesktop &&
+        (enter.accepts(event, keyboard) ||
+            numpadEnter.accepts(event, keyboard));
+    if (!desktopEnter && !controlEnter.accepts(event, keyboard)) {
+      return KeyEventResult.ignored;
+    }
+
+    // Let an input method commit its current text before Enter can send it.
+    final composing = _textController.value.composing;
+    if (composing.isValid && !composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent) unawaited(_submit());
+    return KeyEventResult.handled;
+  }
+
   @override
   void dispose() {
     if (widget.controller == null) _textController.dispose();
@@ -227,13 +265,9 @@ class _MessageComposerState extends State<MessageComposer> {
                 ),
               ),
               Expanded(
-                child: CallbackShortcuts(
-                  bindings: {
-                    const SingleActivator(
-                      LogicalKeyboardKey.enter,
-                      control: true,
-                    ): _submit,
-                  },
+                child: Focus(
+                  canRequestFocus: false,
+                  onKeyEvent: _handleInputKey,
                   child: TextField(
                     key: widget.inputKey,
                     controller: _textController,
@@ -244,7 +278,8 @@ class _MessageComposerState extends State<MessageComposer> {
                     onChanged: (_) {
                       if (_preview) setState(() {});
                     },
-                    enabled: !_sending,
+                    enabled: _isNativeDesktop || !_sending,
+                    readOnly: _isNativeDesktop && _sending,
                     decoration: const InputDecoration(
                       hintText: 'Type a message',
                       contentPadding: EdgeInsets.symmetric(
@@ -259,7 +294,9 @@ class _MessageComposerState extends State<MessageComposer> {
               IconButton.filled(
                 key: widget.sendKey,
                 onPressed: _sending || _picking ? null : _submit,
-                tooltip: 'Send (Ctrl+Enter)',
+                tooltip: _isNativeDesktop
+                    ? 'Send (Enter)'
+                    : 'Send (Ctrl+Enter)',
                 style: IconButton.styleFrom(
                   backgroundColor: const Color(0xFF9AE585),
                   foregroundColor: const Color(0xFF0B0B0B),

@@ -1,13 +1,113 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:cht/chat/attachment_files.dart';
 import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/widgets/message_composer.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'desktop Enter sends, leaves Shift+Enter to the input method, and keeps focus',
+    (tester) async {
+      final sends = <String>[];
+      final result = Completer<bool>();
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      final input = find.byKey(const Key('message-input'));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageComposer(
+              controller: controller,
+              onSend: (text) {
+                sends.add(text);
+                return result.future;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(input, 'first');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      final handled = await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      expect(handled, isFalse);
+      expect(sends, isEmpty);
+      tester.testTextInput.enterText('first\nsecond');
+      await tester.pump();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(sends, ['first\nsecond']);
+      expect(find.byKey(const Key('send-progress')), findsOneWidget);
+
+      result.complete(true);
+      await tester.pump();
+      expect(controller.text, isEmpty);
+      final editor = tester.widget<EditableText>(find.byType(EditableText));
+      expect(editor.focusNode.hasFocus, isTrue);
+      tester.testTextInput.enterText('next draft');
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+      expect(sends, ['first\nsecond']);
+      expect(controller.text, 'next draft');
+
+      // The Windows test key map represents both Enter keys as VK_RETURN.
+      await tester.sendKeyEvent(
+        defaultTargetPlatform == TargetPlatform.windows
+            ? LogicalKeyboardKey.enter
+            : LogicalKeyboardKey.numpadEnter,
+        physicalKey: PhysicalKeyboardKey.numpadEnter,
+      );
+      await tester.pump();
+      expect(sends, ['first\nsecond', 'next draft']);
+      expect(controller.text, isEmpty);
+    },
+    variant: const TargetPlatformVariant({
+      TargetPlatform.windows,
+      TargetPlatform.macOS,
+      TargetPlatform.linux,
+    }),
+  );
+
+  testWidgets('Enter lets an input method finish composing before submitting', (
+    tester,
+  ) async {
+    final sends = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text) async {
+              sends.add(text);
+              return true;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.showKeyboard(find.byKey(const Key('message-input')));
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'draft',
+        selection: TextSelection.collapsed(offset: 5),
+        composing: TextRange(start: 0, end: 5),
+      ),
+    );
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(sends, isEmpty);
+
+    tester.testTextInput.enterText('draft');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(sends, ['draft']);
+  }, variant: const TargetPlatformVariant({TargetPlatform.windows}));
+
   testWidgets(
     'gallery batch stages tiles, keeps failed draft and clears only once queued',
     (tester) async {
