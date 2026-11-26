@@ -22,12 +22,15 @@ object ChatRuntime {
             .getBoolean("showLockAction", true)
 
     fun configure(context: Context, active: Boolean, enabled: Boolean?,
-                  showLockAction: Boolean?): Map<String, Boolean> {
+                  showLockAction: Boolean?, backgroundRefreshSeconds: Int?): Map<String, Any> {
         val prefs = context.getSharedPreferences("cht.runtime", Context.MODE_PRIVATE)
         val actionChanged = showLockAction != null && showLockAction != this.showLockAction(context)
         if (enabled != null) prefs.edit().putBoolean("enabled", enabled).apply()
         if (showLockAction != null) {
             prefs.edit().putBoolean("showLockAction", showLockAction).apply()
+        }
+        if (backgroundRefreshSeconds != null && backgroundRefreshSeconds in 10..300) {
+            prefs.edit().putInt("backgroundRefreshSeconds", backgroundRefreshSeconds).apply()
         }
         val keepAlive = prefs.getBoolean("enabled", true)
         if (active && keepAlive) {
@@ -46,6 +49,7 @@ object ChatRuntime {
             manager.getNotificationChannel("cht.receive")?.importance != NotificationManager.IMPORTANCE_NONE
         return mapOf("enabled" to keepAlive, "running" to running,
             "notificationVisible" to (manager.areNotificationsEnabled() && channelEnabled),
-            "showLockAction" to this.showLockAction(context))
+            "showLockAction" to this.showLockAction(context),
+            "backgroundRefreshSeconds" to prefs.getInt("backgroundRefreshSeconds", 10))
     }
 }

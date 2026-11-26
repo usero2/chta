@@ -37,6 +37,9 @@ class MessageComposer extends StatefulWidget {
 
 class _MessageComposerState extends State<MessageComposer> {
   late final _textController = widget.controller ?? TextEditingController();
+  late final _keepDraftWhileSending = TextInputFormatter.withFunction(
+    (previous, next) => _sending ? previous : next,
+  );
   final _attachments = <ChatAttachment>[];
   bool _sending = false;
   bool _picking = false;
@@ -278,8 +281,7 @@ class _MessageComposerState extends State<MessageComposer> {
                     onChanged: (_) {
                       if (_preview) setState(() {});
                     },
-                    enabled: _isNativeDesktop || !_sending,
-                    readOnly: _isNativeDesktop && _sending,
+                    inputFormatters: [_keepDraftWhileSending],
                     decoration: const InputDecoration(
                       hintText: 'Type a message',
                       contentPadding: EdgeInsets.symmetric(
@@ -291,23 +293,25 @@ class _MessageComposerState extends State<MessageComposer> {
                 ),
               ),
               const SizedBox(width: 6),
-              IconButton.filled(
-                key: widget.sendKey,
-                onPressed: _sending || _picking ? null : _submit,
-                tooltip: _isNativeDesktop
-                    ? 'Send (Enter)'
-                    : 'Send (Ctrl+Enter)',
-                style: IconButton.styleFrom(
-                  backgroundColor: const Color(0xFF9AE585),
-                  foregroundColor: const Color(0xFF0B0B0B),
+              TextFieldTapRegion(
+                child: IconButton.filled(
+                  key: widget.sendKey,
+                  onPressed: _sending || _picking ? null : _submit,
+                  tooltip: _isNativeDesktop
+                      ? 'Send (Enter)'
+                      : 'Send (Ctrl+Enter)',
+                  style: IconButton.styleFrom(
+                    backgroundColor: const Color(0xFF9AE585),
+                    foregroundColor: const Color(0xFF0B0B0B),
+                  ),
+                  icon: _sending
+                      ? const SizedBox.square(
+                          key: Key('send-progress'),
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.arrow_upward_rounded),
                 ),
-                icon: _sending
-                    ? const SizedBox.square(
-                        key: Key('send-progress'),
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.arrow_upward_rounded),
               ),
             ],
           ),

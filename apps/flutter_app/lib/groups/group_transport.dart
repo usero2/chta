@@ -71,7 +71,11 @@ class GroupTransport extends ChangeNotifier {
   Stream<GroupPeerFrame> get frames => _frames.stream;
   StreamSubscription<GroupSeedSignal>? _signals;
   Timer? _timer;
+  Timer? _heartbeatTimer;
   bool _closed = false, _started = false, _ticking = false;
+  bool _inBackground = false;
+  static const _heartbeatInterval = Duration(seconds: 10);
+  Duration _backgroundRefresh = _heartbeatInterval;
   bool connected(String peer) => !_closed && _peers[peer]?.ready == true;
   bool isDirect(String peer) =>
       connected(peer) &&
@@ -89,9 +93,41 @@ class GroupTransport extends ChangeNotifier {
     _signals = signaling.signals.listen((signal) {
       unawaited(_signal(signal).catchError((Object _) {}));
     });
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _wake());
+    _scheduleMaintenance();
     await signaling.start(ownerId);
     _wake();
+  }
+
+  void _scheduleMaintenance() {
+    if (!_started || _peers.isEmpty) return;
+    _timer ??= Timer.periodic(
+      _inBackground ? _backgroundRefresh : const Duration(seconds: 2),
+      (_) => _wake(),
+    );
+    if (_inBackground && _backgroundRefresh > _heartbeatInterval) {
+      _heartbeatTimer ??= Timer.periodic(
+        _heartbeatInterval,
+        (_) => unawaited(_tick(refresh: false)),
+      );
+    }
+  }
+
+  void setInBackground(
+    bool value, {
+    Duration refreshInterval = _heartbeatInterval,
+  }) {
+    if (_closed) return;
+    final modeChanged = _inBackground != value;
+    final intervalChanged = _backgroundRefresh != refreshInterval;
+    _inBackground = value;
+    _backgroundRefresh = refreshInterval;
+    if (!(modeChanged || value && intervalChanged)) return;
+    _timer?.cancel();
+    _heartbeatTimer?.cancel();
+    _timer = null;
+    _heartbeatTimer = null;
+    _scheduleMaintenance();
+    if (!value) _wake();
   }
 
   Future<bool> _allowed(String id) async {
@@ -140,6 +176,7 @@ class GroupTransport extends ChangeNotifier {
       (source) => _receive(p, '@direct', source),
     );
     _peers[id] = p;
+    _scheduleMaintenance();
     return p;
   }
 
@@ -205,14 +242,22 @@ class GroupTransport extends ChangeNotifier {
     if (!_closed) unawaited(_tick());
   }
 
-  Future<void> _tick() async {
+  Future<void> _tick({bool refresh = true}) async {
     if (_closed || _ticking) return;
     _ticking = true;
     try {
       for (final peer in _peers.values.toList()) {
+        if (!refresh &&
+            peer.ready &&
+            peer.candidate == null &&
+            (peer.route == '@direct' || network.online.contains(peer.route)) &&
+            _clock() - peer.lastReceived <= 90000 &&
+            _clock() - peer.lastPing <= 25000) {
+          continue;
+        }
         try {
           await _run(peer, () async {
-            await _bind(peer);
+            if (refresh || !peer.ready) await _bind(peer);
             if (peer.route != '@direct' &&
                 peer.route != null &&
                 !network.online.contains(peer.route)) {
@@ -649,6 +694,7 @@ class GroupTransport extends ChangeNotifier {
     if (_closed) return;
     _closed = true;
     _timer?.cancel();
+    _heartbeatTimer?.cancel();
     network.removeFrameListener(_relayFrame);
     network.removeListener(_wake);
     signaling.removeListener(_wake);

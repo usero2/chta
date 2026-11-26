@@ -60,6 +60,7 @@ class Socket implements RelaySocket {
   String? identity;
   bool closed = false;
   bool subscribed = false;
+  final sent = <Map<String, dynamic>>[];
   @override
   Stream<String> get frames => controller.stream;
   void receive(Map<String, dynamic> value) {
@@ -70,12 +71,16 @@ class Socket implements RelaySocket {
   void send(String source) {
     if (closed || hub.offline) throw StateError('Offline');
     final frame = jsonDecode(source) as Map<String, dynamic>;
+    sent.add(frame);
     if (frame['type'] == 'register') {
       subscribed = frame['subscribeCatalog'] != false;
       identity = (frame['proof'] as Map)['identityId'] as String;
       receive({'type': 'registered'});
     }
     if (frame['type'] == 'keepalive') receive({'type': 'alive'});
+    if (frame['type'] == 'directory') {
+      subscribed = frame['subscribeCatalog'] != false;
+    }
     if (frame['type'] == 'route') {
       final destination = hub.sockets
           .where((s) => !s.closed && s.identity == frame['to'])
@@ -293,6 +298,118 @@ class SessionAccount extends Account implements GroupCryptoBridge {
 }
 
 void main() {
+  test('300-second refresh keeps the relay alive between refreshes', () async {
+    final hub = Hub(a, 'relay-a');
+    var now = 100000;
+    final network = RelayNetwork(
+      Crypto('alice'),
+      connector: hub.connect,
+      bootstrapRelays: const {a: 'relay-a'},
+      clock: () => now,
+    );
+    final received = <String>[];
+    final pulses = <Duration, void Function()>{};
+    network.onFrame = (_, frame) => received.add(frame['session'] as String);
+    try {
+      await runZoned(
+        () async {
+          await network.initialize();
+          await until(() => network.online.contains(a));
+          final socket = hub.sockets.single;
+          const refresh = Duration(seconds: 300);
+          const heartbeat = Duration(seconds: 10);
+          network.setInBackground(true, refreshInterval: refresh);
+          socket.sent.clear();
+          for (var i = 0; i < 29; i++) {
+            now += heartbeat.inMilliseconds;
+            pulses[heartbeat]!();
+            await Future<void>.delayed(Duration.zero);
+          }
+          expect(socket.sent, isNotEmpty);
+          expect(socket.sent.map((frame) => frame['type']).toSet(), {
+            'keepalive',
+          });
+          socket.receive({'type': 'route', 'session': 'incoming-message'});
+          await until(() => received.isNotEmpty);
+          expect(received, ['incoming-message']);
+          expect(network.online, contains(a));
+          now += heartbeat.inMilliseconds;
+          pulses[refresh]!();
+          expect(socket.sent.last['type'], 'directory');
+          expect(hub.sockets.single, same(socket));
+        },
+        zoneSpecification: ZoneSpecification(
+          createPeriodicTimer: (self, parent, zone, interval, callback) {
+            final timer = parent.createPeriodicTimer(zone, interval, callback);
+            pulses[interval] = () => callback(timer);
+            return timer;
+          },
+        ),
+      );
+    } finally {
+      await network.close();
+    }
+  });
+
+  test(
+    'background relays keep routes live with less catalog traffic',
+    () async {
+      var now = 100000;
+      final primary = Hub(a, 'relay-a');
+      final backup = Hub(b, 'relay-b');
+      final network = RelayNetwork(
+        Crypto('alice'),
+        connector: (url) => (url == a ? primary : backup).connect(url),
+        clock: () => now,
+      );
+      final received = <String>[];
+      network.onFrame = (_, frame) => received.add(frame['session'] as String);
+      try {
+        await network.initialize();
+        await network.addSeed(a);
+        await network.addSeed(b);
+        await until(() => network.online.length == 2);
+        final first = primary.sockets.single, second = backup.sockets.single;
+        expect(first.subscribed && second.subscribed, isTrue);
+
+        network.setInBackground(true);
+        await until(() => !second.subscribed);
+        expect(first.subscribed, isTrue);
+        first.sent.clear();
+        second.sent.clear();
+        for (var round = 0; round < 2; round++) {
+          now += 27000;
+          await network.tick();
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(first.sent.map((frame) => frame['type']), [
+          'keepalive',
+          'keepalive',
+        ]);
+        expect(second.sent.map((frame) => frame['type']), [
+          'keepalive',
+          'keepalive',
+        ]);
+        expect(network.online, containsAll([a, b]));
+
+        second.receive({'type': 'route', 'session': 'background-message'});
+        await until(() => received.contains('background-message'));
+        now += 27000;
+        await network.tick();
+        expect(first.sent.last['type'], 'directory');
+        expect(second.sent.last['type'], 'keepalive');
+
+        network.setInBackground(false);
+        await until(() => second.subscribed);
+        expect(first.sent.last['type'], 'directory');
+        expect(primary.sockets.single, same(first));
+        expect(backup.sockets.single, same(second));
+      } finally {
+        await network.close();
+      }
+    },
+  );
+
   test(
     'closing a relay releases a tick queued behind a blocked write',
     () async {

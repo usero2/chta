@@ -63,7 +63,8 @@ class MainActivity : FlutterActivity() {
                     result.success(ChatRuntime.configure(appContext,
                         call.argument<Boolean>("active") == true,
                         call.argument<Boolean>("enabled"),
-                        call.argument<Boolean>("showLockAction")))
+                        call.argument<Boolean>("showLockAction"),
+                        call.argument<Int>("backgroundRefreshSeconds")))
                 } catch (_: Exception) {
                     result.error("background_unavailable", "Could not start background reception", null)
                 }

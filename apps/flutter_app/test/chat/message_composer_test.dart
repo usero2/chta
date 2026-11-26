@@ -9,6 +9,46 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('tapping Android Send keeps the software keyboard open', (
+    tester,
+  ) async {
+    final result = Completer<bool>();
+    final sent = <String>[];
+    final input = find.byKey(const Key('message-input'));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text) {
+              sent.add(text);
+              return result.future;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(input, 'First');
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    await tester.tap(find.byKey(const Key('send-message')));
+    await tester.pump();
+    expect(sent, ['First']);
+    expect(tester.testTextInput.isVisible, isTrue);
+    final editor = tester.widget<EditableText>(find.byType(EditableText));
+    expect(editor.focusNode.hasFocus, isTrue);
+    tester.testTextInput.enterText('Accidental input while sending');
+    await tester.pump();
+    expect(editor.controller.text, 'First');
+
+    result.complete(true);
+    await tester.pump();
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(editor.controller.text, isEmpty);
+    tester.testTextInput.enterText('Next message');
+    await tester.pump();
+    expect(editor.controller.text, 'Next message');
+  }, variant: const TargetPlatformVariant({TargetPlatform.android}));
+
   testWidgets(
     'desktop Enter sends, leaves Shift+Enter to the input method, and keeps focus',
     (tester) async {
@@ -281,9 +321,9 @@ void main() {
       expect(find.byKey(const Key('send-progress')), findsOneWidget);
       expect(
         tester
-            .widget<TextField>(find.byKey(const Key('message-input')))
-            .enabled,
-        isFalse,
+            .widget<IconButton>(find.byKey(const Key('send-message')))
+            .onPressed,
+        isNull,
       );
       result.complete(false);
       await tester.pump();
@@ -297,9 +337,9 @@ void main() {
       );
       expect(
         tester
-            .widget<TextField>(find.byKey(const Key('message-input')))
-            .enabled,
-        isTrue,
+            .widget<IconButton>(find.byKey(const Key('send-message')))
+            .onPressed,
+        isNotNull,
       );
     },
   );

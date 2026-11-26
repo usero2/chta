@@ -121,6 +121,50 @@ class FailingDirectFactory implements DirectPeerFactory {
 
 void main() {
   test(
+    'group maintenance avoids idle timers and slows in background',
+    () async {
+      final peer = did('b');
+      final network = RelayNetwork(fixture.Crypto(did('a')));
+      final transport = GroupTransport(
+        ownerId: did('a'),
+        network: network,
+        crypto: FakeGroups({peer}),
+        signaling: QuietSeed(),
+      );
+      final intervals = <Duration>[];
+      try {
+        await runZoned(
+          () async {
+            await transport.start();
+            expect(intervals, isEmpty);
+            transport.setInBackground(
+              true,
+              refreshInterval: const Duration(seconds: 300),
+            );
+            expect(intervals, isEmpty);
+            await transport.connect(peer);
+            transport.setInBackground(false);
+            expect(intervals, [
+              const Duration(seconds: 300),
+              const Duration(seconds: 10),
+              const Duration(seconds: 2),
+            ]);
+          },
+          zoneSpecification: ZoneSpecification(
+            createPeriodicTimer: (self, parent, zone, duration, callback) {
+              intervals.add(duration);
+              return parent.createPeriodicTimer(zone, duration, callback);
+            },
+          ),
+        );
+      } finally {
+        await transport.close();
+        await network.close();
+      }
+    },
+  );
+
+  test(
     'a single relay can recover after the first handshake was lost',
     () async {
       var now = 10000;

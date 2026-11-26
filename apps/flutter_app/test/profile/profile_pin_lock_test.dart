@@ -109,6 +109,29 @@ void main() {
     expect(find.text('On · Lock app to stop'), findsNothing);
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+  testWidgets('Android Profile validates and saves background refresh', (
+    tester,
+  ) async {
+    final runtime = AppRuntime(bridge: FakeRuntime());
+    AppRuntime.instance = runtime;
+    addTearDown(() {
+      AppRuntime.instance = null;
+      runtime.dispose();
+    });
+    await showProfile(tester);
+    await tapControl(tester, const Key('profile-background-refresh'));
+    await tester.pumpAndSettle();
+    final field = find.byKey(const Key('background-refresh-seconds'));
+    await tester.enterText(field, '301');
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Enter 10–300 seconds'), findsOneWidget);
+    await tester.enterText(field, '300');
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Every 300 seconds'), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
   testWidgets('Notifications cannot change during a delayed lock', (
     tester,
   ) async {

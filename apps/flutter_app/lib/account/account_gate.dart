@@ -585,6 +585,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AppRuntime.instance?.addListener(_updateBackgroundNetworking);
     widget.router.addListener(_routeChanged);
     _readRoute();
     unawaited(widget.accountController.rememberRoute(widget.router.path));
@@ -759,6 +760,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       signaling: SeedGroupSignaling(seed),
     );
     groupTransport = transport;
+    _updateBackgroundNetworking();
     try {
       await controller!.attachTransport(transport);
     } catch (_) {
@@ -1091,6 +1093,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         messaging = service;
         if (groups?.ready == true) courier?.attachGroups(groups!);
         relayNetwork = network;
+        _updateBackgroundNetworking();
         service.addListener(_messagingChanged);
         if (seed != null) friendRequests?.attach(seed);
         unawaited(
@@ -1133,6 +1136,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    AppRuntime.instance?.removeListener(_updateBackgroundNetworking);
     if (runtimeOwner case final owner?) {
       unawaited(AppRuntime.instance?.detach(owner));
     }
@@ -1153,10 +1157,33 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && mounted) {
+    if (!mounted) return;
+    _updateBackgroundNetworking();
+    if (state == AppLifecycleState.resumed) {
       unawaited(messaging?.resumeNetwork());
     }
   }
+
+  void _updateBackgroundNetworking() {
+    final inBackground = _androidInBackground;
+    final interval = Duration(
+      seconds:
+          AppRuntime.instance?.backgroundRefreshSeconds ??
+          minBackgroundRefreshSeconds,
+    );
+    relayNetwork?.setInBackground(inBackground, refreshInterval: interval);
+    groupTransport?.setInBackground(inBackground, refreshInterval: interval);
+  }
+
+  bool get _androidInBackground =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.android &&
+      switch (WidgetsBinding.instance.lifecycleState) {
+        AppLifecycleState.hidden ||
+        AppLifecycleState.paused ||
+        AppLifecycleState.detached => true,
+        _ => false,
+      };
 
   void _readRoute() {
     final path = widget.router.path;
@@ -1372,6 +1399,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       onRelayNetworkReady: (network) {
         if (mounted && !identical(network, relayNetwork)) {
           setState(() => relayNetwork = network);
+          _updateBackgroundNetworking();
           unawaited(_attachGroupTransport());
         }
       },

@@ -8,27 +8,48 @@ class FakeRuntime implements RuntimeBridge {
   bool enabled = true;
   bool notificationVisible = true;
   bool showLockAction = true;
+  int backgroundRefreshSeconds = 10;
   bool fail = false;
   @override
   Future<RuntimeState> configure({
     required bool active,
     bool? enabled,
     bool? showLockAction,
+    int? backgroundRefreshSeconds,
   }) async {
     calls.add('$active:$enabled');
     if (fail) throw StateError('Native service unavailable');
     this.enabled = enabled ?? this.enabled;
     this.showLockAction = showLockAction ?? this.showLockAction;
+    this.backgroundRefreshSeconds =
+        backgroundRefreshSeconds ?? this.backgroundRefreshSeconds;
     return RuntimeState(
       enabled: this.enabled,
       running: active && this.enabled,
       notificationVisible: notificationVisible,
       showLockAction: this.showLockAction,
+      backgroundRefreshSeconds: this.backgroundRefreshSeconds,
     );
   }
 }
 
 void main() {
+  test(
+    'background refresh is restored and rejects values outside 10–300',
+    () async {
+      final bridge = FakeRuntime()..backgroundRefreshSeconds = 120;
+      final runtime = AppRuntime(bridge: bridge);
+      await runtime.attach('owner', flush: () async {}, lock: () async {});
+      expect(runtime.backgroundRefreshSeconds, 120);
+      await runtime.setBackgroundRefreshSeconds(300);
+      expect(runtime.backgroundRefreshSeconds, 300);
+      expect(bridge.backgroundRefreshSeconds, 300);
+      expect(runtime.running, isTrue);
+      expect(() => runtime.setBackgroundRefreshSeconds(9), throwsRangeError);
+      expect(() => runtime.setBackgroundRefreshSeconds(301), throwsRangeError);
+    },
+  );
+
   test(
     'overlapping native exit retries take a fresh durable snapshot',
     () async {

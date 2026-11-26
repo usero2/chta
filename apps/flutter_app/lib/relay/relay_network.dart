@@ -229,10 +229,15 @@ class RelayNetwork extends ChangeNotifier {
   List<String> get preferredRoutes => List.unmodifiable(_preferredRoutes);
   final _failures = <String, (int, int)>{};
   Timer? _timer;
+  Timer? _heartbeatTimer;
   Timer? _saveTimer;
   bool _closed = false;
   bool _ticking = false;
+  bool _inBackground = false;
+  static const _heartbeatInterval = Duration(seconds: 10);
+  Duration _backgroundRefresh = _heartbeatInterval;
   static const connectionGoal = 2;
+  int get _catalogSubscriptionLimit => _inBackground ? 1 : connectionGoal;
   int connectionLimit = 50;
   int get _poolTarget => min(
     connectionLimit,
@@ -502,11 +507,43 @@ class RelayNetwork extends ChangeNotifier {
         _metadataChanged(endpoint, added: !known);
       }
     }
+    _scheduleMaintenance();
+    await tick();
+  }
+
+  void _scheduleMaintenance() {
+    _timer?.cancel();
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _timer = Timer.periodic(
-      const Duration(seconds: 3),
+      _inBackground ? _backgroundRefresh : const Duration(seconds: 3),
       (_) => unawaited(tick()),
     );
-    await tick();
+    if (_inBackground && _backgroundRefresh > _heartbeatInterval) {
+      _heartbeatTimer = Timer.periodic(
+        _heartbeatInterval,
+        (_) => unawaited(_tick(refresh: false)),
+      );
+    }
+  }
+
+  void setInBackground(
+    bool value, {
+    Duration refreshInterval = _heartbeatInterval,
+  }) {
+    if (_closed) return;
+    final modeChanged = _inBackground != value;
+    final intervalChanged = _backgroundRefresh != refreshInterval;
+    _inBackground = value;
+    _backgroundRefresh = refreshInterval;
+    if (_timer == null || !(modeChanged || value && intervalChanged)) return;
+    _scheduleMaintenance();
+    if (!value) {
+      for (final link in _links.values) {
+        link.lastCatalogShared = null;
+      }
+    }
+    unawaited(tick());
   }
 
   Future<void> addSeed(String source) async {
@@ -725,39 +762,57 @@ class RelayNetwork extends ChangeNotifier {
     }
   }
 
-  Future<void> tick() async {
+  Future<void> tick() => _tick(refresh: true);
+
+  Future<void> _tick({required bool refresh}) async {
     if (_closed || _ticking) return;
     _ticking = true;
     try {
-      records.removeWhere((_, r) => (r['expiresAt'] as int) <= now);
-      _pruneActivity();
-      var subscribers = _links.values
+      final catalogLinks = _links.values
           .where((link) => link.catalogSubscribed)
-          .length;
+          .followedBy(
+            _links.values.where(
+              (link) => link.registered && !link.catalogSubscribed,
+            ),
+          )
+          .take(_catalogSubscriptionLimit)
+          .toSet();
+      final catalogInterval = _inBackground ? 60000 : 20000;
       for (final entry in _links.entries.toList()) {
         final link = entry.value;
-        if (link.registered &&
-            !link.catalogSubscribed &&
-            subscribers < connectionGoal) {
-          link.catalogSubscribed = true;
-          link.lastShared = 0;
-          subscribers++;
-        }
         if (now - link.lastReceived > (link.registered ? 65000 : 15000)) {
           _disconnect(entry.key, link);
           continue;
         }
-        if (link.registered && now - link.lastShared > 20000) {
+        if (!link.registered) continue;
+        final wantsCatalog = catalogLinks.contains(link);
+        final subscriptionChanged = wantsCatalog != link.catalogSubscribed;
+        final lastCatalogShared = link.lastCatalogShared;
+        final catalogDue =
+            refresh &&
+            wantsCatalog &&
+            (lastCatalogShared == null ||
+                now - lastCatalogShared > catalogInterval);
+        final heartbeatDue = now - link.lastShared > 20000;
+        if (subscriptionChanged || catalogDue || heartbeatDue) {
           link.lastShared = now;
           try {
-            link.socket!.send(
-              jsonEncode({
-                'type': link.catalogSubscribed ? 'directory' : 'keepalive',
-                if (link.catalogSubscribed) 'relays': _catalogBatch(),
-                if (link.catalogSubscribed) 'subscribeCatalog': true,
-              }),
-            );
-            if (link.courierCapable && link.catalogSubscribed) {
+            if (subscriptionChanged || catalogDue) {
+              link.socket!.send(
+                jsonEncode({
+                  'type': 'directory',
+                  'relays': wantsCatalog ? _catalogBatch() : const [],
+                  'subscribeCatalog': wantsCatalog,
+                }),
+              );
+              link.catalogSubscribed = wantsCatalog;
+              link.lastCatalogShared = wantsCatalog ? now : null;
+            } else {
+              link.socket!.send(jsonEncode({'type': 'keepalive'}));
+            }
+            if (link.courierCapable &&
+                wantsCatalog &&
+                (heartbeatDue || subscriptionChanged)) {
               link.socket!.send(
                 jsonEncode({'type': 'couriers', 'records': _courierCatalog}),
               );
@@ -767,6 +822,10 @@ class RelayNetwork extends ChangeNotifier {
           }
         }
       }
+      // Refill lost routes on the heartbeat too, even with a long refresh interval.
+      if (!refresh && _links.length >= _poolTarget) return;
+      records.removeWhere((_, r) => (r['expiresAt'] as int) <= now);
+      _pruneActivity();
       final sorted = records.entries.toList()
         ..sort((a, b) => a.key.compareTo(b.key));
       final candidates = <String>{
@@ -948,7 +1007,7 @@ class RelayNetwork extends ChangeNotifier {
                         _links.values
                             .where((other) => other.catalogSubscribed)
                             .length <
-                        connectionGoal;
+                        _catalogSubscriptionLimit;
                     socket.send(
                       jsonEncode({
                         'type': 'register',
@@ -957,6 +1016,9 @@ class RelayNetwork extends ChangeNotifier {
                         'subscribeCatalog': link.catalogSubscribed,
                       }),
                     );
+                    link.lastCatalogShared = link.catalogSubscribed
+                        ? now
+                        : null;
                   case 'registered':
                     if (!link.challenged) {
                       throw const FormatException('Missing relay challenge');
@@ -1055,6 +1117,7 @@ class RelayNetwork extends ChangeNotifier {
     final pendingSave = _saveTimer?.isActive == true;
     _closed = true;
     _timer?.cancel();
+    _heartbeatTimer?.cancel();
     _saveTimer?.cancel();
     _saveTimer = null;
     if (pendingSave) await _persist();
@@ -1079,4 +1142,5 @@ class _Link {
   String? relayId;
   int lastReceived;
   int lastShared = 0;
+  int? lastCatalogShared;
 }

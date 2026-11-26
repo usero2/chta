@@ -4,17 +4,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+const minBackgroundRefreshSeconds = 10;
+const maxBackgroundRefreshSeconds = 300;
+
 class RuntimeState {
   const RuntimeState({
     required this.enabled,
     required this.running,
     this.notificationVisible = true,
     this.showLockAction = true,
+    this.backgroundRefreshSeconds = minBackgroundRefreshSeconds,
   });
   final bool enabled;
   final bool running;
   final bool notificationVisible;
   final bool showLockAction;
+  final int backgroundRefreshSeconds;
 }
 
 abstract interface class RuntimeBridge {
@@ -22,6 +27,7 @@ abstract interface class RuntimeBridge {
     required bool active,
     bool? enabled,
     bool? showLockAction,
+    int? backgroundRefreshSeconds,
   });
 }
 
@@ -33,17 +39,26 @@ class NativeRuntimeBridge implements RuntimeBridge {
     required bool active,
     bool? enabled,
     bool? showLockAction,
+    int? backgroundRefreshSeconds,
   }) async {
     final state = await channel.invokeMapMethod<String, dynamic>('configure', {
       'active': active,
       'enabled': ?enabled,
       'showLockAction': ?showLockAction,
+      'backgroundRefreshSeconds': ?backgroundRefreshSeconds,
     });
+    final savedInterval = state?['backgroundRefreshSeconds'];
     return RuntimeState(
       enabled: state?['enabled'] == true,
       running: state?['running'] == true,
       notificationVisible: state?['notificationVisible'] != false,
       showLockAction: state?['showLockAction'] != false,
+      backgroundRefreshSeconds:
+          savedInterval is int &&
+              savedInterval >= minBackgroundRefreshSeconds &&
+              savedInterval <= maxBackgroundRefreshSeconds
+          ? savedInterval
+          : minBackgroundRefreshSeconds,
     );
   }
 }
@@ -62,6 +77,7 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
   bool running = false;
   bool notificationVisible = true;
   bool showLockAction = true;
+  int backgroundRefreshSeconds = minBackgroundRefreshSeconds;
   String? error;
 
   static Future<void> install() async {
@@ -102,7 +118,21 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> setShowLockAction(bool value) =>
       _configure(showLockAction: value);
 
-  Future<void> _configure({bool? enabled, bool? showLockAction}) {
+  Future<void> setBackgroundRefreshSeconds(int value) {
+    RangeError.checkValueInInterval(
+      value,
+      minBackgroundRefreshSeconds,
+      maxBackgroundRefreshSeconds,
+      'backgroundRefreshSeconds',
+    );
+    return _configure(backgroundRefreshSeconds: value);
+  }
+
+  Future<void> _configure({
+    bool? enabled,
+    bool? showLockAction,
+    int? backgroundRefreshSeconds,
+  }) {
     // Preserve ordering when lock/dispose and a new account overlap.
     final active = _owner != null;
     return _tail = _tail.then((_) async {
@@ -111,11 +141,13 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
           active: active,
           enabled: enabled,
           showLockAction: showLockAction,
+          backgroundRefreshSeconds: backgroundRefreshSeconds,
         );
         this.enabled = state.enabled;
         running = state.running;
         notificationVisible = state.notificationVisible;
         this.showLockAction = state.showLockAction;
+        this.backgroundRefreshSeconds = state.backgroundRefreshSeconds;
         error = null;
       } catch (_) {
         running = false;

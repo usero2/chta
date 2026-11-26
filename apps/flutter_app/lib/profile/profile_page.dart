@@ -70,6 +70,55 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  Future<void> _editBackgroundRefresh(AppRuntime runtime) async {
+    final form = GlobalKey<FormState>();
+    final limits = '$minBackgroundRefreshSeconds–$maxBackgroundRefreshSeconds';
+    var seconds = runtime.backgroundRefreshSeconds;
+    final value = await showDialog<int>(
+      context: context,
+      builder: (context) {
+        void submit() {
+          if (!form.currentState!.validate()) return;
+          form.currentState!.save();
+          Navigator.pop(context, seconds);
+        }
+
+        return AlertDialog(
+          title: const Text('Background refresh'),
+          content: Form(
+            key: form,
+            child: TextFormField(
+              key: const Key('background-refresh-seconds'),
+              initialValue: '$seconds',
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(labelText: 'Seconds ($limits)'),
+              validator: (text) {
+                final value = int.tryParse(text?.trim() ?? '');
+                return value == null ||
+                        value < minBackgroundRefreshSeconds ||
+                        value > maxBackgroundRefreshSeconds
+                    ? 'Enter $limits seconds'
+                    : null;
+              },
+              onSaved: (text) => seconds = int.parse(text!.trim()),
+              onFieldSubmitted: (_) => submit(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(onPressed: submit, child: const Text('Save')),
+          ],
+        );
+      },
+    );
+    if (value == null || !mounted) return;
+    await _run(() => runtime.setBackgroundRefreshSeconds(value));
+  }
+
   Future<void> _openPrivacyPage(String path) async {
     final url = Uri.https('chta.app', path);
     try {
@@ -203,7 +252,19 @@ class _ProfilePageState extends State<ProfilePage> {
                           }),
                   ),
                   if (!kIsWeb &&
-                      defaultTargetPlatform == TargetPlatform.android)
+                      defaultTargetPlatform == TargetPlatform.android) ...[
+                    ListTile(
+                      key: const Key('profile-background-refresh'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Background refresh'),
+                      subtitle: Text(
+                        'Every ${runtime.backgroundRefreshSeconds} seconds',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: saving
+                          ? null
+                          : () => _editBackgroundRefresh(runtime),
+                    ),
                     SwitchListTile.adaptive(
                       key: const Key('profile-background-lock-action'),
                       contentPadding: EdgeInsets.zero,
@@ -214,6 +275,7 @@ class _ProfilePageState extends State<ProfilePage> {
                           : (value) =>
                                 _run(() => runtime.setShowLockAction(value)),
                     ),
+                  ],
                 ],
               ),
             ),

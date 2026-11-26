@@ -264,6 +264,13 @@ void main() {
   testWidgets(
     'message menu replies, edits and queues a delete from the chat screen',
     (tester) async {
+      final android = defaultTargetPlatform == TargetPlatform.android;
+      if (android) {
+        tester.view.physicalSize = const Size(360, 720);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+      }
       final history = PeerHistory(store: Store());
       await history.load('alice');
       final account = service_test.Account('alice', ['bob']);
@@ -277,7 +284,6 @@ void main() {
       );
       await service.start();
       await service.queueText('bob', 'Original text', id: 'original');
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
         await tester.pumpWidget(
           MaterialApp(
@@ -295,7 +301,16 @@ void main() {
         final menu = find.byKey(const Key('peer-message-actions-original'));
         Future<void> select(String label) async {
           final bubble = find.byKey(const Key('peer-message-original'));
-          if (label == 'Reply' || label == 'Edit') {
+          if (android) {
+            expect(
+              find.descendant(
+                of: bubble,
+                matching: find.byType(SelectableText),
+              ),
+              findsNothing,
+            );
+            await tester.longPress(bubble);
+          } else if (label == 'Reply' || label == 'Edit') {
             expect(
               find.descendant(
                 of: bubble,
@@ -342,12 +357,15 @@ void main() {
         expect(history.presentationFor('bob', 'original')?.deleted, isTrue);
         expect(history.presentationFor('bob', 'original')?.pending, isTrue);
       } finally {
-        debugDefaultTargetPlatformOverride = null;
         await tester.pumpWidget(const SizedBox());
         await service.close();
         history.dispose();
       }
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
   );
 
   testWidgets('messages offer the floating menu even with an older contact', (
