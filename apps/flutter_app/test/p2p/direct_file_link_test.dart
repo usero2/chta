@@ -5,6 +5,37 @@ import 'package:cht/p2p/direct_file_link.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('queued Direct chunks yield to text and receipts', () async {
+    final gate = Completer<void>();
+    final factory = FakeFactory()..sendGate = gate.future;
+    final link = DirectFileLink(
+      ownIdentityId: 'alice',
+      sendSignal: (_, _) async {},
+      peerFactory: factory,
+    );
+    try {
+      await link.bind('bob', signalingAvailable: true);
+      final peer = factory.peers.single;
+      peer.onReadyChanged?.call(true);
+      final first = link.send('first file chunk', bulk: true);
+      await Future<void>.delayed(Duration.zero);
+      final second = link.send('second file chunk', bulk: true);
+      final text = link.send('chat text');
+      final receipt = link.send('receipt');
+      gate.complete();
+      await Future.wait([first, second, text, receipt]);
+      expect(peer.sent, [
+        'first file chunk',
+        'chat text',
+        'receipt',
+        'second file chunk',
+      ]);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      await link.close();
+    }
+  });
+
   test(
     'network recovery replaces the old channel and preserves the selected peer',
     () async {

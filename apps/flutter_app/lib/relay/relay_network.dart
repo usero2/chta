@@ -232,7 +232,12 @@ class RelayNetwork extends ChangeNotifier {
   Timer? _saveTimer;
   bool _closed = false;
   bool _ticking = false;
+  static const connectionGoal = 2;
   int connectionLimit = 50;
+  int get _poolTarget => min(
+    connectionLimit,
+    max(connectionGoal, _links.keys.where(_inUse).length + 1),
+  );
   String? _legacyActiveEndpoint;
   String? get activeEndpoint =>
       _legacyActiveEndpoint ?? _routeLeases.values.firstOrNull;
@@ -253,7 +258,9 @@ class RelayNetwork extends ChangeNotifier {
       _links.values.where((link) => !link.registered).length;
   Future<void> setConnectionLimit(int value) async {
     if (value < 50 || value > 1000) {
-      throw const FormatException('Choose 50 to 1000 relay connections.');
+      throw const FormatException(
+        'Choose a relay connection ceiling from 50 to 1000.',
+      );
     }
     connectionLimit = value;
     for (final entry in _links.entries.toList().reversed) {
@@ -496,7 +503,7 @@ class RelayNetwork extends ChangeNotifier {
       }
     }
     _timer = Timer.periodic(
-      const Duration(seconds: 1),
+      const Duration(seconds: 3),
       (_) => unawaited(tick()),
     );
     await tick();
@@ -511,6 +518,12 @@ class RelayNetwork extends ChangeNotifier {
       }
       seeds.add(endpoint);
       _metadataChanged(endpoint, added: !known);
+    }
+    if (!_links.containsKey(endpoint) && !_preferredRoutes.contains(endpoint)) {
+      _preferredRoutes.insert(0, endpoint);
+      if (_preferredRoutes.length > connectionGoal) {
+        _preferredRoutes.removeLast();
+      }
     }
     error = null;
     _failures.remove(endpoint);
@@ -723,7 +736,9 @@ class RelayNetwork extends ChangeNotifier {
           .length;
       for (final entry in _links.entries.toList()) {
         final link = entry.value;
-        if (link.registered && !link.catalogSubscribed && subscribers < 3) {
+        if (link.registered &&
+            !link.catalogSubscribed &&
+            subscribers < connectionGoal) {
           link.catalogSubscribed = true;
           link.lastShared = 0;
           subscribers++;
@@ -752,46 +767,51 @@ class RelayNetwork extends ChangeNotifier {
           }
         }
       }
-      // Dial gradually: the configured total is independent of concurrency.
       final sorted = records.entries.toList()
         ..sort((a, b) => a.key.compareTo(b.key));
       final candidates = <String>{
-        ...bootstrapRelays.keys,
         ..._preferredRoutes,
+        ...bootstrapRelays.keys,
         ...seeds.take(1),
         ...sorted.map((e) => e.value['endpoint'] as String),
         ...seeds.skip(1),
         ..._userLockedRelays,
       };
-      // A new friend's route must get a slot even when the grid is full.
-      for (final endpoint in _preferredRoutes) {
-        if (_links.containsKey(endpoint) || _links.length < connectionLimit) {
-          continue;
-        }
-        final idle = _links.entries
-            .where((e) => !_inUse(e.key) && !_preferredRoutes.contains(e.key))
-            .lastOrNull;
-        if (idle == null) break;
-        _links.remove(idle.key);
-        unawaited(idle.value.subscription?.cancel());
-        unawaited(idle.value.socket?.close());
-      }
-      var pending = connectingCount;
+      _trimPool();
       var started = false;
-      for (final endpoint in providerPolicy.order(
-        candidates,
-        identityFor: (url) => pins[url] ?? bootstrapRelays[url],
-      )) {
-        if (_links.length >= connectionLimit || pending >= 6) break;
-        if (_links.containsKey(endpoint) ||
-            (_failures[endpoint]?.$2 ?? 0) > now) {
-          continue;
-        }
-        final link = _Link(now);
-        _links[endpoint] = link;
+      final available = candidates
+          .where(
+            (endpoint) =>
+                !_links.containsKey(endpoint) &&
+                (_failures[endpoint]?.$2 ?? 0) <= now,
+          )
+          .toList();
+      while (available.isNotEmpty && _links.length < _poolTarget) {
+        final usedDomains = _links.keys
+            .map(_providerDomain)
+            .whereType<String>()
+            .toSet();
+        final next = available.firstWhere(
+          (url) =>
+              _providerDomain(url) != null &&
+              !usedDomains.contains(_providerDomain(url)),
+          orElse: () => available.first,
+        );
+        available.remove(next);
+        _dial(next);
         started = true;
-        pending++;
-        unawaited(_connect(endpoint, link));
+      }
+      // Make before break when a selected friend's route differs from the pool.
+      final preferred = _preferredRoutes.where(available.contains).firstOrNull;
+      if (preferred != null &&
+          connectingCount == 0 &&
+          _links.length == _poolTarget &&
+          _links.length < connectionLimit &&
+          _links.keys.any(
+            (url) => !_inUse(url) && !_preferredRoutes.contains(url),
+          )) {
+        _dial(preferred);
+        started = true;
       }
       if (started && !_closed) notifyListeners();
     } finally {
@@ -799,10 +819,52 @@ class RelayNetwork extends ChangeNotifier {
     }
   }
 
+  String? _providerDomain(String url) =>
+      providerPolicy.domainFor(pins[url] ?? bootstrapRelays[url]);
+
+  void _dial(String endpoint) {
+    final link = _Link(now);
+    _links[endpoint] = link;
+    unawaited(_connect(endpoint, link));
+  }
+
+  void _trimPool() {
+    if (_links.length <= _poolTarget || connectingCount != 0) return;
+    final kept = _links.keys.where(_inUse).toSet();
+    final remaining = {
+      ..._preferredRoutes.where(_links.containsKey),
+      ..._links.keys,
+    };
+    while (kept.length < _poolTarget &&
+        remaining.any((url) => !kept.contains(url))) {
+      final available = remaining.where((url) => !kept.contains(url));
+      final domains = kept.map(_providerDomain).whereType<String>().toSet();
+      kept.add(
+        available.firstWhere(
+          (url) =>
+              _preferredRoutes.contains(url) ||
+              _providerDomain(url) != null &&
+                  !domains.contains(_providerDomain(url)),
+          orElse: () => available.first,
+        ),
+      );
+    }
+    for (final entry in _links.entries.toList()) {
+      if (kept.contains(entry.key)) continue;
+      _links.remove(entry.key);
+      unawaited(entry.value.subscription?.cancel());
+      unawaited(entry.value.socket?.close());
+    }
+  }
+
   Future<void> recoverNetwork({bool force = true}) async {
     if (_closed) return;
+    final handover = force
+        ? _links.keys.where((url) => !_inUse(url)).lastOrNull ??
+              _links.keys.lastOrNull
+        : null;
     for (final entry in _links.entries.toList()) {
-      if (force || now - entry.value.lastReceived > 30000) {
+      if (entry.key == handover || now - entry.value.lastReceived > 30000) {
         _disconnect(entry.key, entry.value);
       }
     }
@@ -886,7 +948,7 @@ class RelayNetwork extends ChangeNotifier {
                         _links.values
                             .where((other) => other.catalogSubscribed)
                             .length <
-                        3;
+                        connectionGoal;
                     socket.send(
                       jsonEncode({
                         'type': 'register',
@@ -913,6 +975,7 @@ class RelayNetwork extends ChangeNotifier {
                     _failures.remove(endpoint);
                     _unavailableSince.remove(endpoint);
                     error = null;
+                    _trimPool();
                     _schedulePersist();
                     notifyListeners();
                     onReady?.call();
@@ -985,6 +1048,7 @@ class RelayNetwork extends ChangeNotifier {
     _schedulePersist();
     onDisconnected?.call(endpoint);
     notifyListeners();
+    scheduleMicrotask(() => unawaited(tick()));
   }
 
   Future<void> close() async {

@@ -306,6 +306,7 @@ class GroupTransport extends ChangeNotifier {
     p.ready = false;
     p.session = null;
     p.route = null;
+    network.leaseRoute(p, null);
     p.lastHandshakeReply = null;
     p.assembler.clear();
     if (old != null) {
@@ -479,6 +480,7 @@ class GroupTransport extends ChangeNotifier {
                 p.assembler.clear();
                 p.session = session;
                 p.route = route;
+                network.leaseRoute(p, route == '@direct' ? null : route);
                 p.initiator = false;
                 p.lastHandshakeReply = reply;
                 p.lastReceived = _clock();
@@ -549,6 +551,7 @@ class GroupTransport extends ChangeNotifier {
           if (!_current(p, session)) return;
           if (result['established'] == true) {
             p.ready = true;
+            network.leaseRoute(p, route == '@direct' ? null : route);
             p.router.receivedOn(route);
             p.lastReceived = _clock();
             p.lastPing = _clock();

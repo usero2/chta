@@ -1,28 +1,83 @@
-String formatMessageTimestamp(int? milliseconds) {
-  if (milliseconds == null || milliseconds.abs() > 8640000000000000) return '—';
+DateTime? messageDateTime(int? milliseconds) {
+  if (milliseconds == null || milliseconds.abs() > 8640000000000000) {
+    return null;
+  }
   final date = DateTime.fromMillisecondsSinceEpoch(milliseconds);
-  if (date.year < 1 || date.year > 9999) return '—';
-  String pad(int value, int width) => value.toString().padLeft(width, '0');
-  return '${pad(date.year, 4)}-${pad(date.month, 2)}-${pad(date.day, 2)} '
-      '${pad(date.hour, 2)}:${pad(date.minute, 2)}:${pad(date.second, 2)}.${pad(date.millisecond, 3)}';
+  return date.year < 1 || date.year > 9999 ? null : date;
 }
 
-/// Formats a local message time for display next to a bubble.
-String formatCompactMessageTimestamp(
-  int? milliseconds, {
+String _pad(int value, [int width = 2]) => value.toString().padLeft(width, '0');
+String _clockTime(DateTime date) => '${_pad(date.hour)}:${_pad(date.minute)}';
+
+String formatMessageTimestamp(int? milliseconds) {
+  final date = messageDateTime(milliseconds);
+  if (date == null) return '—';
+  return '${_pad(date.year, 4)}-${_pad(date.month)}-${_pad(date.day)} '
+      '${_clockTime(date)}:${_pad(date.second)}.${_pad(date.millisecond, 3)}';
+}
+
+String? formatCompactMessageTimestamp(int? milliseconds) {
+  final date = messageDateTime(milliseconds);
+  return date == null ? null : _clockTime(date);
+}
+
+DateTime? visibleMessageTime(int? sent, int? received) =>
+    messageDateTime(sent) ?? messageDateTime(received);
+
+typedef MessageTimelineMarker = ({String? dayLabel, bool showTime});
+
+List<MessageTimelineMarker> messageTimeline<T>(
+  List<T> messages, {
+  required DateTime? Function(T) timeOf,
+  required Object Function(T) authorOf,
   DateTime? now,
-  int? sameDateAs,
 }) {
-  final full = formatMessageTimestamp(milliseconds);
-  if (full == '—') return full;
-  final date = DateTime.fromMillisecondsSinceEpoch(milliseconds!);
-  bool sameDay(DateTime a, DateTime b) =>
-      a.year == b.year && a.month == b.month && a.day == b.day;
-  final otherFull = formatMessageTimestamp(sameDateAs);
-  final duplicateDate =
-      otherFull != '—' &&
-      sameDay(date, DateTime.fromMillisecondsSinceEpoch(sameDateAs!));
-  return sameDay(date, now ?? DateTime.now()) || duplicateDate
-      ? full.substring(11)
-      : full;
+  final times = messages.map(timeOf).toList();
+  final today = now ?? DateTime.now();
+  final yesterday = DateTime(today.year, today.month, today.day - 1);
+  DateTime? previous;
+  final markers = <MessageTimelineMarker>[];
+  for (var index = 0; index < messages.length; index++) {
+    final time = times[index];
+    final next = index + 1 < times.length ? times[index + 1] : null;
+    final startsDay =
+        time != null && (previous == null || !_sameDay(previous, time));
+    final continuesMinute =
+        time != null &&
+        next != null &&
+        _sameDay(time, next) &&
+        time.hour == next.hour &&
+        time.minute == next.minute &&
+        time.timeZoneOffset == next.timeZoneOffset &&
+        authorOf(messages[index]) == authorOf(messages[index + 1]);
+    markers.add((
+      dayLabel: startsDay ? _dayLabel(time, today, yesterday) : null,
+      showTime: time != null && !continuesMinute,
+    ));
+    if (time != null) previous = time;
+  }
+  return markers;
+}
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+String _dayLabel(DateTime date, DateTime today, DateTime yesterday) {
+  if (_sameDay(date, today)) return 'วันนี้';
+  if (_sameDay(date, yesterday)) return 'เมื่อวาน';
+  const months = [
+    'ม.ค.',
+    'ก.พ.',
+    'มี.ค.',
+    'เม.ย.',
+    'พ.ค.',
+    'มิ.ย.',
+    'ก.ค.',
+    'ส.ค.',
+    'ก.ย.',
+    'ต.ค.',
+    'พ.ย.',
+    'ธ.ค.',
+  ];
+  return '${date.day} ${months[date.month - 1]} ${date.year}';
 }

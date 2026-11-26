@@ -4,33 +4,40 @@ import 'package:cht/chat/account_scheduler.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('idle ticks every five seconds and active work every second', (
-    tester,
-  ) async {
-    var active = false, ticks = 0;
-    final scheduler = AccountScheduler(
-      hasWork: () => active,
-      tick: () async {
-        ticks++;
-      },
-    );
-    scheduler.request();
-    await tester.pump();
-    expect(ticks, 1);
-    await tester.pump(const Duration(seconds: 4));
-    expect(ticks, 1);
-    await tester.pump(const Duration(seconds: 1));
-    expect(ticks, 2);
-    active = true;
-    scheduler.request();
-    await tester.pump();
-    expect(ticks, 3);
-    await tester.pump(const Duration(seconds: 1));
-    expect(ticks, 4);
-    scheduler.close();
-    await tester.pump(const Duration(seconds: 10));
-    expect(ticks, 4);
-  });
+  testWidgets(
+    'idle ticks back off and events restore active work immediately',
+    (tester) async {
+      var active = false, ticks = 0;
+      final scheduler = AccountScheduler(
+        hasWork: () => active,
+        tick: () async {
+          ticks++;
+        },
+      );
+      scheduler.request();
+      await tester.pump();
+      expect(ticks, 1);
+      await tester.pump(const Duration(seconds: 4));
+      expect(ticks, 1);
+      await tester.pump(const Duration(seconds: 1));
+      expect(ticks, 2);
+      await tester.pump(const Duration(seconds: 9));
+      expect(ticks, 2);
+      await tester.pump(const Duration(seconds: 1));
+      expect(ticks, 3);
+      await tester.pump(const Duration(seconds: 14));
+      expect(ticks, 3);
+      active = true;
+      scheduler.request();
+      await tester.pump();
+      expect(ticks, 4);
+      await tester.pump(const Duration(seconds: 1));
+      expect(ticks, 5);
+      scheduler.close();
+      await tester.pump(const Duration(seconds: 10));
+      expect(ticks, 5);
+    },
+  );
   testWidgets('event bursts coalesce and an in-flight tick never overlaps', (
     tester,
   ) async {

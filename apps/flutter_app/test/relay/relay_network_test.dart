@@ -8,6 +8,7 @@ import 'package:cht/groups/group_crypto_bridge.dart';
 import 'package:cht/relay/relay_chat.dart';
 import 'package:cht/relay/relay_crypto_bridge.dart';
 import 'package:cht/relay/relay_network.dart';
+import 'package:cht/relay/relay_provider_policy.dart';
 import 'package:cht/relay/relay_socket.dart';
 import 'package:cht/p2p/p2p_bridge.dart';
 
@@ -292,6 +293,108 @@ class SessionAccount extends Account implements GroupCryptoBridge {
 }
 
 void main() {
+  test(
+    'closing a relay releases a tick queued behind a blocked write',
+    () async {
+      final hub = Hub(a, 'relay-a');
+      final account = Account('alice', 'bob');
+      final alice = RelayChat(
+        account,
+        RelayNetwork(Crypto('alice'), connector: hub.connect),
+        ownCard: () async => 'alice',
+        automaticTicks: false,
+      );
+      final bob = RelayChat(
+        Account('bob', 'alice'),
+        RelayNetwork(Crypto('bob'), connector: hub.connect),
+        ownCard: () async => 'bob',
+      );
+      final gate = Completer<void>();
+      try {
+        await alice.network.addSeed(a);
+        await bob.network.addSeed(a);
+        alice.select('bob');
+        bob.select('alice');
+        await until(() => alice.authenticated && bob.authenticated);
+        account.encryptGate = gate;
+        account.encryptEntered = Completer<void>();
+        final send = expectLater(
+          alice.sendMessage('blocked', 'text', 124),
+          throwsStateError,
+        );
+        await account.encryptEntered!.future;
+        final tick = alice.tick();
+        await alice.close();
+        await tick.timeout(const Duration(seconds: 1));
+        gate.complete();
+        await send;
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await alice.close();
+        await bob.close();
+      }
+    },
+  );
+
+  test(
+    'Relay sends text and ACK ahead of queued file chunks in Noise order',
+    () async {
+      final hub = Hub(a, 'relay-a');
+      final account = Account('alice', 'bob');
+      final left = RelayNetwork(Crypto('alice'), connector: hub.connect);
+      final right = RelayNetwork(Crypto('bob'), connector: hub.connect);
+      final alice = RelayChat(account, left, ownCard: () async => 'alice');
+      final bob = RelayChat(
+        Account('bob', 'alice'),
+        right,
+        ownCard: () async => 'bob',
+      );
+      final gate = Completer<void>();
+      try {
+        await left.addSeed(a);
+        await right.addSeed(a);
+        alice.select('bob');
+        bob.select('alice');
+        await until(() => alice.authenticated && bob.authenticated);
+        await bob.sendMessage('reply-target', 'hi', 123);
+        await until(
+          () => alice.events.any((e) => e.messageId == 'reply-target'),
+        );
+        alice.drainEvents();
+        bob.drainEvents();
+
+        account.encryptGate = gate;
+        account.encryptEntered = Completer<void>();
+        final first = alice.sendMessage('chtatt1_first', 'chunk', 124);
+        await account.encryptEntered!.future;
+        account.encryptEntered = null;
+        final second = alice.sendMessage(
+          'chtfile2_second',
+          '{"type":"part"}',
+          125,
+        );
+        final text = alice.sendMessage('text', 'chat', 126);
+        final receipt = alice.acknowledge('reply-target', 127);
+        gate.complete();
+        await Future.wait([first, second, text, receipt]);
+        await until(
+          () => bob.events.any((e) => e.messageId == 'chtfile2_second'),
+        );
+        expect(
+          bob.events
+              .where((event) => event.messageId != null)
+              .map((event) => event.messageId),
+          ['chtatt1_first', 'text', 'reply-target', 'chtfile2_second'],
+        );
+        expect(alice.authenticated && bob.authenticated, isTrue);
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await alice.close();
+        await bob.close();
+      }
+    },
+  );
+
   test('new Courier catalogs require negotiated support and never replace private routed-frame handlers', () async {
     final hub = Hub(a, 'relay-a'),
         network = RelayNetwork(
@@ -333,7 +436,7 @@ void main() {
       bob.select('alice');
       await until(() => alice.authenticated && bob.authenticated);
       await alice.sendMessage(
-        'file-packet',
+        'chtatt1_file-packet',
         'file data',
         123,
         isCurrent: () => allowed,
@@ -345,7 +448,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(
         alice.drainEvents().where(
-          (e) => e.type == 'sent' && e.messageId == 'file-packet',
+          (e) => e.type == 'sent' && e.messageId == 'chtatt1_file-packet',
         ),
         isEmpty,
       );
@@ -824,82 +927,143 @@ void main() {
       }
     },
   );
-  test('50–1000 simultaneous relay sockets, six pending dials, saved target and active route protection', () async {
-    final hubs = List.generate(
-      1000,
-      (i) => Hub(
-        'wss://r$i.example.com/cht',
-        'relay-${i.toString().padLeft(4, '0')}',
-      ),
-    );
-    final byUrl = {for (final h in hubs) h.url: h};
-    final crypto = Crypto('did:cht:test');
-    var inFlight = 0;
-    var peak = 0;
-    final net = RelayNetwork(
-      crypto,
-      connector: (url) async {
-        inFlight++;
-        if (inFlight > peak) peak = inFlight;
-        await Future<void>.delayed(const Duration(milliseconds: 1));
-        inFlight--;
-        return byUrl[url]!.connect(url);
-      },
-    );
-    try {
-      await net.initialize();
-      await net.importList(
-        jsonEncode({
-          'version': 1,
-          'relays': hubs.map((h) => h.record).toList(),
-        }),
+  test(
+    'keeps two relay sockets while retaining the full saved catalog',
+    () async {
+      final hubs = List.generate(
+        1000,
+        (i) => Hub(
+          'wss://r$i.example.com/cht',
+          'relay-${i.toString().padLeft(4, '0')}',
+        ),
       );
-      while (net.online.length < 50) {
-        await net.tick();
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
-      expect(net.online, hasLength(50));
-      await expectLater(net.setConnectionLimit(49), throwsFormatException);
-      await expectLater(net.setConnectionLimit(1001), throwsFormatException);
-      await net.setConnectionLimit(1000);
-      while (net.online.length < 1000) {
-        await net.tick();
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
-      expect(peak, lessThanOrEqualTo(6));
-      expect(net.online, hasLength(1000));
-      expect(
-        hubs.expand((h) => h.sockets).where((s) => s.subscribed),
-        hasLength(3),
-      );
-      final active = net.online.last;
-      net.activeEndpoint = active;
-      await net.setConnectionLimit(50);
-      expect(net.online, hasLength(50));
-      expect(net.online, contains(active));
-      final newFriendRelay = Hub(a, 'relay-new-friend');
-      byUrl[a] = newFriendRelay;
-      await net.addContactRoutes([a]);
-      await until(() => net.online.contains(a));
-      expect(net.online, hasLength(50));
-      expect(net.online, contains(active));
-      expect(net.preferredRoutes, [a]);
-      expect(jsonDecode(crypto.cache)['connectionLimit'], 50);
-      final restored = RelayNetwork(
+      final byUrl = {for (final h in hubs) h.url: h};
+      final crypto = Crypto('did:cht:test');
+      var inFlight = 0;
+      var peak = 0;
+      final net = RelayNetwork(
         crypto,
-        connector: (_) async => throw StateError('offline'),
+        connector: (url) async {
+          inFlight++;
+          if (inFlight > peak) peak = inFlight;
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          inFlight--;
+          return byUrl[url]!.connect(url);
+        },
       );
       try {
-        await restored.initialize();
-        expect(restored.connectionLimit, 50);
-        expect(restored.records, hasLength(1000));
+        await net.initialize();
+        await net.importList(
+          jsonEncode({
+            'version': 1,
+            'relays': hubs.map((h) => h.record).toList(),
+          }),
+        );
+        await until(() => net.online.length >= 2);
+        await net.tick();
+        await expectLater(net.setConnectionLimit(49), throwsFormatException);
+        await expectLater(net.setConnectionLimit(1001), throwsFormatException);
+        await net.setConnectionLimit(1000);
+        expect(peak, 2);
+        expect(net.online, [hubs[0].url, hubs[1].url]);
+        expect(net.knownRelayCount, 1000);
+        expect(
+          hubs.expand((h) => h.sockets).where((s) => !s.closed),
+          hasLength(2),
+        );
+        expect(jsonDecode(crypto.cache)['connectionLimit'], 1000);
+        final restored = RelayNetwork(
+          crypto,
+          connector: (_) async => throw StateError('offline'),
+        );
+        try {
+          await restored.initialize();
+          expect(restored.connectionLimit, 1000);
+          expect(restored.records, hasLength(1000));
+        } finally {
+          await restored.close();
+        }
       } finally {
-        await restored.close();
+        await net.close();
       }
-    } finally {
-      await net.close();
-    }
-  });
+    },
+  );
+
+  test(
+    'warms a relay with a different configured operator and refills on failure',
+    () async {
+      final primary = Hub(a, 'relay-a');
+      final sameOperator = Hub(b, 'relay-b');
+      final independent = Hub('wss://c.example.com/cht', 'relay-c');
+      final hubs = {
+        for (final h in [primary, sameOperator, independent]) h.url: h,
+      };
+      final network = RelayNetwork(
+        Crypto('alice'),
+        bootstrapRelays: hubs.map((url, hub) => MapEntry(url, hub.id)),
+        providerPolicy: RelayProviderPolicy({
+          'relay-a': 'operator-one',
+          'relay-b': 'operator-one',
+          'relay-c': 'operator-two',
+        }),
+        connector: (url) => hubs[url]!.connect(url),
+      );
+      try {
+        await network.initialize();
+        await until(() => network.online.length >= 2);
+        final warmSocket = independent.sockets.single;
+        expect(network.online, [primary.url, independent.url]);
+        expect(sameOperator.sockets, isEmpty);
+        await primary.stop();
+        await until(
+          () => network.online.toSet().containsAll([
+            independent.url,
+            sameOperator.url,
+          ]),
+        );
+        expect(network.online.first, independent.url);
+        expect(warmSocket.closed, isFalse);
+        expect(independent.sockets, hasLength(1));
+      } finally {
+        await network.close();
+      }
+    },
+  );
+
+  test(
+    'keeps both sockets while a preferred contact route is connecting',
+    () async {
+      final primary = Hub(a, 'relay-a');
+      final standby = Hub(b, 'relay-b');
+      final contact = Hub('wss://c.example.com/cht', 'relay-c');
+      final connecting = Completer<RelaySocket>();
+      final network = RelayNetwork(
+        Crypto('alice'),
+        connector: (url) => switch (url) {
+          a => primary.connect(url),
+          b => standby.connect(url),
+          _ => connecting.future,
+        },
+      );
+      final lease = Object();
+      try {
+        await network.addSeed(a);
+        await network.addSeed(b);
+        await until(() => network.online.length == 2);
+        network.leaseRoute(lease, a);
+        await network.addContactRoutes([contact.url]);
+        expect(network.online, [a, b]);
+        final oldStandby = standby.sockets.single;
+        connecting.complete(await contact.connect(contact.url));
+        await until(() => network.online.contains(contact.url));
+        expect(network.online, [a, contact.url]);
+        expect(primary.sockets.single.closed, isFalse);
+        expect(oldStandby.closed, isTrue);
+      } finally {
+        await network.close();
+      }
+    },
+  );
 
   test(
     'signed public routes from a contact bootstrap the relay automatically',

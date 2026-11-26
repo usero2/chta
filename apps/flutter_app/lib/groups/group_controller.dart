@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../chat/attachment_store.dart';
 import '../chat/chat_attachment.dart';
 import '../chat/chat_models.dart';
+import '../chat/peer_message_action.dart';
 import '../delivery/gap_repair.dart';
 import '../delivery/peer_gap_repair.dart' show ProtectedGapCursor;
 import '../notifications/incoming_notifications.dart';
@@ -23,6 +24,7 @@ const _maxOutboxBytes = 16 * 1024 * 1024, _maxHistoryMessages = 10000;
 // Matches MAX_TEXT in the Rust group event signer, including JSON escaping.
 const _maxGroupTextPayloadBytes = 32768;
 const _courierCapability = 'chta-group-cap-v1:courier-v1';
+const _actionsCapability = 'chta-group-cap-v1:message-actions-v1';
 
 class GroupController extends ChangeNotifier {
   GroupController({
@@ -73,6 +75,16 @@ class GroupController extends ChangeNotifier {
   final _repairs = <String, GapRepair>{};
   final _repairTurns = <String, int>{}, _nextRepair = <String, int>{};
   final _courierPeers = <String>{}, _capSent = <String>{};
+  final _actionPeers = <String>{}, _actionCapSent = <String>{};
+  bool supportsMessageActions(String groupId) =>
+      canSend(groupId) &&
+      _groups[groupId]!.members.every(
+        (member) =>
+            member.identityId == ownerId ||
+            _actionPeers.contains(member.identityId),
+      );
+  bool isPeerOnline(String peer) => _transport?.connected(peer) == true;
+
   bool _courierEnabled = false;
   bool supportsCourier(String peer) => _courierPeers.contains(peer);
   void setCourierEnabled(bool value) {
@@ -93,6 +105,14 @@ class GroupController extends ChangeNotifier {
       _closed ||
       _deleted[gid]?.contains('$sender:$id') == true ||
       (_deletedBefore[gid] != null && sentAt <= _deletedBefore[gid]!);
+  bool isMessageRemoved(GroupMessage target) =>
+      _rooms[target.groupId]?.any(
+        (row) =>
+            row.senderId == target.senderId &&
+            row.action?.kind == PeerMessageActionKind.delete &&
+            row.action?.target == target.key,
+      ) ==
+      true;
   bool hasCompletedFile(String fileId) => _completedFiles.contains(fileId);
   List<GroupView> get groups => List.unmodifiable(_groups.values);
   List<GroupInvitation> get invitations =>
@@ -143,12 +163,16 @@ class GroupController extends ChangeNotifier {
   Future<ChatAttachment> openFile(SwarmManifest manifest) =>
       cache.open(manifest);
   List<ConversationView> get conversations => groups.map((g) {
-    final last = messagesFor(g.groupId).lastOrNull;
+    final rows = messagesFor(g.groupId);
+    final last = rows.where((m) => m.isVisible).lastOrNull;
+    final preview = last == null
+        ? null
+        : projectMessageActions(rows.map((m) => m.actionEntry))[last.key]?.text;
     return ConversationView(
       id: g.groupId,
       title: g.name,
       preview:
-          last?.text ??
+          preview ??
           (g.closed
               ? 'Group closed'
               : g.contains(ownerId)
@@ -234,6 +258,7 @@ class GroupController extends ChangeNotifier {
       'generations': _roomGenerations,
       'deletedBefore': _deletedBefore,
       'courierPeers': _courierPeers.toList(),
+      'actionPeers': _actionPeers.toList(),
     });
   }
 
@@ -281,6 +306,9 @@ class GroupController extends ChangeNotifier {
         throw const FormatException('Too many group capabilities');
       }
       _courierPeers.addAll(capabilities);
+      _actionPeers.addAll(
+        (index['actionPeers'] as List? ?? const []).cast<String>().take(1024),
+      );
       for (final e in _map(index['deleted'] ?? {}).entries) {
         _deleted[e.key] = (e.value as List).cast<String>().toSet();
       }
@@ -337,12 +365,28 @@ class GroupController extends ChangeNotifier {
       }
     }
     _ready = true;
-    _timer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => unawaited(_pulse()),
-    );
+    _schedulePulse();
     _changed();
   });
+  void _schedulePulse() {
+    if (_closed || !_ready) return;
+    _timer?.cancel();
+    final transfersPending = _rooms.values.any(
+      (room) => room.any(
+        (message) =>
+            message.manifest != null &&
+            !_completedFiles.contains(message.manifest!.fileId) &&
+            !isMessageRemoved(message),
+      ),
+    );
+    _timer = Timer(
+      Duration(seconds: transfersPending || _jobs.isNotEmpty ? 2 : 8),
+      () {
+        unawaited(_pulse().whenComplete(_schedulePulse));
+      },
+    );
+  }
+
   Future<void> attachTransport(GroupTransport transport) async {
     if (_closed) {
       await transport.close();
@@ -370,6 +414,7 @@ class GroupController extends ChangeNotifier {
     final online = _transport?.onlinePeers ?? <String>{};
     _syncedPeers.removeWhere((p) => !online.contains(p));
     _capSent.removeWhere((p) => !online.contains(p));
+    _actionCapSent.removeWhere((p) => !online.contains(p));
     for (final peer
         in _repairs.keys.where((p) => !online.contains(p)).toList()) {
       _repairs.remove(peer)?.close();
@@ -391,6 +436,7 @@ class GroupController extends ChangeNotifier {
       );
     }
     _changed();
+    unawaited(_pulse());
   }
 
   Future<void> _pulse() async {
@@ -420,6 +466,14 @@ class GroupController extends ChangeNotifier {
             await transport.connect(peer);
           } catch (_) {}
           if (_closed) return;
+        }
+        for (final peer in peers) {
+          if (transport.connected(peer) && !_actionCapSent.contains(peer)) {
+            try {
+              await transport.send(peer, _actionsCapability);
+              if (!_closed) _actionCapSent.add(peer);
+            } catch (_) {}
+          }
         }
         if (_courierEnabled) {
           for (final peer in peers) {
@@ -708,6 +762,61 @@ class GroupController extends ChangeNotifier {
     }
   }
 
+  Future<bool> sendMessageAction(
+    String gid,
+    PeerMessageActionKind kind,
+    GroupMessage target, {
+    String? text,
+  }) async {
+    try {
+      return await _run(() async {
+        final rows = _rooms[gid] ?? const <GroupMessage>[];
+        if (!supportsMessageActions(gid) ||
+            !rows.contains(target) ||
+            !target.isVisible ||
+            projectMessageActions(
+                  rows.map((m) => m.actionEntry),
+                )[target.key]?.deleted ==
+                true ||
+            kind != PeerMessageActionKind.reply && target.senderId != ownerId ||
+            kind == PeerMessageActionKind.edit && target.manifest != null) {
+          throw const FormatException('This message can no longer be changed.');
+        }
+        final id = '${PeerMessageAction.idPrefix}${groupRandomId()}';
+        final encoded = PeerMessageAction(kind, target.key, text).encode();
+        if (PeerMessageAction.decode(id, encoded) == null) {
+          throw const FormatException('Enter a message.');
+        }
+        final payload = {'text': encoded};
+        if (utf8.encode(jsonEncode(payload)).length >
+            _maxGroupTextPayloadBytes) {
+          throw const FormatException(
+            'This message is too long for this action.',
+          );
+        }
+        var now = DateTime.now().millisecondsSinceEpoch;
+        for (final row in rows) {
+          if (row.senderId == ownerId &&
+              row.action?.target == target.key &&
+              row.action?.kind == PeerMessageActionKind.edit &&
+              row.sentAt >= now) {
+            now = row.sentAt + 1;
+          }
+        }
+        await _post(gid, 'message', payload, messageId: id, sentAt: now);
+        return true;
+      });
+    } catch (caught) {
+      if (!_closed) {
+        error = caught is FormatException
+            ? caught.message
+            : 'Could not save the message.';
+        _changed();
+      }
+      return false;
+    }
+  }
+
   Future<bool> sendBatch(
     String gid,
     String caption,
@@ -749,8 +858,10 @@ class GroupController extends ChangeNotifier {
   Future<void> _post(
     String gid,
     String kind,
-    Map<String, Object?> payload,
-  ) async {
+    Map<String, Object?> payload, {
+    String? messageId,
+    int? sentAt,
+  }) async {
     if (!canSend(gid)) throw StateError('Group unavailable');
     final g = _groups[gid]!,
         recipients = g.members
@@ -766,13 +877,13 @@ class GroupController extends ChangeNotifier {
     if (_jobs.length + recipients.length > 1024) {
       throw StateError('Group outbox is full');
     }
-    final id = groupRandomId();
+    final id = messageId ?? groupRandomId();
     final signed = await crypto.groupCall('sign', {
       'groupId': gid,
       'id': id,
       'kind': kind,
       'payload': jsonEncode(payload),
-      'now': DateTime.now().millisecondsSinceEpoch,
+      'now': sentAt ?? DateTime.now().millisecondsSinceEpoch,
     });
     final event = signed['event'] as String;
     final time = (jsonDecode(event) as Map)['sentAt'] as int;
@@ -827,6 +938,7 @@ class GroupController extends ChangeNotifier {
       rethrow;
     }
     if (manifest != null) swarm.register(manifest);
+    _schedulePulse();
     error = null;
     _changed();
     unawaited(_pulse());
@@ -836,6 +948,15 @@ class GroupController extends ChangeNotifier {
     if (text.startsWith(gapRepairPrefix)) {
       if (_courierEnabled && supportsCourier(peer)) {
         await _repair(peer).receive(text);
+      }
+      return;
+    }
+    if (text == _actionsCapability) {
+      if (_actionPeers.length < 1024 &&
+          _transport?.connected(peer) == true &&
+          _actionPeers.add(peer)) {
+        await _saveIndex();
+        _changed();
       }
       return;
     }
@@ -1152,12 +1273,16 @@ class GroupController extends ChangeNotifier {
     if (_closed || _left.contains(m.groupId) || !canSend(m.groupId)) {
       return false;
     }
+    final message = _rooms[m.groupId]
+        ?.where((row) => row.manifest?.fileId == m.fileId)
+        .firstOrNull;
+    if (message == null || isMessageRemoved(message)) return false;
     final result = await crypto.groupCall('authorize', {
       'peerId': peer,
       'groupId': m.groupId,
       'epoch': m.epoch,
     });
-    return !_closed && result['allowed'] == true;
+    return !_closed && !isMessageRemoved(message) && result['allowed'] == true;
   }
 
   List<String> _filePeers(SwarmManifest m) =>
@@ -1174,7 +1299,7 @@ class GroupController extends ChangeNotifier {
         final message = _rooms[manifest.groupId]
             ?.where((m) => m.manifest?.fileId == manifest.fileId)
             .firstOrNull;
-        if (message == null) return;
+        if (message == null || isMessageRemoved(message)) return;
         _completedFiles.add(manifest.fileId);
         try {
           if (message.senderId != ownerId && !message.repaired) {

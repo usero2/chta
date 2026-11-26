@@ -57,7 +57,7 @@ void main() {
     never.complete();
   });
   test(
-    'unreceipted retry uses a healthy alternative with cooldown and hold down',
+    'unreceipted retry uses a healthy alternative until Direct recovers',
     () async {
       var now = 1000;
       final sent = <String>[],
@@ -80,8 +80,52 @@ void main() {
       await router.send('b', routes(), isCurrent: () => true);
       now += 5000;
       await router.send('c', routes(), isCurrent: () => true);
-      expect(sent, ['direct', 'relay', 'relay', 'relay']);
+      expect(sent, ['direct', 'relay', 'relay', 'direct']);
       expect(router.healthFor('direct').cooldownUntil, greaterThan(1000));
+    },
+  );
+  test(
+    'Relay receipts do not pin new messages after Direct authenticates',
+    () async {
+      final router = DeliveryRouter();
+      var directReady = false;
+      List<DeliveryRoute> routes() => [
+        DeliveryRoute(
+          id: 'direct',
+          kind: DeliveryRouteKind.direct,
+          authenticated: directReady,
+          send: () async {},
+        ),
+        DeliveryRoute(
+          id: 'relay',
+          kind: DeliveryRouteKind.relay,
+          authenticated: true,
+          send: () async {},
+        ),
+      ];
+      expect(
+        await router.send('first', routes(), isCurrent: () => true),
+        'relay',
+      );
+      router.acknowledge('first', routeId: 'relay');
+      expect(
+        await router.send('in-flight', routes(), isCurrent: () => true),
+        'relay',
+      );
+      directReady = true;
+      expect(
+        await router.send('next', routes(), isCurrent: () => true),
+        'direct',
+      );
+      // Session negotiation still uses the original route-affinity policy.
+      expect(router.rank(routes()).first.id, 'relay');
+      expect(router.pendingCount, 2);
+      router.acknowledge('in-flight', routeId: 'relay');
+      expect(router.pendingCount, 1);
+      expect(
+        await router.send('last', routes(), isCurrent: () => true),
+        'direct',
+      );
     },
   );
   test('lock during a slow attempt stops fallback and unauthenticated routes never send', () async {

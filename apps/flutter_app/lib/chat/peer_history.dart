@@ -10,6 +10,7 @@ import 'attachment_ref.dart';
 import 'attachment_store.dart';
 import 'peer_history_store.dart';
 import 'cache_policy.dart';
+import 'peer_message_action.dart';
 
 enum DeliveryStatus { pending, sent, delivered, failed }
 
@@ -37,6 +38,14 @@ class PeerMessage {
   final String id;
   final String text;
   final bool incoming;
+  late final PeerMessageAction? action = hasAttachment
+      ? null
+      : PeerMessageAction.decode(id, text);
+  bool get isVisible =>
+      !id.startsWith(PeerMessageAction.idPrefix) ||
+      action?.kind == PeerMessageActionKind.reply;
+  String get body =>
+      action?.kind == PeerMessageActionKind.reply ? action!.text! : text;
   ChatAttachment? attachment;
   AttachmentRef? attachmentRef;
   AttachmentRef? thumbnailRef;
@@ -162,6 +171,35 @@ class PeerHistory extends ChangeNotifier {
       return order == 0 ? a.compareTo(b) : order;
     });
     return [for (final index in indices) messages[index]];
+  }
+
+  List<PeerMessage> visibleMessagesFor(String? peer) =>
+      messagesFor(peer).where((message) => message.isVisible).toList();
+
+  MessagePresentation? presentationFor(String? peer, String id) =>
+      presentationsFor(peer)[id];
+
+  Map<String, MessagePresentation> presentationsFor(String? peer) =>
+      projectMessageActions(
+        (_rooms[peer] ?? const <PeerMessage>[]).map(
+          (row) => (
+            id: row.id,
+            key: row.id,
+            author: row.incoming ? 'remote' : 'local',
+            text: row.body,
+            visible: row.isVisible,
+            hasAttachment: row.hasAttachment,
+            pending:
+                row.queuedForDelivery && row.status != DeliveryStatus.delivered,
+            sentAt: row.sentAtMilliseconds ?? 0,
+            action: row.action,
+          ),
+        ),
+      );
+
+  String? conversationPreview(String peer) {
+    final last = visibleMessagesFor(peer).lastOrNull;
+    return last == null ? null : presentationFor(peer, last.id)?.text;
   }
 
   Iterable<MapEntry<String, PeerMessage>> get queuedMessages sync* {

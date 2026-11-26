@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:image/image.dart' as image;
 
@@ -34,6 +33,8 @@ import '../seed/seed_client_test.dart' as seed_test;
 import '../contact_requests/contact_request_controller_test.dart'
     as request_test;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -135,8 +136,10 @@ void main() {
         ),
       );
       try {
+        final readsBeforeOpen = account.contactReads;
         await tester.pumpWidget(view('bob'));
         await tester.pump(const Duration(milliseconds: 600));
+        expect(account.contactReads - readsBeforeOpen, 1);
         expect(find.byKey(const Key('peer-message-input')), findsOneWidget);
         await tester.enterText(
           find.byKey(const Key('peer-message-input')),
@@ -145,7 +148,24 @@ void main() {
         await tester.tap(find.byKey(const Key('send-peer-message')));
         await tester.pump(const Duration(milliseconds: 600));
         expect(history.messagesFor('bob').single.queuedForDelivery, isTrue);
-        expect(find.text('Waiting for connection'), findsOneWidget);
+        expect(find.text('Waiting for connection'), findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Icon &&
+                widget.icon == Icons.schedule &&
+                widget.semanticLabel == 'Waiting for delivery',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Tooltip &&
+                (widget.message?.contains('Waiting for connection') ?? false),
+          ),
+          findsOneWidget,
+        );
         final bob = service.relayFor('bob');
         await tester.pumpWidget(view('carol'));
         await tester.pump(const Duration(milliseconds: 600));
@@ -163,6 +183,226 @@ void main() {
       }
     },
   );
+  testWidgets(
+    'peer timeline marks dates and groups timestamps without losing receipts',
+    (tester) async {
+      final history = PeerHistory(store: Store());
+      await history.load('alice');
+      final account = service_test.Account('alice', ['bob']);
+      final service = MessagingService(
+        ownerId: 'alice',
+        account: account,
+        network: RelayNetwork(relay_test.Crypto('alice')),
+        history: history,
+        ownCard: () async => 'alice',
+        observeNetwork: false,
+      );
+      final first = DateTime(2024, 1, 2, 3, 4, 1).millisecondsSinceEpoch;
+      final nextDay = DateTime(2024, 1, 3, 5, 6).millisecondsSinceEpoch;
+      for (var index = 0; index < 2; index++) {
+        history.add(
+          'bob',
+          PeerMessage(
+            id: 'delivered-$index',
+            text: 'Delivered message $index',
+            incoming: false,
+            status: DeliveryStatus.delivered,
+            sentAtMilliseconds: first + index,
+            receivedAtMilliseconds: first + index + 1000,
+          ),
+        );
+      }
+      history.add(
+        'bob',
+        PeerMessage(
+          id: 'received',
+          text: 'Received without sender time',
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          receivedAtMilliseconds: nextDay,
+        ),
+      );
+      await service.start();
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConnectionPage(
+              accountBridge: account,
+              bridge: _FakeP2pBridge(),
+              targetContactId: 'bob',
+              chatMode: true,
+              peerHistory: history,
+              messaging: service,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('2 ม.ค. 2024'), findsOneWidget);
+        expect(find.text('3 ม.ค. 2024'), findsOneWidget);
+        expect(find.text('03:04'), findsOneWidget);
+        expect(find.text('05:06'), findsOneWidget);
+        expect(find.byIcon(Icons.done_all), findsNWidgets(2));
+        expect(find.text('—'), findsNothing);
+        final infoTooltip = find.byWidgetPredicate(
+          (widget) =>
+              widget is Tooltip &&
+              (widget.message?.contains('2024-01-03 05:06:00.000') ?? false),
+        );
+        expect(infoTooltip, findsOneWidget);
+        expect(
+          tester.widget<Tooltip>(infoTooltip).message,
+          'เวลารับ 2024-01-03 05:06:00.000',
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await service.close();
+        history.dispose();
+      }
+    },
+  );
+
+  testWidgets(
+    'message menu replies, edits and queues a delete from the chat screen',
+    (tester) async {
+      final history = PeerHistory(store: Store());
+      await history.load('alice');
+      final account = service_test.Account('alice', ['bob']);
+      final service = MessagingService(
+        ownerId: 'alice',
+        account: account,
+        network: RelayNetwork(relay_test.Crypto('alice')),
+        history: history,
+        ownCard: () async => 'alice',
+        observeNetwork: false,
+      );
+      await service.start();
+      await service.queueText('bob', 'Original text', id: 'original');
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConnectionPage(
+              accountBridge: account,
+              bridge: _FakeP2pBridge(),
+              targetContactId: 'bob',
+              chatMode: true,
+              peerHistory: history,
+              messaging: service,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        final menu = find.byKey(const Key('peer-message-actions-original'));
+        Future<void> select(String label) async {
+          final bubble = find.byKey(const Key('peer-message-original'));
+          if (label == 'Reply' || label == 'Edit') {
+            expect(
+              find.descendant(
+                of: bubble,
+                matching: find.byType(SelectableText),
+              ),
+              findsOneWidget,
+            );
+            await tester.tapAt(
+              tester.getCenter(bubble),
+              kind: PointerDeviceKind.mouse,
+              buttons: kSecondaryMouseButton,
+            );
+          } else {
+            await tester.tap(menu);
+          }
+          await tester.pumpAndSettle();
+          expect(find.byKey(const Key('message-action-grid')), findsOneWidget);
+          expect(find.byType(AdaptiveTextSelectionToolbar), findsNothing);
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+        }
+
+        await select('Reply');
+        expect(find.byTooltip('Cancel reply'), findsOneWidget);
+        await tester.enterText(
+          find.byKey(const Key('peer-message-input')),
+          'Reply text',
+        );
+        await tester.tap(find.byKey(const Key('send-peer-message')));
+        await tester.pumpAndSettle();
+        expect(
+          history.visibleMessagesFor('bob').last.action?.target,
+          'original',
+        );
+        expect(find.byTooltip('Cancel reply'), findsNothing);
+        await select('Edit');
+        await tester.enterText(find.byType(TextFormField), 'Edited body');
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(history.presentationFor('bob', 'original')?.text, 'Edited body');
+        await select('Delete');
+        await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+        await tester.pumpAndSettle();
+        expect(history.presentationFor('bob', 'original')?.deleted, isTrue);
+        expect(history.presentationFor('bob', 'original')?.pending, isTrue);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        await tester.pumpWidget(const SizedBox());
+        await service.close();
+        history.dispose();
+      }
+    },
+  );
+
+  testWidgets('messages offer the floating menu even with an older contact', (
+    tester,
+  ) async {
+    final history = PeerHistory(store: Store());
+    await history.load('alice');
+    final account = service_test.Account('alice', [
+      'bob',
+    ], messageActions: false);
+    final service = MessagingService(
+      ownerId: 'alice',
+      account: account,
+      network: RelayNetwork(relay_test.Crypto('alice')),
+      history: history,
+      ownCard: () async => 'alice',
+      observeNetwork: false,
+    );
+    await service.start();
+    await service.queueText('bob', 'Original text', id: 'legacy');
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConnectionPage(
+            accountBridge: account,
+            bridge: _FakeP2pBridge(),
+            targetContactId: 'bob',
+            chatMode: true,
+            peerHistory: history,
+            messaging: service,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      final menu = find.byKey(const Key('peer-message-actions-legacy'));
+      expect(menu, findsOneWidget);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      expect(find.text('Copy'), findsOneWidget);
+      expect(find.text('Reply'), findsOneWidget);
+      expect(
+        find.text('Both apps need to support message actions.'),
+        findsOneWidget,
+      );
+      final edit = tester.widget<TextButton>(
+        find.widgetWithText(TextButton, 'Edit'),
+      );
+      expect(edit.onPressed, isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      await service.close();
+      history.dispose();
+    }
+  });
+
   testWidgets(
     'incoming text is acknowledged only after durable history succeeds, including retry',
     (tester) async {
@@ -1057,23 +1297,12 @@ void main() {
       find.byWidgetPredicate(
         (widget) =>
             widget is Tooltip &&
-            (widget.message?.startsWith('เวลาส่ง: ') ?? false),
+            (widget.message?.startsWith('เวลาส่ง ') ?? false),
       ),
       findsOneWidget,
     );
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Tooltip &&
-            (widget.message?.startsWith('เวลารับ: ') ?? false),
-      ),
-      findsOneWidget,
-    );
-    expect(find.byIcon(Icons.north_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.south_rounded), findsOneWidget);
-    expect(find.textContaining('ส่ง:'), findsNothing);
-    expect(find.textContaining('รับ:'), findsNothing);
-
+    expect(find.byIcon(Icons.north_rounded), findsNothing);
+    expect(find.byIcon(Icons.south_rounded), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 

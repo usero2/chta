@@ -4,6 +4,8 @@ import 'dart:math';
 
 import '../account/account_bridge.dart';
 import '../account/account_models.dart';
+import '../chat/attachment_transfer.dart';
+import '../delivery/priority_send_queue.dart';
 import '../groups/group_crypto_bridge.dart';
 import '../p2p/p2p_bridge.dart';
 import 'relay_network.dart';
@@ -78,9 +80,9 @@ class RelayChat {
   final _retired = <String>{};
   final _blocked = <String, int>{};
   Timer? _timer;
-  Future<void> _serial = Future.value();
+  final _serial = PrioritySendQueue();
   bool _closed = false;
-  bool _ticking = false;
+  Completer<void>? _tickCompletion;
   int _generation = 0;
   String? peerId;
   String? _route;
@@ -90,6 +92,9 @@ class RelayChat {
   _Candidate? _candidate;
   bool _initiator = false;
   bool authenticated = false;
+  List<String> _remoteCapabilities = const [];
+  bool supports(String capability) =>
+      authenticated && _remoteCapabilities.contains(capability);
   String state = 'new';
   int _lastAttempt = 0;
   int _lastReceived = 0;
@@ -136,6 +141,7 @@ class RelayChat {
       if (_v2) _closeV2(_session!);
     }
     _v2 = false;
+    _remoteCapabilities = const [];
     authenticated = false;
     state = 'connecting';
     _session = null;
@@ -209,26 +215,34 @@ class RelayChat {
     'body': body,
   });
 
-  void _enqueue(Future<void> Function() task) {
-    var taskGeneration = _generation;
-    _serial = _serial
-        .then((_) async {
-          taskGeneration = _generation;
-          if (!_closed) await task();
-        })
-        .catchError((Object _) {
+  void _enqueue(Future<void> Function() task, {bool bulk = false}) {
+    unawaited(
+      _serial.add(() async {
+        if (_closed) return;
+        final taskGeneration = _generation;
+        try {
+          await task();
+        } catch (_) {
           // Invalid frames cannot mark the session authenticated or acknowledge messages.
           // Noise counters may have diverged; start a fresh authenticated session.
           if (!_closed && peerId != null && taskGeneration == _generation) {
             _reset();
           }
-        });
+        }
+      }, bulk: bulk),
+    );
+  }
+
+  Future<void> warmConnection() {
+    if (!authenticated && _session == null && _tickCompletion == null) {
+      _lastAttempt = 0;
+    }
+    return tick();
   }
 
   Future<void> tick() async {
-    if (_closed || _ticking || peerId == null) return;
-    _ticking = true;
-    final complete = Completer<void>();
+    if (_closed || _tickCompletion != null || peerId == null) return;
+    final complete = _tickCompletion = Completer<void>();
     _enqueue(() async {
       try {
         final candidate = _candidate;
@@ -259,7 +273,7 @@ class RelayChat {
               continue;
             }
             try {
-              await _sendPending(pending);
+              await _retryPending(pending);
             } catch (_) {
               if (_pending[pending.id] == pending) rethrow;
             }
@@ -307,13 +321,13 @@ class RelayChat {
           _sendBody({'type': 'probe', 'contactCard': card});
         }
       } finally {
-        complete.complete();
+        if (!complete.isCompleted) complete.complete();
       }
     });
     try {
       await complete.future;
     } finally {
-      _ticking = false;
+      _tickCompletion = null;
     }
   }
 
@@ -369,7 +383,7 @@ class RelayChat {
         if (result['established'] == true) {
           _promoteCandidate(candidate);
           for (final pending in _pending.values.toList()) {
-            await _sendPending(pending);
+            await _retryPending(pending);
           }
         }
       } catch (_) {
@@ -434,7 +448,7 @@ class RelayChat {
         } catch (_) {
           return;
         }
-        final next = _Candidate(session, endpoint, now);
+        final next = _Candidate(session, endpoint, now, inspected.capabilities);
         _candidate = next;
         try {
           await _prepare(card, false, session, true);
@@ -461,6 +475,7 @@ class RelayChat {
       // This accepted probe deliberately replaces the previous session.
       frameGeneration = _generation;
       peerId = from;
+      _remoteCapabilities = inspected.capabilities;
       _session = session;
       final own = await ownCard();
       if (stale()) return;
@@ -493,12 +508,10 @@ class RelayChat {
         case 'ready':
           if (!_initiator || authenticated) return;
           final card = body['contactCard'];
-          if (card is! String ||
-              (await account.inspectContactCard(card)).identityId != peerId) {
-            return;
-          }
-          if (stale()) return;
+          if (card is! String) return;
           final remote = await account.inspectContactCard(card);
+          if (stale() || remote.identityId != peerId) return;
+          _remoteCapabilities = remote.capabilities;
           _v2 = _offeredV2 && remote.capabilities.contains('peer-sessions-v2');
           if (boundPeer != null && !_v2) {
             _reset();
@@ -527,7 +540,7 @@ class RelayChat {
             _lastPing = now;
             _event(const PeerEvent(type: 'authenticated'));
             for (final pending in _pending.values.toList()) {
-              await _sendPending(pending);
+              await _retryPending(pending);
             }
           }
         case 'encrypted':
@@ -604,6 +617,7 @@ class RelayChat {
       if (previousV2) _closeV2(previous);
     }
     _session = candidate.session;
+    _remoteCapabilities = candidate.capabilities;
     _route = candidate.route;
     _initiator = false;
     _v2 = true;
@@ -691,6 +705,31 @@ class RelayChat {
     _event(PeerEvent(type: 'sent', messageId: pending.id));
   }
 
+  Future<void> _retryPending(_Pending pending) async {
+    if (!pending.bulk) {
+      await _sendPending(pending);
+      return;
+    }
+    if (pending.retryQueued) return;
+    pending.retryQueued = true;
+    final generation = _generation;
+    final attempts = pending.attempts;
+    // Schedule each chunk separately so a file retry batch cannot hold up ACKs.
+    _enqueue(() async {
+      try {
+        if (generation == _generation &&
+            identical(_pending[pending.id], pending) &&
+            attempts == pending.attempts) {
+          await _sendPending(pending);
+        }
+      } catch (_) {
+        if (identical(_pending[pending.id], pending)) rethrow;
+      } finally {
+        pending.retryQueued = false;
+      }
+    }, bulk: true);
+  }
+
   final _sendWaiters = <Completer<void>>{};
   Completer<void> _sendCompletion() {
     final done = Completer<void>();
@@ -721,10 +760,12 @@ class RelayChat {
     bool Function()? isCurrent,
   }) async {
     if (!authenticated) throw StateError('The connection is not authenticated');
-    if (_pending.length >= 100 || !messageFits(text)) {
+    final bulk = AttachmentTransfer.isBulkPacket(id, text);
+    if ((_pending.length >= (bulk ? 96 : 100) && !_pending.containsKey(id)) ||
+        !messageFits(text)) {
       throw StateError('Message queue is full or message is too long');
     }
-    final pending = _Pending(id, text, sentAt, peerId!, isCurrent);
+    final pending = _Pending(id, text, sentAt, peerId!, isCurrent, bulk: bulk);
     _pending[id] = pending;
     final done = _sendCompletion();
     _enqueue(() async {
@@ -735,7 +776,7 @@ class RelayChat {
         if (!done.isCompleted) done.completeError(e, st);
         if (_pending[id] == pending) rethrow;
       }
-    });
+    }, bulk: bulk);
     await done.future;
   }
 
@@ -804,6 +845,8 @@ class RelayChat {
     _closed = true;
     authenticated = false;
     state = 'closed';
+    final tick = _tickCompletion;
+    if (tick != null && !tick.isCompleted) tick.complete();
     for (final done in _sendWaiters.toList()) {
       if (!done.isCompleted) {
         done.completeError(StateError('Connection closed'));
@@ -822,19 +865,29 @@ class RelayChat {
 }
 
 class _Candidate {
-  const _Candidate(this.session, this.route, this.createdAt);
+  const _Candidate(this.session, this.route, this.createdAt, this.capabilities);
+  final List<String> capabilities;
   final String session;
   final String route;
   final int createdAt;
 }
 
 class _Pending {
-  _Pending(this.id, this.text, this.sentAt, this.peer, this.isCurrent);
+  _Pending(
+    this.id,
+    this.text,
+    this.sentAt,
+    this.peer,
+    this.isCurrent, {
+    required this.bulk,
+  });
   final bool Function()? isCurrent;
   final String peer;
   final String id;
   final String text;
   final int sentAt;
+  final bool bulk;
+  bool retryQueued = false;
   int lastSent = 0;
   int attempts = 0;
 }

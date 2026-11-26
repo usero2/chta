@@ -10,6 +10,7 @@ import 'package:cht/relay/relay_network.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../courier/courier_builder_test.dart' as builder;
+import '../courier/courier_directory_test.dart' as directory;
 import '../courier/courier_journal_test.dart' show Disk;
 import '../courier/courier_transport_test.dart' as wire;
 import '../relay/relay_network_test.dart' as relay;
@@ -42,6 +43,9 @@ class Crypto extends builder.Crypto {
     String op,
     Map<String, Object?> args,
   ) async {
+    if (op == 'verifyControl') {
+      return directory.Crypto().deliveryCall(op, args);
+    }
     if (op == 'newJob') {
       job = args['jobId'] as String;
       expiry = args['expiresAt'] as int;
@@ -318,7 +322,7 @@ void main() {
     verified: true,
     capabilities: supported ? ['delivery-v2', 'courier-v1'] : [],
   );
-  test('the real account outbox queues an offline friend into Courier and closing messaging stops its host', () async {
+  test('the account outbox starts Courier only when two other identities are reachable', () async {
     final history = PeerHistory(store: MemoryHistory());
     await history.load(owner);
     final budget = CachePolicy(
@@ -365,11 +369,31 @@ void main() {
         sentAtMilliseconds: 1000,
       ),
     );
+    expect(service.canDepositOffline(peer), isFalse);
+    await adapter.settlePreparations();
+    expect(courier.jobs.jobs, isEmpty);
+    expect(history.messagesFor(peer).single.queuedForDelivery, isTrue);
+    expect(history.messagesFor(peer).single.status, DeliveryStatus.pending);
+    final firstOwner = 'did:cht:${'c' * 64}';
+    await courier.directory.merge([
+      directory.ad('1' * 64, owner: firstOwner),
+      directory.ad('2' * 64, owner: firstOwner),
+      directory.ad('3' * 64, owner: peer),
+    ]);
+    await service.reconnect(peer);
+    expect(courier.depositRootCount(peer), 1);
+    expect(service.canDepositOffline(peer), isFalse);
+    expect(courier.jobs.jobs, isEmpty);
+    await courier.directory.merge([
+      directory.ad('4' * 64, owner: 'did:cht:${'d' * 64}'),
+    ]);
+    expect(service.canDepositOffline(peer), isTrue);
+    await service.reconnect(peer);
     await relay.until(
       () => history.messagesFor(peer).single.courierJobId != null,
     );
     await adapter.settlePreparations();
-    expect(courier.jobs.jobs.single.status, CourierJobStatus.waitingForNodes);
+    expect(courier.jobs.jobs.single.status, CourierJobStatus.depositing);
     expect(history.messagesFor(peer).single.status, DeliveryStatus.pending);
     await service.close();
     expect(courier.ready, isFalse);

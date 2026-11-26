@@ -170,6 +170,8 @@ class CourierDeliveryAdapter extends ChangeNotifier {
     _sawSeedQuota = quota;
     final snapshot = jsonEncode([
       service.directory.nodes.length,
+      service.availableForDeposit.map((node) => node.ownerId).toSet().toList()
+        ..sort(),
       for (final j in jobs) [j.id, j.status.name],
       errors,
     ]);
@@ -188,11 +190,14 @@ class CourierDeliveryAdapter extends ChangeNotifier {
         job = id == null ? null : service.jobs.find(id);
     if (job != null) {
       return errors[message.id] ??
-          courierStatusLabel(job.status, service.availableDepositRoots);
+          courierStatusLabel(job.status, service.depositRootCount(peer));
     }
     if (id != null && errors.containsKey(message.id)) return errors[message.id];
     if (!canQueue(peer)) return 'Offline delivery needs an updated app';
-    return null;
+    final roots = service.depositRootCount(peer);
+    return roots < 2
+        ? courierStatusLabel(CourierJobStatus.waitingForNodes, roots)
+        : null;
   }
 
   String? groupLabelFor(GroupMessage message) {
@@ -212,6 +217,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
   }
 
   Timer? _timer;
+  StreamSubscription<void>? _directoryChanges;
   bool _closed = false, _started = false, _pumping = false;
   int _nodeCursor = 0;
   int _depositCursor = 0;
@@ -225,6 +231,9 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       ready &&
       _contact(peer)?.verified == true &&
       _contact(peer)!.capabilities.contains('courier-v1');
+  bool Function(String peer)? isPeerOnline;
+  bool canDeposit(String peer) =>
+      canQueue(peer) && service.depositRootCount(peer) >= 2;
   Map<String, double> incomingFor(String? peer) => _incoming[peer] ?? const {};
   void _guard() {
     if (!active) throw StateError('Delivery identity changed');
@@ -245,12 +254,26 @@ class CourierDeliveryAdapter extends ChangeNotifier {
     _guard();
     _started = true;
     if (automatic) {
-      _timer = Timer.periodic(
-        const Duration(seconds: 5),
-        (_) => unawaited(pump()),
-      );
+      _directoryChanges = service.directory.changes.listen((_) {
+        if (!ready) return;
+        _present();
+        unawaited(pump());
+      });
       unawaited(pump());
+      _schedulePump();
     }
+  }
+
+  void _schedulePump() {
+    if (!ready) return;
+    final working =
+        _offers.isNotEmpty ||
+        _preparing.isNotEmpty ||
+        _depositing.isNotEmpty ||
+        _receiving.isNotEmpty;
+    _timer = Timer(Duration(seconds: working ? 5 : 12), () {
+      unawaited(pump().whenComplete(_schedulePump));
+    });
   }
 
   Future<DeliveryEnvelope> envelopeFor(String peer, PeerMessage message) async {
@@ -390,8 +413,8 @@ class CourierDeliveryAdapter extends ChangeNotifier {
         if (!_owns(peer, message)) return;
         await service.jobs.allocate(
           jobId,
-          service.directory.nodes
-              .where((n) => n.ownerId != service.ownerId)
+          service.availableForDeposit
+              .where((node) => node.ownerId != peer)
               .toList(),
         );
         errors.remove(message.id);
@@ -537,7 +560,10 @@ class CourierDeliveryAdapter extends ChangeNotifier {
             m.status == DeliveryStatus.pending) {
           history.setStatus(job.peerId, m.id, DeliveryStatus.sent);
         }
-        _scheduleDeposit(job, () => _owns(job.peerId, m));
+        _scheduleDeposit(
+          job,
+          () => _owns(job.peerId, m) && isPeerOnline?.call(job.peerId) != true,
+        );
       }
       _queueGroups();
       final nodes = service.directory.nodes
@@ -680,6 +706,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
         c.group(m.groupId)?.contains(peer) == true &&
         m.recipients.contains(peer) &&
         !m.receipts.containsKey(peer) &&
+        !(m.manifest != null && c.isMessageRemoved(m)) &&
         c.messagesFor(m.groupId).contains(m) &&
         !c.isDeletedDelivery(m.groupId, m.senderId, m.id, m.sentAt);
   }
@@ -716,11 +743,16 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       await service.forgetDelivered(job.id);
       return;
     }
-    _scheduleDeposit(job, () => _groupOwns(m, job.peerId));
+    _scheduleDeposit(
+      job,
+      () => _groupOwns(m, job.peerId) && !c.isPeerOnline(job.peerId),
+    );
   }
 
   void _scheduleDeposit(CourierSenderJob job, bool Function() current) {
-    if (job.terminal ||
+    if (!current() ||
+        service.depositRootCount(job.peerId) < 2 ||
+        job.terminal ||
         job.status == CourierJobStatus.stored ||
         job.manifest == null ||
         job.status == CourierJobStatus.paused ||
@@ -756,6 +788,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
         if (m.senderId != service.ownerId) continue;
         for (final peer in m.recipients) {
           if ((canQueue(peer) || c.supportsCourier(peer)) &&
+              !c.isPeerOnline(peer) &&
               _groupOwns(m, peer) &&
               (m.courierJobs[peer] == null ||
                   service.jobs.find(m.courierJobs[peer]!)?.manifest == null)) {
@@ -830,8 +863,8 @@ class CourierDeliveryAdapter extends ChangeNotifier {
     if (!_groupOwns(m, peer)) return;
     await service.jobs.allocate(
       id,
-      service.directory.nodes
-          .where((n) => n.ownerId != service.ownerId)
+      service.availableForDeposit
+          .where((node) => node.ownerId != peer)
           .toList(),
     );
   }
@@ -841,6 +874,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
     _closed = true;
     groupSink?.controller.onGapRepaired = null;
     _timer?.cancel();
+    await _directoryChanges?.cancel();
     receiver.close();
     await service.close();
     dispose();

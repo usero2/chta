@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cht/account/account_models.dart';
 import 'package:cht/chat/messaging_service.dart';
 import 'package:cht/chat/peer_history.dart';
+import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/relay/relay_network.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cht/chat/chat_attachment.dart';
@@ -19,22 +20,30 @@ import '../relay/relay_network_test.dart' as f;
 import 'durable_outbox_test.dart' show Store;
 
 class Account extends f.SessionAccount {
-  Account(String id, List<String> peers)
+  Account(String id, List<String> peers, {this.messageActions = true})
     : all = {for (final p in peers) p: f.SessionAccount(id, p)},
       super(id, peers.first);
   final Map<String, f.SessionAccount> all;
+  final bool messageActions;
+  int contactReads = 0;
   @override
   Future<ContactView> inspectContactCard(String source) async => ContactView(
     identityId: source,
     displayName: source,
     fingerprint: '',
     verified: true,
-    capabilities: const ['peer-sessions-v2', 'files-v2'],
+    capabilities: [
+      'peer-sessions-v2',
+      'files-v2',
+      if (messageActions) PeerMessageAction.capability,
+    ],
   );
   @override
-  Future<List<ContactView>> contacts() async => [
-    for (final id in all.keys) await inspectContactCard(id),
-  ];
+  Future<List<ContactView>> contacts() async {
+    contactReads++;
+    return [for (final id in all.keys) await inspectContactCard(id)];
+  }
+
   @override
   Future<Map<String, Object?>> groupCall(
     String op,
@@ -89,6 +98,188 @@ class _Peer extends rtc.FakePeer {
 }
 
 void main() {
+  test('reply, edit and delete exchange acknowledgements through encrypted relay chat', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final histories = <String, PeerHistory>{};
+    final services = <String, MessagingService>{};
+    try {
+      for (final name in ['alice', 'bob']) {
+        final peer = name == 'alice' ? 'bob' : 'alice';
+        final history = PeerHistory(store: Store());
+        await history.load(name);
+        histories[name] = history;
+        final network = RelayNetwork(f.Crypto(name), connector: hub.connect);
+        await network.addSeed(f.a);
+        final service = MessagingService(
+          ownerId: name,
+          account: Account(name, [peer]),
+          network: network,
+          history: history,
+          ownCard: () async => name,
+          observeNetwork: false,
+        );
+        services[name] = service;
+        await service.start();
+      }
+      final alice = services['alice']!, bob = services['bob']!;
+      final received = histories['bob']!;
+      await alice.queueText('bob', 'Original text', id: 'original');
+      await f.until(() => received.visibleMessagesFor('alice').isNotEmpty);
+      await expectLater(
+        bob.queueMessageAction(
+          'alice',
+          PeerMessageActionKind.delete,
+          'original',
+        ),
+        throwsFormatException,
+      );
+      await bob.queueMessageAction(
+        'alice',
+        PeerMessageActionKind.reply,
+        'original',
+        text: 'Reply text',
+      );
+      await f.until(
+        () => histories['alice']!.visibleMessagesFor('bob').length == 2,
+      );
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.edit,
+        'original',
+        text: 'Updated',
+      );
+      await f.until(
+        () => received.presentationFor('alice', 'original')?.text == 'Updated',
+      );
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.delete,
+        'original',
+      );
+      await f.until(
+        () => received.presentationFor('alice', 'original')?.deleted == true,
+      );
+      await f.until(
+        () =>
+            histories['alice']!.queuedMessages.isEmpty &&
+            received.queuedMessages.isEmpty,
+      );
+      expect(received.visibleMessagesFor('alice').map((m) => m.body), [
+        'Original text',
+        'Reply text',
+      ]);
+      expect(
+        received.visibleMessagesFor('alice').last.action?.target,
+        'original',
+      );
+    } finally {
+      for (final service in services.values) {
+        await service.close();
+      }
+      for (final history in histories.values) {
+        history.dispose();
+      }
+    }
+  });
+
+  test('first message can use Relay while Direct opens and the next message upgrades', () async {
+    final hub = f.Hub(f.a, 'relay-a'), factories = [_Factory(), _Factory()];
+    factories[0].other = factories[1];
+    factories[1].other = factories[0];
+    final services = <MessagingService>[], histories = <PeerHistory>[];
+    try {
+      for (var i = 0; i < 2; i++) {
+        final name = i == 0 ? 'alice' : 'bob';
+        final friend = i == 0 ? 'bob' : 'alice';
+        final history = PeerHistory(store: Store());
+        await history.load(name);
+        histories.add(history);
+        final network = RelayNetwork(f.Crypto(name), connector: hub.connect);
+        await network.addSeed(f.a);
+        final service = MessagingService(
+          ownerId: name,
+          account: Account(name, [friend]),
+          network: network,
+          history: history,
+          ownCard: () async => name,
+          cache: _Cache(),
+          peerFactory: factories[i],
+          observeNetwork: false,
+        );
+        services.add(service);
+        await service.start();
+      }
+      final alice = services.first;
+      await alice.prepareConversation('bob');
+      await f.until(
+        () => services.every((service) => service.onlinePeers.isNotEmpty),
+      );
+      await alice.queueText('bob', 'first', id: 'relay-first');
+      await f.until(
+        () =>
+            histories.first.messagesFor('bob').first.status ==
+            DeliveryStatus.delivered,
+      );
+      await f.until(
+        () => factories.every((factory) => factory.peers.isNotEmpty),
+      );
+      expect(alice.filesFor('bob')?.ready, isFalse);
+      for (final factory in factories) {
+        factory.peers.last.onReadyChanged?.call(true);
+      }
+      await f.until(
+        () =>
+            alice.filesFor('bob')?.ready == true &&
+            services.last.filesFor('alice')?.ready == true,
+      );
+      await alice.queueText('bob', 'second', id: 'direct-next');
+      await f.until(
+        () =>
+            histories.first.messagesFor('bob').last.status ==
+            DeliveryStatus.delivered,
+      );
+      expect(
+        factories.first.peers.last.sent
+            .map(jsonDecode)
+            .whereType<Map>()
+            .map((packet) => packet['id']),
+        contains('direct-next'),
+      );
+      expect(histories.last.messagesFor('alice').map((message) => message.id), [
+        'relay-first',
+        'direct-next',
+      ]);
+
+      await f.until(
+        () =>
+            alice.filesFor('bob')?.supportsMessageActions == true &&
+            services.last.filesFor('alice')?.supportsMessageActions == true,
+      );
+      await hub.stop();
+      await f.until(() => alice.relayFor('bob')?.authenticated == false);
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.edit,
+        'direct-next',
+        text: 'Edited over Direct',
+      );
+      await f.until(
+        () =>
+            histories.last.presentationFor('alice', 'direct-next')?.text ==
+            'Edited over Direct',
+      );
+      await f.until(() => histories.first.queuedMessages.isEmpty);
+      expect(alice.filesFor('bob')?.ready, isTrue);
+    } finally {
+      for (final service in services) {
+        await service.close();
+      }
+      for (final history in histories) {
+        history.dispose();
+      }
+    }
+  });
+
   test(
     'events arriving during a slow receiver save drain immediately afterward',
     () async {

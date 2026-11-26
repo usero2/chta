@@ -15,6 +15,8 @@ object ChatRuntime {
     var running = false
         private set
 
+    fun serviceStopped() { running = false }
+
     fun showLockAction(context: Context): Boolean =
         context.getSharedPreferences("cht.runtime", Context.MODE_PRIVATE)
             .getBoolean("showLockAction", true)
@@ -22,17 +24,20 @@ object ChatRuntime {
     fun configure(context: Context, active: Boolean, enabled: Boolean?,
                   showLockAction: Boolean?): Map<String, Boolean> {
         val prefs = context.getSharedPreferences("cht.runtime", Context.MODE_PRIVATE)
+        val actionChanged = showLockAction != null && showLockAction != this.showLockAction(context)
         if (enabled != null) prefs.edit().putBoolean("enabled", enabled).apply()
         if (showLockAction != null) {
             prefs.edit().putBoolean("showLockAction", showLockAction).apply()
         }
         val keepAlive = prefs.getBoolean("enabled", true)
         if (active && keepAlive) {
-            val intent = Intent(context, ChatReceiveService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
-            else context.startService(intent)
-            running = true
-        } else {
+            if (!running || actionChanged) {
+                val intent = Intent(context, ChatReceiveService::class.java)
+                if (Build.VERSION.SDK_INT >= 26 && !running) context.startForegroundService(intent)
+                else context.startService(intent)
+                running = true
+            }
+        } else if (running) {
             running = false
             context.stopService(Intent(context, ChatReceiveService::class.java))
         }

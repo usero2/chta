@@ -6,9 +6,11 @@ class AccountScheduler {
   final bool Function() hasWork;
   final Future<void> Function() tick;
   Timer? _timer;
+  int _idleSeconds = 5;
   bool _closed = false, _scheduled = false, _running = false, _again = false;
   void request() {
     if (_closed) return;
+    _idleSeconds = 5;
     _timer?.cancel();
     _timer = null;
     if (_running) {
@@ -35,7 +37,13 @@ class AccountScheduler {
         if (_again) {
           request();
         } else {
-          _timer = Timer(Duration(seconds: hasWork() ? 1 : 5), request);
+          final active = hasWork();
+          if (active) _idleSeconds = 5;
+          _timer = Timer(Duration(seconds: active ? 1 : _idleSeconds), () {
+            _timer = null;
+            if (_idleSeconds < 15) _idleSeconds += 5;
+            unawaited(_run());
+          });
         }
       }
     }

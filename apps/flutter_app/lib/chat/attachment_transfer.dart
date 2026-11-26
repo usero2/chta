@@ -5,7 +5,8 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import 'chat_attachment.dart';
-import 'resumable_attachment_transfer.dart' show TransferInterrupted;
+import 'resumable_attachment_transfer.dart'
+    show ResumableAttachmentTransfer, TransferInterrupted;
 
 typedef PacketSender = Future<void> Function(
   String packetId,
@@ -70,6 +71,19 @@ class AttachmentTransfer {
     this.ackTimeout = const Duration(seconds: 45),
   });
   static bool isPacketId(String id) => id.startsWith(_idPrefix);
+
+  static bool isBulkPacket(String id, String text) {
+    if (isPacketId(id)) return true;
+    if (!ResumableAttachmentTransfer.isPacketId(id)) return false;
+    // Resumable control frames share the packet ID prefix with file chunks.
+    try {
+      final packet = jsonDecode(text);
+      return packet is Map && packet['type'] == 'part';
+    } on FormatException {
+      return false;
+    }
+  }
+
   static bool _validId(String id) =>
       RegExp(r'^[A-Za-z0-9_-]{1,100}$').hasMatch(id);
   static String _packetId(String id, int index) => '$_idPrefix${id}_$index';

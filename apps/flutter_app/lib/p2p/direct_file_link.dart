@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import '../delivery/priority_send_queue.dart';
 import 'direct_peer.dart';
 import 'direct_peer_factory.dart';
 
@@ -63,6 +64,7 @@ class DirectFileLink {
   int _signalNumber = 0;
   int _candidateCount = 0;
   int _pendingSends = 0;
+  PrioritySendQueue _sends = PrioritySendQueue();
   Timer? _retryTimer;
   Timer? _negotiationTimer;
   Future<void> _signalTail = Future.value();
@@ -365,7 +367,7 @@ class DirectFileLink {
     await sendSignal(id, text);
   }
 
-  Future<void> send(String frame) async {
+  Future<void> send(String frame, {bool bulk = false}) async {
     if (utf8.encode(frame).length > maxFrameBytes) {
       throw const FormatException('Direct frame is too large');
     }
@@ -376,7 +378,8 @@ class DirectFileLink {
     if (!_ready || peer == null || peerId == null || session == null) {
       throw StateError('Direct link is not ready');
     }
-    if (_pendingSends >= maxPendingSends) {
+    // Leave room for text and receipts even if file writes are backed up.
+    if (_pendingSends >= (bulk ? maxPendingSends - 4 : maxPendingSends)) {
       throw StateError('Direct send queue is full');
     }
     if (!_current(generation, peerId, session)) {
@@ -384,10 +387,15 @@ class DirectFileLink {
     }
     _pendingSends++;
     try {
-      await peer.send(frame);
-      if (!_current(generation, peerId, session)) {
-        throw StateError('Direct peer changed');
-      }
+      await _sends.add(() async {
+        if (!_ready || !_current(generation, peerId, session)) {
+          throw StateError('Direct peer changed');
+        }
+        await peer.send(frame);
+        if (!_current(generation, peerId, session)) {
+          throw StateError('Direct peer changed');
+        }
+      }, bulk: bulk);
     } finally {
       _pendingSends--;
     }
@@ -395,6 +403,7 @@ class DirectFileLink {
 
   Future<void> _reset() async {
     _generation++;
+    _sends = PrioritySendQueue();
     _negotiationTimer?.cancel();
     _negotiationTimer = null;
     _retryTimer?.cancel();

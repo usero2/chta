@@ -20,7 +20,7 @@ void main() {
       expect(find.text('Relays'), findsOneWidget);
       expect(find.text('Saved relays'), findsNothing);
       expect(find.text('Internet connections'), findsNothing);
-      expect(find.text('0/50 online · 0 connecting · 1 saved'), findsOneWidget);
+      expect(find.text('0 online · 0 connecting · 1 saved'), findsOneWidget);
       final row = find.byKey(const ValueKey('relay-entry-$_endpoint'));
       await tester.ensureVisible(row);
       await tester.pump();
@@ -64,10 +64,7 @@ void main() {
     tester,
   ) async {
     await _mount(tester, width: 1200, relayCount: 1000);
-    expect(
-      find.text('0/50 online · 0 connecting · 1000 saved'),
-      findsOneWidget,
-    );
+    expect(find.text('0 online · 0 connecting · 1000 saved'), findsOneWidget);
     expect(find.text('Show more (980 remaining)'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('relay-entry-wss://relay19.example.com/cht')),
@@ -101,7 +98,7 @@ void main() {
       width: 320,
       connector: (endpoint) async => _OnlineSocket(endpoint),
     );
-    expect(find.text('1/50 online · 0 connecting · 1 saved'), findsOneWidget);
+    expect(find.text('1 online · 0 connecting · 1 saved'), findsOneWidget);
     expect(find.text('Online'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

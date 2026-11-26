@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../account/account_models.dart';
+import '../chat/attachment_transfer.dart';
 import '../chat/chunked_attachment_bridge.dart';
 import '../chat/file_transfer_progress.dart';
 import '../chat/peer_history.dart';
+import '../chat/peer_message_action.dart';
 import '../chat/resumable_attachment_transfer.dart';
 import 'direct_file_link.dart';
 
@@ -21,6 +23,7 @@ class PeerFileController {
     required this.onReceipt,
     this.onChanged,
     this.autoResume = true,
+    this.advertiseMessageActions = false,
     bool automaticRetries = true,
     int Function()? clock,
     DirectPeerFactory? peerFactory,
@@ -44,6 +47,9 @@ class PeerFileController {
   }
   final String ownerId;
   final bool autoResume;
+  final bool advertiseMessageActions;
+  bool _actionCapabilitySent = false, _peerActionCapability = false;
+  bool get supportsMessageActions => ready && _peerActionCapability;
   final ChunkedAttachmentBridge cache;
   final PeerHistory history;
   final DirectSignalSender sendEncryptedControl;
@@ -168,6 +174,8 @@ class PeerFileController {
       _pendingMessages.clear();
       progress.clear();
       _peer = selected;
+      _actionCapabilitySent = false;
+      _peerActionCapability = false;
       _capable = capable;
       _seedValidated = false;
       _noiseValidated = false;
@@ -180,6 +188,7 @@ class PeerFileController {
     if (changed || link.peerId != (capable ? selected : null)) {
       _bindRevision++;
     } else {
+      _announceActions();
       unawaited(resumePending());
       return _bindFuture ?? Future.value();
     }
@@ -398,6 +407,7 @@ class PeerFileController {
         'text': text,
         'sentAt': sentAt,
       }),
+      bulk: AttachmentTransfer.isBulkPacket(id, text),
     );
   }
 
@@ -488,7 +498,15 @@ class PeerFileController {
           return;
         }
         final id = value['id'] as String;
-        if (value['type'] == 'receipt') {
+        if (advertiseMessageActions &&
+            value['type'] == 'capability' &&
+            id == PeerMessageAction.capability) {
+          if (!_peerActionCapability) {
+            _peerActionCapability = true;
+            onChanged?.call();
+          }
+          if (value['reply'] != true) await _sendActionCapability(reply: true);
+        } else if (value['type'] == 'receipt') {
           final time = value['receivedAt'];
           if (time is int && time >= 0 && time <= 8640000000000000) {
             _pendingMessages.remove(id);
@@ -542,9 +560,35 @@ class PeerFileController {
     }
   }
 
+  Future<void> _sendActionCapability({bool reply = false}) => link.send(
+    jsonEncode({
+      'v': 1,
+      'type': 'capability',
+      'id': PeerMessageAction.capability,
+      'reply': reply,
+    }),
+  );
+
+  void _announceActions() {
+    if (!advertiseMessageActions || !ready || _actionCapabilitySent) return;
+    _actionCapabilitySent = true;
+    final generation = _generation;
+    unawaited(
+      _sendActionCapability().catchError((Object _) {
+        if (_generation == generation) _actionCapabilitySent = false;
+      }),
+    );
+  }
+
   void _linkChanged() {
     if (_closed) return;
-    if (!ready) _transfer?.disconnected();
+    if (!ready) {
+      _actionCapabilitySent = false;
+      _peerActionCapability = false;
+      _transfer?.disconnected();
+    } else {
+      _announceActions();
+    }
     onChanged?.call();
     if (ready) unawaited(resumePending());
   }

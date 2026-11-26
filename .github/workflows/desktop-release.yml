@@ -2,7 +2,7 @@ name: Desktop packages
 
 on:
   push:
-    branches: [release/desktop-48]
+    branches: [release/desktop-50]
   workflow_dispatch:
 
 permissions:

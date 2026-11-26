@@ -26,6 +26,7 @@ import 'chunked_attachment_bridge.dart';
 import 'durable_outbox.dart';
 import 'delivery_feedback.dart';
 import 'peer_history.dart';
+import 'peer_message_action.dart';
 import 'resumable_attachment_transfer.dart';
 import 'account_scheduler.dart';
 import 'file_transfer_progress.dart';
@@ -48,10 +49,11 @@ class MessagingService extends ChangeNotifier {
   }) : _monitor = observeNetwork
            ? networkMonitor ?? createNetworkMonitor()
            : null {
+    courier?.isPeerOnline = isOnline;
     outbox = DurableOutbox(
       ownerId: ownerId,
       history: history,
-      isReady: (peer) => isOnline(peer) || courier?.canQueue(peer) == true,
+      isReady: (peer) => isOnline(peer) || canDepositOffline(peer),
       send: _sendQueued,
     );
     _recovery = NetworkRecovery(
@@ -91,6 +93,19 @@ class MessagingService extends ChangeNotifier {
       _active &&
       (_peers[peer]?.relay.authenticated == true ||
           _peers[peer]?.files?.ready == true);
+  bool canDepositOffline(String peer) =>
+      !isOnline(peer) && courier?.canDeposit(peer) == true;
+  bool supportsMessageActions(String peer) {
+    final connection = _peers[peer];
+    if (connection?.files?.supportsMessageActions == true) return true;
+    if (connection?.relay.authenticated == true) {
+      return connection!.relay.supports(PeerMessageAction.capability);
+    }
+    return connection?.supportsMessageActions == true ||
+        _contacts[peer]?.capabilities.contains(PeerMessageAction.capability) ==
+            true;
+  }
+
   RelayChat? relayFor(String? peer) => _peers[peer]?.relay;
   PeerFileController? filesFor(String? peer) => _peers[peer]?.files;
   Map<String, double> incomingProgressFor(String? peer) => {
@@ -147,7 +162,7 @@ class MessagingService extends ChangeNotifier {
       (history.queuedMessages.any(
             (e) =>
                 !e.value.deliveryPaused &&
-                (isOnline(e.key) || courier?.canQueue(e.key) == true),
+                (isOnline(e.key) || canDepositOffline(e.key)),
           ) ||
           _peers.values.any(
             (p) =>
@@ -210,7 +225,10 @@ class MessagingService extends ChangeNotifier {
         }),
       );
     }
-    if (_active) _changed();
+    if (_active) {
+      _changed();
+      unawaited(courier?.pump());
+    }
   }
 
   Future<void> refreshContacts() async {
@@ -315,6 +333,7 @@ class MessagingService extends ChangeNotifier {
         cache: cache!,
         history: history,
         autoResume: false,
+        advertiseMessageActions: true,
         automaticRetries: false,
         sendEncryptedControl: relay.sendControl,
         sendSeedControl: seed == null
@@ -373,16 +392,31 @@ class MessagingService extends ChangeNotifier {
     }
   }
 
+  Future<void> prepareConversation(String id) async {
+    final contact = _contacts[id];
+    if (!_active || contact == null) return;
+    await _prepareRoutes(_ensurePeer(contact));
+  }
+
   Future<void> reconnect(String id) async {
     await refreshContacts();
     final contact = _contacts[id];
     if (contact == null) return;
     final peer = _ensurePeer(contact);
     if (!peer.relay.authenticated) peer.relay.select(id);
-    await network.tick();
-    await _updateFiles(peer);
     outbox.retryNow(id);
+    await _prepareRoutes(peer);
     _notify();
+  }
+
+  Future<void> _prepareRoutes(_PeerConnection peer) async {
+    outbox.pump();
+    await Future.wait([
+      _bindFiles(peer),
+      peer.relay.warmConnection(),
+      network.tick(),
+    ]);
+    if (_owns(peer)) outbox.pump();
   }
 
   void cancelConversation(String id) {
@@ -480,6 +514,74 @@ class MessagingService extends ChangeNotifier {
     _notify();
   }
 
+  Future<void> queueMessageAction(
+    String peer,
+    PeerMessageActionKind kind,
+    String targetId, {
+    String? text,
+  }) async {
+    if (!_contacts.containsKey(peer)) await refreshContacts();
+    final contact = _contacts[peer];
+    if (!_active || contact == null || !supportsMessageActions(peer)) {
+      throw const FormatException('Both apps need to support message actions.');
+    }
+    final target = history
+        .visibleMessagesFor(peer)
+        .where((m) => m.id == targetId)
+        .firstOrNull;
+    if (target == null ||
+        history.presentationFor(peer, targetId)?.deleted == true ||
+        kind != PeerMessageActionKind.reply && target.incoming ||
+        kind == PeerMessageActionKind.edit && target.hasAttachment) {
+      throw const FormatException('This message can no longer be changed.');
+    }
+    final id = '${PeerMessageAction.idPrefix}${RelayChat.randomId()}';
+    final encoded = PeerMessageAction(kind, targetId, text).encode();
+    if (PeerMessageAction.decode(id, encoded) == null) {
+      throw const FormatException('Enter a message.');
+    }
+    if (!RelayChat.messageFits(encoded) ||
+        utf8
+                .encode(
+                  jsonEncode({
+                    'v': 1,
+                    'type': 'packet',
+                    'id': id,
+                    'text': encoded,
+                    'sentAt': 9999999999999,
+                  }),
+                )
+                .length >
+            DirectFileLink.maxFrameBytes) {
+      throw const FormatException('This message is too long for this action.');
+    }
+    _ensurePeer(contact);
+    if (kind == PeerMessageActionKind.delete && target.hasAttachment) {
+      await cancelFile(peer, targetId);
+    }
+    var sentAt = DateTime.now().millisecondsSinceEpoch;
+    if (kind == PeerMessageActionKind.edit) {
+      for (final row in history.messagesFor(peer)) {
+        if (!row.incoming &&
+            row.action?.kind == PeerMessageActionKind.edit &&
+            row.action?.target == targetId &&
+            (row.sentAtMilliseconds ?? -1) >= sentAt) {
+          sentAt = row.sentAtMilliseconds! + 1;
+        }
+      }
+    }
+    await queueMessage(
+      peer,
+      PeerMessage(
+        id: id,
+        text: encoded,
+        incoming: false,
+        status: DeliveryStatus.pending,
+        sentAtMilliseconds: sentAt,
+      ),
+    );
+  }
+
   Future<void> queueMessage(String peer, PeerMessage message) async {
     if (!message.hasAttachment) validateOutgoingText(message.text);
     if (!_contacts.containsKey(peer)) await refreshContacts();
@@ -524,6 +626,18 @@ class MessagingService extends ChangeNotifier {
     if (_active && _started) _scheduler.request();
   }
 
+  Future<void> _bindFiles(_PeerConnection peer) async {
+    if (!_owns(peer) || peer.binding) return;
+    peer.binding = true;
+    try {
+      await _updateFiles(peer);
+    } catch (caught) {
+      if (_owns(peer)) error = caught;
+    } finally {
+      peer.binding = false;
+    }
+  }
+
   Future<void> _updateFiles(_PeerConnection peer) async {
     if (!_owns(peer)) return;
     await peer.files?.updatePeer(
@@ -535,6 +649,9 @@ class MessagingService extends ChangeNotifier {
       peer.contact.identityId,
       authenticated: peer.relay.authenticated,
     );
+    if (peer.files?.supportsMessageActions == true) {
+      peer.supportsMessageActions = true;
+    }
     _updateRepair(peer);
   }
 
@@ -593,16 +710,7 @@ class MessagingService extends ChangeNotifier {
       for (final peer in _peers.values.toList()) {
         if (!_owns(peer)) continue;
         unawaited(peer.relay.tick());
-        if (!peer.binding) {
-          peer.binding = true;
-          unawaited(
-            _updateFiles(peer)
-                .catchError((Object caught) {
-                  error = caught;
-                })
-                .whenComplete(() => peer.binding = false),
-          );
-        }
+        unawaited(_bindFiles(peer));
         if (!peer.polling) unawaited(_pollPeer(peer));
       }
       outbox.pump();
@@ -653,6 +761,11 @@ class MessagingService extends ChangeNotifier {
   }) async {
     if (!_owns(peer)) return;
     final id = event.messageId;
+    if (event.type == 'authenticated') {
+      peer.supportsMessageActions = peer.relay.supports(
+        PeerMessageAction.capability,
+      );
+    }
     if (id == null) return;
     final peerId = peer.contact.identityId;
     if (event.type == 'delivered') {
@@ -828,13 +941,18 @@ class MessagingService extends ChangeNotifier {
       DeliveryRoute(
         id: 'direct',
         kind: DeliveryRouteKind.direct,
-        authenticated: peer.files?.ready == true,
+        authenticated:
+            peer.files?.ready == true &&
+            (message.action == null || peer.files!.supportsMessageActions),
         send: () => peer.files!.sendDirectPacket(message.id, text, sentAt),
       ),
       DeliveryRoute(
         id: 'relay',
         kind: DeliveryRouteKind.relay,
-        authenticated: peer.relay.authenticated,
+        authenticated:
+            peer.relay.authenticated &&
+            (message.action == null ||
+                peer.relay.supports(PeerMessageAction.capability)),
         send: () => peer.relay.sendMessage(
           message.id,
           text,
@@ -842,12 +960,17 @@ class MessagingService extends ChangeNotifier {
           isCurrent: () => _owns(peer) && message.queuedForDelivery,
         ),
       ),
-      if (courier != null)
+      if (canDepositOffline(peer.contact.identityId))
         DeliveryRoute(
           id: 'courier',
           kind: DeliveryRouteKind.courier,
-          authenticated: courier!.canQueue(peer.contact.identityId),
-          send: () => courier!.queue(peer.contact.identityId, message),
+          authenticated: true,
+          send: () {
+            if (!canDepositOffline(peer.contact.identityId)) {
+              throw const TransferInterrupted('Waiting for a delivery route');
+            }
+            return courier!.queue(peer.contact.identityId, message);
+          },
         ),
     ], isCurrent: () => _owns(peer) && message.queuedForDelivery);
     message.lastAttemptWasDirect =
@@ -856,30 +979,12 @@ class MessagingService extends ChangeNotifier {
   }
 
   Future<void> _sendQueued(String id, PeerMessage message) async {
-    final peer = _peers[id];
-    if (message.hasAttachment &&
-        courier?.canQueue(id) == true &&
-        peer != null) {
-      final size = message.attachmentRef?.size ?? message.attachment?.size ?? 0;
-      if (!isOnline(id) ||
-          (size > ChatAttachment.relayMaxBytes && peer.files?.ready != true)) {
-        await courier!.queue(id, message);
-        return;
-      }
-      try {
-        await _sendQueuedLive(id, message);
-        return;
-      } on TransferRejected {
-        rethrow;
-      } catch (_) {
-        if (_owns(peer) &&
-            message.queuedForDelivery &&
-            !message.deliveryPaused) {
-          await courier!.queue(id, message);
-          return;
-        }
-        rethrow;
-      }
+    if (message.action != null && !supportsMessageActions(id)) {
+      throw const TransferInterrupted('Waiting for an updated app');
+    }
+    if (message.hasAttachment && canDepositOffline(id)) {
+      await courier!.queue(id, message);
+      return;
     }
     await _sendQueuedLive(id, message);
   }
@@ -983,6 +1088,7 @@ class _PeerConnection {
   final RelayChat relay;
   final DeliveryRouter router;
   bool binding = false, polling = false;
+  bool supportsMessageActions = false;
   PeerFileController? files;
   RelayPeerSync? sync;
   GapRepair? repair;

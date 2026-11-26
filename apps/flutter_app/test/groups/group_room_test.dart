@@ -93,6 +93,7 @@ void main() {
             ownId: ownerId,
             messages: messages,
             enabled: true,
+            onMessageAction: (_, _, _) async => true,
             onlineCount: 1,
             onSend: (text) async {
               sentText = text;
@@ -136,9 +137,36 @@ void main() {
     expect(find.text('draft.pdf'), findsOneWidget);
     expect(find.textContaining('40%'), findsOneWidget);
     expect(find.textContaining('2 sources'), findsOneWidget);
-    expect(find.text('1/2 delivered'), findsOneWidget);
+    expect(find.text('1/2 delivered'), findsNothing);
+    expect(find.byIcon(Icons.schedule), findsOneWidget);
+    expect(find.byIcon(Icons.done_all), findsNothing);
     expect(fileOpenCount, 0);
     expect(tester.takeException(), isNull);
+
+    await tester.longPress(find.byKey(Key('group-message-$peerId:incoming')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('message-action-grid')), findsOneWidget);
+    expect(find.text('Copy'), findsOneWidget);
+    expect(find.text('Reply'), findsOneWidget);
+    expect(find.text('Edit'), findsNothing);
+    expect(find.text('Delete'), findsNothing);
+    await tester.tapAt(const Offset(10, 40));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(Key('group-message-actions-$ownerId:sent')));
+    await tester.pumpAndSettle();
+    expect(find.text('Reply'), findsOneWidget);
+    expect(find.text('Edit'), findsOneWidget);
+    expect(find.text('Delete'), findsOneWidget);
+    await tester.tap(find.text('Message info'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('1/2 delivered', findRichText: true),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byTooltip('Group actions'), warnIfMissed: false);
     await tester.pumpAndSettle();

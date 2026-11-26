@@ -3,11 +3,102 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cht/chat/peer_history.dart';
+import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/chat/peer_history_store_native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'message actions survive reload and apply only to the original author',
+    () async {
+      final store = _Store();
+      final h = PeerHistory(store: store);
+      await h.load('owner');
+      void add(String id, String text, int time, {bool incoming = true}) {
+        h.add(
+          'friend',
+          PeerMessage(
+            id: id,
+            text: text,
+            incoming: incoming,
+            status: DeliveryStatus.delivered,
+            sentAtMilliseconds: time,
+          ),
+        );
+      }
+
+      void action(
+        String suffix,
+        PeerMessageActionKind kind,
+        String target,
+        int time, {
+        String? text,
+        bool incoming = true,
+      }) {
+        add(
+          '${PeerMessageAction.idPrefix}$suffix',
+          PeerMessageAction(kind, target, text).encode(),
+          time,
+          incoming: incoming,
+        );
+      }
+
+      action('a', PeerMessageActionKind.edit, 'original', 3, text: 'newest');
+      add('original', 'original text', 1);
+      action('b', PeerMessageActionKind.edit, 'original', 2, text: 'older');
+      action(
+        'c',
+        PeerMessageActionKind.edit,
+        'original',
+        4,
+        text: 'forged',
+        incoming: false,
+      );
+      action(
+        'reply',
+        PeerMessageActionKind.reply,
+        'original',
+        7,
+        text: 'my reply',
+        incoming: false,
+      );
+      expect(h.presentationFor('friend', 'original')?.text, 'newest');
+      expect(
+        h
+            .visibleMessagesFor('friend')
+            .map((m) => h.presentationFor('friend', m.id)?.text),
+        [
+          'original',
+          'reply',
+        ].map((id) => id == 'original' ? 'newest' : 'my reply'),
+      );
+      action(
+        'forged',
+        PeerMessageActionKind.delete,
+        'original',
+        8,
+        incoming: false,
+      );
+      expect(h.presentationFor('friend', 'original')?.deleted, false);
+      action('delete', PeerMessageActionKind.delete, 'original', 6);
+      await h.flush();
+      final reopened = PeerHistory(store: store);
+      await reopened.load('owner');
+      expect(reopened.presentationFor('friend', 'original')?.deleted, true);
+      expect(
+        reopened.presentationFor('friend', 'original')?.text,
+        'Message deleted',
+      );
+      expect(
+        reopened.visibleMessagesFor('friend').last.action?.target,
+        'original',
+      );
+      h.dispose();
+      reopened.dispose();
+    },
+  );
+
   test('forwardable delivery metadata survives storage and deletion blocks unseen old backfill', () async {
     var time = 2000;
     final store = _Store(), h = PeerHistory(store: store, clock: () => time);

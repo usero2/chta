@@ -53,19 +53,26 @@ class DeliveryRouter {
     _holdUntil = _clock() + 30000;
   }
 
-  List<DeliveryRoute> rank(List<DeliveryRoute> routes, {String? avoid}) {
+  List<DeliveryRoute> rank(
+    List<DeliveryRoute> routes, {
+    String? avoid,
+    bool preferDirect = false,
+  }) {
     final now = _clock();
     final usable = routes
         .where((r) => r.authenticated && healthFor(r.id).cooldownUntil <= now)
         .toList();
-    int score(DeliveryRoute r) =>
-        r.kind.index * 100 +
-        (r.id == avoid ? 1000 : 0) -
-        (r.kind != DeliveryRouteKind.courier &&
-                r.id == _preferred &&
-                now < _holdUntil
-            ? 200
-            : 0);
+    final affinity = preferDirect ? 1 : 200;
+    int score(DeliveryRoute route) {
+      final wasPreferred =
+          route.kind != DeliveryRouteKind.courier &&
+          route.id == _preferred &&
+          now < _holdUntil;
+      return route.kind.index * 100 +
+          (route.id == avoid ? 1000 : 0) -
+          (wasPreferred ? affinity : 0);
+    }
+
     usable.sort((a, b) => score(a).compareTo(score(b)));
     return usable;
   }
@@ -98,7 +105,8 @@ class DeliveryRouter {
       healthFor(previous.route).failed(now, _jitter());
       onMetric?.call(DeliveryMetric.receiptTimeout);
     }
-    final usable = rank(routes, avoid: previous?.route);
+    // A recent Relay receipt keeps affinity only among routes of the same kind.
+    final usable = rank(routes, avoid: previous?.route, preferDirect: true);
     Object? error;
     StackTrace? stack;
     for (final route in usable) {

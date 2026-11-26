@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 
 import '../chat/chat_attachment.dart';
+import '../chat/peer_message_action.dart';
+import '../chat/message_timestamp.dart';
 import '../chat/media_item.dart';
 import '../chat/media_thumbnail.dart';
 import '../chat/widgets/attachment_content.dart';
 import '../chat/widgets/media_album.dart';
+import '../chat/widgets/message_action_menu.dart';
 import '../chat/widgets/message_bubble.dart';
+import '../chat/widgets/message_day_divider.dart';
 import '../chat/widgets/message_composer.dart';
 import '../profile/profile_avatar.dart';
 import 'group_models.dart';
@@ -28,6 +32,7 @@ class GroupRoom extends StatelessWidget {
     this.error,
     this.onBack,
     this.deliveryLabel,
+    this.onMessageAction,
     super.key,
   });
 
@@ -45,122 +50,177 @@ class GroupRoom extends StatelessWidget {
   final VoidCallback? onBack;
   final String? disabledReason, error;
   final String? Function(GroupMessage)? deliveryLabel;
+  final Future<bool> Function(PeerMessageActionKind, GroupMessage, String?)?
+  onMessageAction;
 
   @override
-  Widget build(BuildContext context) => ColoredBox(
-    color: const Color(0xFF1A1A1A),
-    child: SafeArea(
-      child: Column(
-        children: [
-          SizedBox(
-            height: 68,
-            child: Row(
-              children: [
-                if (onBack != null)
-                  IconButton(
-                    onPressed: onBack,
-                    tooltip: 'Back to chats',
-                    icon: const Icon(Icons.arrow_back),
+  Widget build(BuildContext context) {
+    final visible = messages.where((m) => m.isVisible).toList();
+    final timeline = messageTimeline(
+      visible,
+      timeOf: (message) =>
+          visibleMessageTime(message.sentAt, message.receivedAt),
+      authorOf: (message) => message.senderId,
+    );
+    final presentations = projectMessageActions(
+      messages.map((m) => m.actionEntry),
+    );
+    return ColoredBox(
+      color: const Color(0xFF1A1A1A),
+      child: SafeArea(
+        child: Column(
+          children: [
+            SizedBox(
+              height: 68,
+              child: Row(
+                children: [
+                  if (onBack != null)
+                    IconButton(
+                      onPressed: onBack,
+                      tooltip: 'Back to chats',
+                      icon: const Icon(Icons.arrow_back),
+                    ),
+                  const SizedBox(width: 8),
+                  const CircleAvatar(
+                    backgroundColor: Color(0xFF3A3A3C),
+                    child: Icon(Icons.groups_outlined),
                   ),
-                const SizedBox(width: 8),
-                const CircleAvatar(
-                  backgroundColor: Color(0xFF3A3A3C),
-                  child: Icon(Icons.groups_outlined),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        group.name,
-                        key: const Key('group-room-title'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          group.name,
+                          key: const Key('group-room-title'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
+                        Text(
+                          !enabled
+                              ? disabledReason ??
+                                    (group.closed
+                                        ? 'Group closed'
+                                        : 'Waiting for group owner')
+                              : '${group.members.length} members · $onlineCount online',
+                          key: const Key('group-room-status'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: enabled
+                                ? const Color(0xFF8E8E93)
+                                : const Color(0xFFE4B75B),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    key: const Key('group-actions-menu'),
+                    tooltip: 'Group actions',
+                    onSelected: (action) {
+                      if (action == 'details') onDetails();
+                      if (action == 'delete') onDelete();
+                    },
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(
+                        value: 'details',
+                        child: Text('Group details'),
                       ),
-                      Text(
-                        !enabled
-                            ? disabledReason ??
-                                  (group.closed
-                                      ? 'Group closed'
-                                      : 'Waiting for group owner')
-                            : '${group.members.length} members · $onlineCount online',
-                        key: const Key('group-room-status'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: enabled
-                              ? const Color(0xFF8E8E93)
-                              : const Color(0xFFE4B75B),
-                          fontSize: 12,
-                        ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: Text('Delete group'),
                       ),
                     ],
                   ),
-                ),
-                PopupMenuButton<String>(
-                  key: const Key('group-actions-menu'),
-                  tooltip: 'Group actions',
-                  onSelected: (action) {
-                    if (action == 'details') onDetails();
-                    if (action == 'delete') onDelete();
-                  },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(
-                      value: 'details',
-                      child: Text('Group details'),
-                    ),
-                    PopupMenuItem(value: 'delete', child: Text('Delete group')),
-                  ],
-                ),
-                const SizedBox(width: 4),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: ListView.builder(
-              key: const Key('group-message-list'),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 20),
-              itemCount: messages.length,
-              itemBuilder: (context, index) => _message(messages[index]),
-            ),
-          ),
-          if (error != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              child: Text(
-                error!,
-                style: const TextStyle(color: Colors.redAccent),
+                  const SizedBox(width: 4),
+                ],
               ),
             ),
-          IgnorePointer(
-            ignoring: !enabled,
-            child: Opacity(
-              opacity: enabled ? 1 : .5,
-              child: MessageComposer(
-                key: const Key('group-message-composer'),
-                inputKey: const Key('group-message-input'),
-                sendKey: const Key('group-send-message'),
-                onSend: onSend,
-                onSendBatch: onSendBatch,
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                key: const Key('group-message-list'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 20,
+                ),
+                itemCount: visible.length,
+                itemBuilder: (context, index) => _message(
+                  context,
+                  visible[index],
+                  presentations,
+                  timeline[index],
+                ),
               ),
             ),
-          ),
-        ],
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 6,
+                ),
+                child: Text(
+                  error!,
+                  style: const TextStyle(color: Colors.redAccent),
+                ),
+              ),
+            IgnorePointer(
+              ignoring: !enabled,
+              child: Opacity(
+                opacity: enabled ? 1 : .5,
+                child: MessageComposer(
+                  key: const Key('group-message-composer'),
+                  inputKey: const Key('group-message-input'),
+                  sendKey: const Key('group-send-message'),
+                  onSend: onSend,
+                  onSendBatch: onSendBatch,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 
-  Widget _message(GroupMessage message) {
+  Widget _message(
+    BuildContext context,
+    GroupMessage message,
+    Map<String, MessagePresentation> presentations,
+    MessageTimelineMarker time,
+  ) {
     final incoming = message.senderId != ownId;
-    final manifest = message.manifest;
+    final presentation = presentations[message.key]!;
+    final deleted = presentation.deleted;
+    final manifest = deleted ? null : message.manifest;
+    final quote = message.action?.target;
     final content = manifest == null ? null : _fileContent(message, manifest);
+    final receipts = message.recipients
+        .map((id) => message.receipts[id])
+        .nonNulls;
+    final recipientCount = message.recipients.length;
+    final delivered =
+        !incoming &&
+        !deleted &&
+        recipientCount > 0 &&
+        receipts.length == recipientCount;
+    final sentToGroup = !incoming && !deleted && recipientCount > 0;
+    final receiveTime = incoming
+        ? message.receivedAt
+        : delivered
+        ? receipts.reduce((latest, next) => latest > next ? latest : next)
+        : null;
+    final deliveryDetail = sentToGroup
+        ? deliveryLabel?.call(message) ??
+              '${receipts.length}/$recipientCount delivered'
+        : null;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Column(
@@ -168,6 +228,7 @@ class GroupRoom extends StatelessWidget {
             ? CrossAxisAlignment.start
             : CrossAxisAlignment.end,
         children: [
+          if (time.dayLabel case final label?) MessageDayDivider(label),
           if (incoming)
             Padding(
               padding: const EdgeInsets.only(left: 2, bottom: 4),
@@ -188,32 +249,133 @@ class GroupRoom extends StatelessWidget {
                 ],
               ),
             ),
+          if (!deleted && quote != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Text(
+                presentations[quote]?.text ?? 'Original message unavailable',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ),
           MessageBubble(
             media:
                 manifest?.mimeType.toLowerCase().startsWith('image/') == true ||
                 manifest?.mimeType.toLowerCase().startsWith('video/') == true,
             bubbleKey: Key('group-message-${message.key}'),
-            text: message.text,
+            actions: deleted
+                ? null
+                : MessageActionMenu(
+                    buttonKey: ValueKey('group-message-actions-${message.key}'),
+                    canEdit: !incoming && manifest == null,
+                    canDelete: !incoming,
+                    copyText: manifest == null ? presentation.text : null,
+                    onSelected: enabled && onMessageAction != null
+                        ? (action) => _selectAction(
+                            context,
+                            action,
+                            message,
+                            presentation.text,
+                          )
+                        : null,
+                    unavailableReason: !enabled
+                        ? 'Message actions are unavailable in this group.'
+                        : onMessageAction == null
+                        ? 'All members need to support message actions.'
+                        : null,
+                  ),
+            text: presentation.text,
             incoming: incoming,
             sentAtMilliseconds: message.sentAt,
-            receivedAtMilliseconds: message.receivedAt,
+            receivedAtMilliseconds: receiveTime,
+            showTime: time.showTime,
+            deliveryIndicator: delivered
+                ? MessageDeliveryIndicator.delivered
+                : sentToGroup
+                ? MessageDeliveryIndicator.pending
+                : null,
+            deliveryDetail: deliveryDetail,
             content: content,
           ),
-          if (!incoming)
-            Padding(
-              padding: const EdgeInsets.only(right: 4, top: 1),
-              child: Text(
-                deliveryLabel?.call(message) ??
-                    (message.receipts.isEmpty
-                        ? 'Pending · 0/${message.recipients.length} delivered'
-                        : '${message.receipts.length}/${message.recipients.length} delivered'),
-                key: Key('group-delivery-${message.key}'),
-                style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 11),
-              ),
+          if (presentation.pending || presentation.edited)
+            Text(
+              presentation.pending
+                  ? (deleted ? 'Delete pending' : 'Edit pending')
+                  : 'Edited',
+              style: Theme.of(context).textTheme.labelSmall,
             ),
         ],
       ),
     );
+  }
+
+  Future<void> _selectAction(
+    BuildContext context,
+    PeerMessageActionKind action,
+    GroupMessage message,
+    String text,
+  ) async {
+    if (action == PeerMessageActionKind.delete) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Delete message for everyone?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true && context.mounted) {
+        await onMessageAction?.call(action, message, null);
+      }
+      return;
+    }
+    final reply = action == PeerMessageActionKind.reply;
+    var input = reply ? '' : text;
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(reply ? 'Reply' : 'Edit message'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (reply) Text(text, maxLines: 2, overflow: TextOverflow.ellipsis),
+            TextFormField(
+              autofocus: true,
+              initialValue: input,
+              minLines: 2,
+              maxLines: 8,
+              onChanged: (value) => input = value,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, input.trim()),
+            child: Text(reply ? 'Send' : 'Save'),
+          ),
+        ],
+      ),
+    );
+    if (value != null &&
+        value.isNotEmpty &&
+        (reply || value != text) &&
+        context.mounted) {
+      await onMessageAction?.call(action, message, value);
+    }
   }
 
   Widget _fileContent(GroupMessage message, SwarmManifest manifest) {

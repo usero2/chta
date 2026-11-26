@@ -19,6 +19,8 @@ import '../chat/chat_models.dart';
 import '../chat/widgets/conversation_list.dart';
 import '../chat/widgets/contact_details_sheet.dart';
 import '../chat/peer_history.dart';
+import '../chat/message_timestamp.dart';
+import '../chat/peer_message_action.dart';
 import '../chat/chat_attachment.dart';
 import '../chat/attachment_files.dart';
 import '../chat/attachment_export.dart';
@@ -32,6 +34,8 @@ import '../chat/media_batch.dart';
 import '../chat/media_item.dart';
 import '../chat/media_thumbnail.dart';
 import '../chat/widgets/media_album.dart';
+import '../chat/widgets/message_action_menu.dart';
+import '../chat/widgets/message_day_divider.dart';
 import '../chat/widgets/message_bubble.dart';
 import '../chat/widgets/message_composer.dart';
 import '../chat/widgets/attachment_content.dart';
@@ -179,7 +183,8 @@ class ConnectionPageState extends State<ConnectionPage> {
   }
 
   List<PeerMessage> get messages =>
-      history.messagesFor(widget.targetContactId ?? peerIdentityId);
+      history.visibleMessagesFor(widget.targetContactId ?? peerIdentityId);
+  String? _replyTo;
   Timer? timer;
   Timer? answerTimer;
   String connectionState = 'new';
@@ -488,7 +493,6 @@ class ConnectionPageState extends State<ConnectionPage> {
       if (service.network.hostEnabled && relayHost != null) {
         unawaited(_startPublicRelay());
       }
-      await _connectAutomatically(force: true);
       return;
     }
     final account = widget.accountBridge;
@@ -614,6 +618,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     }
     if (peerIdentityId != id) {
       peerGeneration++;
+      _replyTo = null;
       attachments.reset();
       transferProgress.clear();
       incomingProgress.clear();
@@ -1742,9 +1747,21 @@ class ConnectionPageState extends State<ConnectionPage> {
   Future<void> _loadTargetContact() async {
     final targetId = widget.targetContactId;
     final generation = peerGeneration;
+    final messaging = widget.messaging;
     if (targetId == null) {
       if (mounted) setState(() => targetContact = null);
       return;
+    }
+    if (messaging != null) {
+      // Begin routing from the verified account cache while the view loads.
+      scheduleMicrotask(() {
+        if (!mounted ||
+            generation != peerGeneration ||
+            messaging != widget.messaging) {
+          return;
+        }
+        unawaited(messaging.prepareConversation(targetId).catchError((_) {}));
+      });
     }
     if (widget.messaging == null &&
         ((authenticated && peerIdentityId != targetId) ||
@@ -1766,7 +1783,10 @@ class ConnectionPageState extends State<ConnectionPage> {
           this.contacts = contacts;
           targetContact = selected;
         });
-        if (selected?.verified == true) unawaited(_connectAutomatically());
+        if (selected?.verified == true &&
+            messaging?.relayFor(targetId) == null) {
+          unawaited(_connectAutomatically());
+        }
         unawaited(_updateFilePeer(authenticated));
       }
     } catch (caught) {
@@ -2218,10 +2238,23 @@ class ConnectionPageState extends State<ConnectionPage> {
           final draft = value ?? messageInput.text;
           final text = draft.trim();
           if (text.isEmpty) return false;
-          await widget.messaging!.queueText(
-            id,
-            RelayChat.messageFits(draft) ? text : draft,
-          );
+          final reply = _replyTo;
+          if (reply == null) {
+            await widget.messaging!.queueText(
+              id,
+              RelayChat.messageFits(draft) ? text : draft,
+            );
+          } else {
+            await widget.messaging!.queueMessageAction(
+              id,
+              PeerMessageActionKind.reply,
+              reply,
+              text: text,
+            );
+            if (mounted && widget.targetContactId == id && _replyTo == reply) {
+              setState(() => _replyTo = null);
+            }
+          }
         }
         if (mounted) setState(() => error = null);
         return true;
@@ -2595,7 +2628,7 @@ class ConnectionPageState extends State<ConnectionPage> {
           title: contact.displayName,
           avatarBase64: contact.avatarBase64,
           preview:
-              history.messagesFor(contact.identityId).lastOrNull?.text ??
+              history.conversationPreview(contact.identityId) ??
               ((contact.identityId == peerIdentityId && authenticated) ||
                       (fileController?.ready == true &&
                           fileController?.peerId == contact.identityId)
@@ -2603,7 +2636,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                   : 'Offline'),
           updatedAtMilliseconds:
               history
-                  .messagesFor(contact.identityId)
+                  .visibleMessagesFor(contact.identityId)
                   .lastOrNull
                   ?.sentAtMilliseconds ??
               0,
@@ -2653,10 +2686,105 @@ class ConnectionPageState extends State<ConnectionPage> {
     );
   }
 
+  Future<void> _messageAction(
+    PeerMessageActionKind action,
+    PeerMessage message,
+    String text,
+  ) async {
+    final peer = widget.targetContactId, service = widget.messaging;
+    if (peer == null || service == null) return;
+    if (action == PeerMessageActionKind.reply) {
+      setState(() => _replyTo = message.id);
+      return;
+    }
+    try {
+      if (action == PeerMessageActionKind.edit) {
+        var revised = text;
+        final edit = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Edit message'),
+            content: TextFormField(
+              initialValue: text,
+              autofocus: true,
+              maxLines: 8,
+              minLines: 2,
+              onChanged: (value) => revised = value,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, revised.trim()),
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        );
+        if (edit == null ||
+            edit == text ||
+            !mounted ||
+            widget.targetContactId != peer) {
+          return;
+        }
+        await service.queueMessageAction(peer, action, message.id, text: edit);
+      } else {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Delete message for everyone?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted || widget.targetContactId != peer) {
+          return;
+        }
+        await service.queueMessageAction(peer, action, message.id);
+      }
+      if (mounted && widget.targetContactId == peer) {
+        setState(() => error = null);
+      }
+    } on FormatException catch (failure) {
+      if (mounted && widget.targetContactId == peer) {
+        setState(() => error = failure.message);
+      }
+    } catch (_) {
+      if (mounted && widget.targetContactId == peer) {
+        setState(() => error = 'Could not save message. Try again.');
+      }
+    }
+  }
+
   Widget _peerMessageList() {
+    final peer = widget.targetContactId ?? peerIdentityId ?? '';
+    final presentations = history.presentationsFor(peer);
+    final supportsActions =
+        widget.messaging?.supportsMessageActions(peer) == true;
     final groups = groupMedia<PeerMessage>(
       messages,
-      (message) => message.hasAttachment ? _mediaItem(message).groupKey : null,
+      (message) =>
+          message.hasAttachment && presentations[message.id]?.deleted != true
+          ? _mediaItem(message).groupKey
+          : null,
+    );
+    final timeline = messageTimeline(
+      groups,
+      timeOf: (group) => visibleMessageTime(
+        group.first.sentAtMilliseconds,
+        group.first.receivedAtMilliseconds,
+      ),
+      authorOf: (group) => group.first.incoming,
     );
     return ListView.builder(
       key: ValueKey('peer-history-${widget.targetContactId ?? peerIdentityId}'),
@@ -2683,11 +2811,18 @@ class ConnectionPageState extends State<ConnectionPage> {
             ],
           );
         }
-        final messageIndex = index - (incomingProgress.isEmpty ? 0 : 1);
-        final group = groups[groups.length - 1 - messageIndex];
+        final messageIndex =
+            groups.length - 1 - index + (incomingProgress.isEmpty ? 0 : 1);
+        final group = groups[messageIndex];
+        final time = timeline[messageIndex];
         final message = group.first;
+        final presentation = presentations[message.id]!;
+        final deleted = presentation.deleted;
         final album =
-            message.hasAttachment && _mediaItem(message).groupKey != null;
+            !deleted &&
+            message.hasAttachment &&
+            _mediaItem(message).groupKey != null;
+        final quoted = message.action?.target;
         final hasTransferStatus = group.any(
           (item) => MessageTransferStatus.visibleFor(
             item,
@@ -2695,34 +2830,100 @@ class ConnectionPageState extends State<ConnectionPage> {
             legacyProgress: transferProgress[item.id],
           ),
         );
-        final peer = widget.targetContactId ?? peerIdentityId ?? '';
-        final courier = widget.messaging?.courier;
-        final courierLabel =
-            message.courierJobId != null ||
-                widget.messaging?.isOnline(peer) == false
-            ? courier?.labelFor(peer, message)
+        final outgoing = !message.incoming && !deleted;
+        final delivered =
+            outgoing &&
+            group.every((item) => item.status == DeliveryStatus.delivered);
+        final pending = outgoing
+            ? group
+                  .where(
+                    (item) =>
+                        !item.deliveryPaused &&
+                        (item.status == DeliveryStatus.pending ||
+                            item.status == DeliveryStatus.sent),
+                  )
+                  .firstOrNull
             : null;
+        final service = widget.messaging;
+        final courierLabel =
+            pending != null &&
+                (pending.courierJobId != null ||
+                    service?.isOnline(peer) == false)
+            ? service?.courier?.labelFor(peer, pending)
+            : null;
+        final deliveryDetail = delivered
+            ? 'Delivered'
+            : courierLabel ??
+                  (pending == null
+                      ? null
+                      : deliveryFeedback(
+                          pending.status,
+                          needsDirect:
+                              (pending.attachmentRef?.size ??
+                                      pending.attachment?.size ??
+                                      0) >
+                                  ChatAttachment.relayMaxBytes &&
+                              fileController?.ready != true,
+                          online: service?.isOnline(peer) ?? authenticated,
+                        ));
         return Column(
           crossAxisAlignment: message.incoming
               ? CrossAxisAlignment.start
               : CrossAxisAlignment.end,
           children: [
-            MessageBubble(
-              text: message.text,
-              media: const {'image', 'video'}.contains(
-                message.attachment?.kind ?? message.attachmentRef?.kind,
+            if (time.dayLabel case final label?) MessageDayDivider(label),
+            if (!deleted && quoted != null)
+              _replyContext(
+                presentations[quoted]?.text ?? 'Original message unavailable',
               ),
+            MessageBubble(
+              text: presentation.text,
+              media:
+                  !deleted &&
+                  const {'image', 'video'}.contains(
+                    message.attachment?.kind ?? message.attachmentRef?.kind,
+                  ),
               incoming: message.incoming,
               sentAtMilliseconds: message.sentAtMilliseconds,
               receivedAtMilliseconds: message.receivedAtMilliseconds,
+              showTime: time.showTime,
+              deliveryIndicator: delivered
+                  ? MessageDeliveryIndicator.delivered
+                  : pending != null && !hasTransferStatus
+                  ? MessageDeliveryIndicator.pending
+                  : null,
+              deliveryDetail: deliveryDetail,
               bubbleKey: Key('peer-message-${message.id}'),
+              actions: deleted
+                  ? null
+                  : MessageActionMenu(
+                      buttonKey: ValueKey('peer-message-actions-${message.id}'),
+                      canEdit: !message.incoming && !message.hasAttachment,
+                      canDelete: !message.incoming,
+                      copyText: message.hasAttachment
+                          ? null
+                          : presentation.text,
+                      unavailableReason: supportsActions
+                          ? null
+                          : 'Both apps need to support message actions.',
+                      onSelected: supportsActions
+                          ? (action) => _messageAction(
+                              action,
+                              message,
+                              presentation.text,
+                            )
+                          : null,
+                    ),
               onRetry:
-                  !album &&
+                  !deleted &&
+                      !album &&
                       message.status == DeliveryStatus.failed &&
                       attachmentUsesRelay == null
                   ? () => _send(retry: message)
                   : null,
-              content: album
+              content: deleted
+                  ? null
+                  : album
                   ? MediaAlbum(
                       key: ValueKey(_mediaItem(message).groupKey),
                       items: group.map(_mediaItem).toList(),
@@ -2740,89 +2941,94 @@ class ConnectionPageState extends State<ConnectionPage> {
                       message: message,
                     ),
             ),
-            if (message.queuedForDelivery &&
-                !message.deliveryPaused &&
-                message.status != DeliveryStatus.delivered &&
-                (!hasTransferStatus || courierLabel != null))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6, right: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.schedule, size: 11),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        courierLabel ??
-                            deliveryFeedback(
-                              message.status,
-                              needsDirect:
-                                  (message.attachmentRef?.size ??
-                                          message.attachment?.size ??
-                                          0) >
-                                      ChatAttachment.relayMaxBytes &&
-                                  fileController?.ready != true,
-                              online:
-                                  widget.messaging?.isOnline(
-                                    widget.targetContactId ??
-                                        peerIdentityId ??
-                                        '',
-                                  ) ==
-                                  true,
-                            ) ??
-                            '',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF8E8E93),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+            if (presentation.pending || presentation.edited)
+              Text(
+                presentation.pending
+                    ? (deleted ? 'Delete pending' : 'Edit pending')
+                    : 'Edited',
+                style: Theme.of(context).textTheme.labelSmall,
               ),
-            for (final item in group) ...[
-              MessageTransferStatus(
-                message: item,
-                snapshot: fileController?.progress[item.id],
-                legacyProgress: transferProgress[item.id],
-              ),
-              if (widget.messaging case final service?)
-                FileTransferActions(
+            for (final item in group)
+              if (presentations[item.id]?.deleted != true) ...[
+                MessageTransferStatus(
                   message: item,
-                  onPause: () => service.pauseFile(
-                    widget.targetContactId ?? peerIdentityId ?? '',
-                    item.id,
-                  ),
-                  onResume: () => service.resumeFile(
-                    widget.targetContactId ?? peerIdentityId ?? '',
-                    item.id,
-                  ),
-                  onCancel: () => service.cancelFile(
-                    widget.targetContactId ?? peerIdentityId ?? '',
-                    item.id,
-                  ),
+                  snapshot: fileController?.progress[item.id],
+                  legacyProgress: transferProgress[item.id],
                 ),
-            ],
+                if (widget.messaging case final service?)
+                  FileTransferActions(
+                    message: item,
+                    onPause: () => service.pauseFile(
+                      widget.targetContactId ?? peerIdentityId ?? '',
+                      item.id,
+                    ),
+                    onResume: () => service.resumeFile(
+                      widget.targetContactId ?? peerIdentityId ?? '',
+                      item.id,
+                    ),
+                    onCancel: () => service.cancelFile(
+                      widget.targetContactId ?? peerIdentityId ?? '',
+                      item.id,
+                    ),
+                  ),
+              ],
           ],
         );
       },
     );
   }
 
-  Widget _peerComposer() => MessageComposer(
-    key: ValueKey('composer-${widget.targetContactId ?? peerIdentityId}'),
-    controller: messageInput,
-    inputKey: const Key('peer-message-input'),
-    sendKey: const Key('send-peer-message'),
-    onSend: (text) => _send(value: text),
-    onSendAttachment: _sendAttachment,
-    onSendBatch: _sendBatch,
-    pickAttachments: widget.pickAttachments,
-    maxAttachmentBytes: fileController?.supportsLargeFiles == true
-        ? ChatAttachment.maxStreamedBytes
-        : usingRelayChat
-        ? ChatAttachment.relayMaxBytes
-        : ChatAttachment.maxBytes,
+  Widget _replyContext(String text, {VoidCallback? onClear}) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.reply, size: 16),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+        ),
+        if (onClear != null)
+          IconButton(
+            onPressed: onClear,
+            tooltip: 'Cancel reply',
+            icon: const Icon(Icons.close, size: 16),
+          ),
+      ],
+    ),
+  );
+
+  Widget _peerComposer() => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (_replyTo case final target?)
+        _replyContext(
+          history.presentationFor(widget.targetContactId, target)?.text ??
+              'Original message unavailable',
+          onClear: () => setState(() => _replyTo = null),
+        ),
+      MessageComposer(
+        key: ValueKey('composer-${widget.targetContactId ?? peerIdentityId}'),
+        controller: messageInput,
+        inputKey: const Key('peer-message-input'),
+        sendKey: const Key('send-peer-message'),
+        onSend: (text) => _send(value: text),
+        onSendAttachment: _replyTo == null ? _sendAttachment : null,
+        onSendBatch: _replyTo == null ? _sendBatch : null,
+        pickAttachments: widget.pickAttachments,
+        maxAttachmentBytes: fileController?.supportsLargeFiles == true
+            ? ChatAttachment.maxStreamedBytes
+            : usingRelayChat
+            ? ChatAttachment.relayMaxBytes
+            : ChatAttachment.maxBytes,
+      ),
+    ],
   );
 
   Widget _peerRoom({VoidCallback? onBack}) {
@@ -3404,7 +3610,7 @@ class ConnectionPageState extends State<ConnectionPage> {
               ),
               title: const Text('Relays'),
               subtitle: Text(
-                '${network.online.length}/${network.connectionLimit} online · ${network.connectingCount} connecting · ${urls.length} saved',
+                '${network.online.length} online · ${network.connectingCount} connecting · ${urls.length} saved',
               ),
             ),
             if (relayHost?.running != true && shareableRelay != null)
@@ -3454,7 +3660,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     decoration: const InputDecoration(
-                      labelText: 'Relay limit (50 to 1000)',
+                      labelText: 'Relay connection ceiling (50 to 1000)',
                     ),
                   ),
                 ),

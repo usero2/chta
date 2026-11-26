@@ -109,6 +109,11 @@ class CourierService extends ChangeNotifier {
       .toList();
   int get availableDepositRoots =>
       availableForDeposit.map((node) => node.ownerId).toSet().length;
+  int depositRootCount(String recipient) => availableForDeposit
+      .where((node) => node.ownerId != recipient)
+      .map((node) => node.ownerId)
+      .toSet()
+      .length;
   String diagnosticReport() => diagnostics.export(
     seed: seed == null
         ? DiagnosticSeed.unavailable
@@ -445,8 +450,15 @@ class CourierService extends ChangeNotifier {
     if (limit < 1 || limit > 16) {
       throw const FormatException('Invalid deposit batch');
     }
-    final nodes = availableForDeposit;
-    await jobs.allocate(id, nodes, replicas: nodes.length >= 3 ? 2 : 1);
+    if (isCurrent?.call() == false) return 0;
+    final recipient = jobs.find(id)?.peerId;
+    if (recipient == null) return 0;
+    final nodes = availableForDeposit
+        .where((node) => node.ownerId != recipient)
+        .toList();
+    final roots = nodes.map((node) => node.ownerId).toSet().length;
+    if (roots < 2) return 0;
+    await jobs.allocate(id, nodes, replicas: roots >= 3 ? 2 : 1);
     _guard();
     final pending = await jobs.pendingDeposits(id, limit: limit);
     if (pending.isEmpty) return 0;

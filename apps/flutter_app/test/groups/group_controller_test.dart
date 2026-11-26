@@ -1,13 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:cht/chat/attachment_source.dart';
 import 'package:cht/chat/chat_attachment.dart';
+import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/groups/group_controller.dart';
 import 'package:cht/groups/group_crypto_bridge.dart';
 import 'package:cht/groups/group_models.dart';
+import 'package:cht/groups/group_transport.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'swarm_test.dart' show Blobs, Attachments;
@@ -78,6 +80,8 @@ class ModelCrypto implements GroupCryptoBridge {
             'epoch': 1,
           }),
         };
+      case 'inspect':
+        return Map<String, Object?>.from(jsonDecode(args['event'] as String));
       case 'authorize':
         return {'allowed': true};
       case 'invite':
@@ -117,6 +121,45 @@ class ModelCrypto implements GroupCryptoBridge {
       default:
         throw UnimplementedError(op);
     }
+  }
+}
+
+class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
+  final _frames = StreamController<GroupPeerFrame>.broadcast(sync: true);
+
+  @override
+  Stream<GroupPeerFrame> get frames => _frames.stream;
+  @override
+  Future<void> start() async {}
+  @override
+  Future<void> connect(String id) async {}
+  @override
+  bool connected(String id) => id == friend;
+  @override
+  Set<String> get onlinePeers => {friend};
+  void advertiseActions() => _frames.add(
+    const GroupPeerFrame(friend, 'chta-group-cap-v1:message-actions-v1'),
+  );
+  @override
+  Future<void> send(String id, String text) async {}
+  @override
+  Future<void> close() => _frames.close();
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+
+  void event(String peer, String source, int sequence) {
+    final id = sequence.toRadixString(16).padLeft(32, '0');
+    _frames.add(
+      GroupPeerFrame(
+        peer,
+        'chta-group-doc-v1:${jsonEncode({
+          'id': id,
+          'i': 0,
+          'n': 1,
+          'data': base64UrlEncode(utf8.encode(jsonEncode({'v': 1, 'jobId': id, 'type': 'event', 'source': source}))),
+        })}',
+      ),
+    );
   }
 }
 
@@ -161,6 +204,105 @@ class FailOnceReceiptBlobs extends Blobs {
 }
 
 void main() {
+  test(
+    'group actions persist, preserve signed originals and ignore foreign edits',
+    () async {
+      final blobs = Blobs();
+      GroupController create() => GroupController(
+        ownerId: owner,
+        crypto: ModelCrypto()..includeFriend = true,
+        blobs: blobs,
+        attachments: Attachments(),
+        displayName: () => 'Alice',
+      );
+      var c = create();
+      addTearDown(() => c.close());
+      await c.initialize();
+      await c.createGroup('Team', []);
+      expect(await c.sendText(gid, 'Original'), isTrue);
+      final original = c.messagesFor(gid).single;
+      expect(
+        await c.sendMessageAction(
+          gid,
+          PeerMessageActionKind.edit,
+          original,
+          text: 'Blocked',
+        ),
+        isFalse,
+      );
+      final frames = IncomingGroupFrames();
+      await c.attachTransport(frames);
+      frames.advertiseActions();
+      await c.flush();
+      expect(c.supportsMessageActions(gid), isTrue);
+      expect(
+        await c.sendMessageAction(
+          gid,
+          PeerMessageActionKind.reply,
+          original,
+          text: 'In reply',
+        ),
+        isTrue,
+      );
+      expect(
+        await c.sendMessageAction(
+          gid,
+          PeerMessageActionKind.edit,
+          original,
+          text: 'Revised',
+        ),
+        isTrue,
+      );
+      final forged = PeerMessageAction(
+        PeerMessageActionKind.delete,
+        original.key,
+        null,
+      );
+      frames.event(
+        friend,
+        jsonEncode({
+          'groupId': gid,
+          'epoch': 1,
+          'sender': friend,
+          'id': '${PeerMessageAction.idPrefix}forged',
+          'kind': 'message',
+          'sentAt': 10,
+          'payload': jsonEncode({'text': forged.encode()}),
+        }),
+        1,
+      );
+      await c.flush();
+      await c.close();
+      c = create();
+      await c.initialize();
+      final rows = c.messagesFor(gid);
+      final view = projectMessageActions(rows.map((m) => m.actionEntry));
+      expect(rows.first.event, original.event);
+      expect(view.values.map((m) => m.text), ['Revised', 'In reply']);
+      expect(view[original.key]?.edited, isTrue);
+      expect(
+        rows
+            .where((m) => m.action?.createsMessage == true)
+            .single
+            .action
+            ?.target,
+        original.key,
+      );
+      expect(
+        await c.sendMessageAction(
+          gid,
+          PeerMessageActionKind.delete,
+          rows.first,
+        ),
+        isTrue,
+      );
+      final deleted = projectMessageActions(
+        c.messagesFor(gid).map((m) => m.actionEntry),
+      );
+      expect(deleted[original.key]?.deleted, isTrue);
+    },
+  );
+
   test('long group text survives restart as one Markdown swarm file', () async {
     final blobs = Blobs(), attachments = Attachments();
     GroupController create() => GroupController(

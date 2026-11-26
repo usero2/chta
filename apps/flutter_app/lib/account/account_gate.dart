@@ -924,7 +924,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         title: contact.displayName,
         avatarBase64: contact.avatarBase64,
         preview:
-            peerHistory.messagesFor(contact.identityId).lastOrNull?.text ??
+            peerHistory.conversationPreview(contact.identityId) ??
             friendRequests?.labelFor(contact.identityId) ??
             (onlinePeers.contains(contact.identityId)
                 ? 'Connected securely'
@@ -933,7 +933,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
                 : 'Not connected'),
         updatedAtMilliseconds:
             peerHistory
-                .messagesFor(contact.identityId)
+                .visibleMessagesFor(contact.identityId)
                 .lastOrNull
                 ?.sentAtMilliseconds ??
             0,
@@ -974,6 +974,10 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
           group: group,
           ownId: controller.ownerId,
           messages: controller.messagesFor(id),
+          onMessageAction: controller.supportsMessageActions(id)
+              ? (kind, target, text) =>
+                    controller.sendMessageAction(id, kind, target, text: text)
+              : null,
           enabled: controller.canSend(id),
           disabledReason: controller.disabledReason(id),
           error: controller.error,

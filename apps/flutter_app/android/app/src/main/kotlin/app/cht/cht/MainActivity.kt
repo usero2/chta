@@ -52,8 +52,10 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         ChatRuntime.engine = flutterEngine
         val appContext = applicationContext
-        val networkMonitor = ChatRuntime.networkMonitor ?: ChatNetworkMonitor(appContext).also { ChatRuntime.networkMonitor = it }
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/network").setStreamHandler(networkMonitor)
+        val networkMonitor = ChatRuntime.networkMonitor ?: ChatNetworkMonitor(appContext).also {
+            ChatRuntime.networkMonitor = it
+            EventChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/network").setStreamHandler(it)
+        }
         ChatRuntime.channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/runtime").apply {
             setMethodCallHandler { call, result ->
                 if (call.method != "configure") result.notImplemented()

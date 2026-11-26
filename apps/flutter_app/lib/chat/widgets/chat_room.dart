@@ -4,6 +4,8 @@ import '../chat_models.dart';
 import '../chat_attachment.dart';
 import '../media_item.dart';
 import '../media_thumbnail.dart';
+import '../message_timestamp.dart';
+import 'message_day_divider.dart';
 import 'media_album.dart';
 import 'message_bubble.dart';
 import 'attachment_content.dart';
@@ -48,6 +50,11 @@ class ChatRoom extends StatelessWidget {
     final groups = groupMedia<MessageView>(
       conversation.messages,
       (message) => message.attachment == null ? null : item(message).groupKey,
+    );
+    final timeline = messageTimeline(
+      groups,
+      timeOf: (group) => messageDateTime(group.first.sentAtMilliseconds),
+      authorOf: (group) => group.first.incoming,
     );
     return ColoredBox(
       color: const Color(0xFF1A1A1A),
@@ -105,25 +112,33 @@ class ChatRoom extends StatelessWidget {
                 final album =
                     message.attachment != null &&
                     item(message).groupKey != null;
-                return MessageBubble(
-                  media: const {
-                    'image',
-                    'video',
-                  }.contains(message.attachment?.kind),
-                  bubbleKey: const Key('message-bubble'),
-                  text: message.text,
-                  incoming: message.incoming,
-                  sentAtMilliseconds: message.sentAtMilliseconds,
-                  receivedAtMilliseconds: null,
-                  showReceivedTime: false,
-                  content: album
-                      ? MediaAlbum(items: group.map(item).toList())
-                      : message.attachment == null
-                      ? null
-                      : AttachmentContent(
-                          attachment: message.attachment!,
-                          incoming: message.incoming,
-                        ),
+                final time = timeline[index];
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (time.dayLabel case final label?)
+                      MessageDayDivider(label),
+                    MessageBubble(
+                      media: const {
+                        'image',
+                        'video',
+                      }.contains(message.attachment?.kind),
+                      bubbleKey: const Key('message-bubble'),
+                      text: message.text,
+                      incoming: message.incoming,
+                      sentAtMilliseconds: message.sentAtMilliseconds,
+                      receivedAtMilliseconds: null,
+                      showTime: time.showTime,
+                      content: album
+                          ? MediaAlbum(items: group.map(item).toList())
+                          : message.attachment == null
+                          ? null
+                          : AttachmentContent(
+                              attachment: message.attachment!,
+                              incoming: message.incoming,
+                            ),
+                    ),
+                  ],
                 );
               },
             ),

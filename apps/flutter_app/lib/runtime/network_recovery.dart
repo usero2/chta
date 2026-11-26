@@ -23,6 +23,7 @@ class NetworkRecovery {
     if (!state.available) {
       _timer?.cancel();
       _timer = null;
+      _pending = false;
       return;
     }
     if (before != null &&
@@ -55,7 +56,7 @@ class NetworkRecovery {
       /* Transports retain their normal backoff. */
     } finally {
       _running = false;
-      if (_pending && _active) _schedule();
+      if (_pending && _active && _last?.available != false) _schedule();
     }
   }
 

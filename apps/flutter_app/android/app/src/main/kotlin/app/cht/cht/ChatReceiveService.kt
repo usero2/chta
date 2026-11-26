@@ -13,6 +13,11 @@ import io.flutter.plugin.common.MethodChannel
 
 /** Keeps the existing Dart messaging isolate alive; never unlocks an identity. */
 class ChatReceiveService : Service() {
+    override fun onDestroy() {
+        ChatRuntime.serviceStopped()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

@@ -1,3 +1,5 @@
+import '../chat/peer_message_action.dart';
+
 import 'dart:convert';
 
 import 'swarm/swarm.dart';
@@ -100,6 +102,25 @@ class GroupMessage {
   final SwarmManifest? manifest;
   final Map<String, int> receipts;
   String get key => '$senderId:$id';
+  late final PeerMessageAction? action = manifest == null
+      ? PeerMessageAction.decode(id, text)
+      : null;
+  bool get isVisible =>
+      !id.startsWith(PeerMessageAction.idPrefix) ||
+      action?.createsMessage == true;
+  String get body => action?.createsMessage == true ? action!.text! : text;
+
+  MessageActionEntry get actionEntry => (
+    id: id,
+    key: key,
+    author: senderId,
+    text: body,
+    visible: isVisible,
+    hasAttachment: manifest != null,
+    pending: recipients.any((recipient) => !receipts.containsKey(recipient)),
+    sentAt: sentAt,
+    action: action,
+  );
   Map<String, Object?> toJson() => {
     'id': id,
     'groupId': groupId,

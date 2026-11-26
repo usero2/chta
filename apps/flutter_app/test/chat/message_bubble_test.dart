@@ -1,5 +1,6 @@
 import 'package:cht/chat/widgets/message_bubble.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -102,14 +103,34 @@ void main() {
       ),
     );
     expect(tester.takeException(), isNull);
-    expect(find.text('2024-01-02 03:04:05.006'), findsOneWidget);
-    expect(find.text('03:04:05.006'), findsOneWidget);
+    expect(find.text('03:04'), findsOneWidget);
+    expect(find.text('2024-01-02 03:04:05.006'), findsNothing);
     expect(
       tester.getTopLeft(find.byKey(const Key('bubble'))).dx,
-      lessThan(tester.getTopLeft(find.text('03:04:05.006')).dx),
+      lessThan(tester.getTopLeft(find.text('03:04')).dx),
     );
-    expect(find.byIcon(Icons.north_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.south_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.north_rounded), findsNothing);
+    expect(find.byIcon(Icons.south_rounded), findsNothing);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer();
+    await mouse.moveTo(tester.getCenter(find.text('03:04')));
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('2024-01-02 03:04:05.006', findRichText: true),
+      findsOneWidget,
+    );
+    await mouse.removePointer();
+    await tester.pumpAndSettle();
+    await tester.longPress(find.byKey(const Key('bubble')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Message info'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(
+      find.textContaining('2024-01-02 03:04:05.006', findRichText: true),
+      findsOneWidget,
+    );
   });
 
   testWidgets('markdown renders formatting and image alt text', (tester) async {

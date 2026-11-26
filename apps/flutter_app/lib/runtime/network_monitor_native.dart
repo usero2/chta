@@ -36,11 +36,11 @@ class _Monitor implements NetworkMonitor {
           }, onError: (Object _) {});
     } else {
       _timer = Timer.periodic(
-        const Duration(seconds: 5),
+        const Duration(seconds: 15),
         (_) => unawaited(_sample()),
       );
+      unawaited(_sample());
     }
-    unawaited(_sample());
   }
 
   Future<void> _sample() async {

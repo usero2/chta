@@ -44,6 +44,7 @@ class PeerHistoryNotifications {
       for (final message in history.messagesFor(contact.identityId)) {
         final key = (contact.identityId, message.id);
         if (!message.incoming ||
+            !message.isVisible ||
             message.repaired ||
             message.status != DeliveryStatus.delivered ||
             message.id.startsWith('cht-control-') ||
@@ -80,6 +81,7 @@ class PeerHistoryNotifications {
           message.status != DeliveryStatus.delivered) {
         return;
       }
+      if (history.presentationFor(peerId, message.id)?.deleted == true) return;
       _completed.add(key);
       final mimeType =
           message.attachmentRef?.mimeType ?? message.attachment?.mimeType;
@@ -91,7 +93,9 @@ class PeerHistoryNotifications {
             ? IncomingNotificationKind.file
             : IncomingNotificationKind.message,
         fileName: message.attachmentRef?.name ?? message.attachment?.name,
-        messageText: message.hasAttachment ? null : message.text,
+        messageText: message.hasAttachment
+            ? null
+            : history.presentationFor(peerId, message.id)?.text,
         markdownSize: message.attachmentRef?.size ?? message.attachment?.size,
         loadMarkdown: mimeType?.toLowerCase() == ChatAttachment.markdownMimeType
             ? () => history.resolveAttachment(message)
