@@ -10,7 +10,9 @@ import '../chat/widgets/media_album.dart';
 import '../chat/widgets/message_action_menu.dart';
 import '../chat/widgets/message_bubble.dart';
 import '../chat/widgets/message_day_divider.dart';
+import '../chat/widgets/message_reply_quote.dart';
 import '../chat/widgets/message_composer.dart';
+import '../chat/widgets/reply_message_list.dart';
 import '../profile/profile_avatar.dart';
 import 'group_models.dart';
 import 'swarm/swarm.dart';
@@ -56,6 +58,7 @@ class GroupRoom extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final visible = messages.where((m) => m.isVisible).toList();
+    final originals = {for (final message in visible) message.key: message};
     final timeline = messageTimeline(
       visible,
       timeOf: (message) =>
@@ -145,19 +148,38 @@ class GroupRoom extends StatelessWidget {
             ),
             const Divider(height: 1),
             Expanded(
-              child: ListView.builder(
-                key: const Key('group-message-list'),
+              child: ReplyMessageList(
+                key: ValueKey(group.groupId),
+                storageId: 'group-history-${group.groupId}',
+                rows: [
+                  for (final message in visible) [message.key],
+                ],
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
                   vertical: 20,
                 ),
-                itemCount: visible.length,
-                itemBuilder: (context, index) => _message(
-                  context,
-                  visible[index],
-                  presentations,
-                  timeline[index],
-                ),
+                itemBuilder: (context, index, jumpTo) {
+                  final message = visible[index];
+                  final target = message.action?.target;
+                  final original = originals[target];
+                  return _message(
+                    context,
+                    message,
+                    presentations[message.key]!,
+                    timeline[index],
+                    target == null
+                        ? null
+                        : _quote(
+                            original,
+                            presentations[target]?.text ??
+                                'Original message unavailable',
+                            deleted: presentations[target]?.deleted == true,
+                            onJump: original == null
+                                ? null
+                                : () => jumpTo(target),
+                          ),
+                  );
+                },
               ),
             ),
             if (error != null)
@@ -193,14 +215,13 @@ class GroupRoom extends StatelessWidget {
   Widget _message(
     BuildContext context,
     GroupMessage message,
-    Map<String, MessagePresentation> presentations,
+    MessagePresentation presentation,
     MessageTimelineMarker time,
+    Widget? quote,
   ) {
     final incoming = message.senderId != ownId;
-    final presentation = presentations[message.key]!;
     final deleted = presentation.deleted;
     final manifest = deleted ? null : message.manifest;
-    final quote = message.action?.target;
     final content = manifest == null ? null : _fileContent(message, manifest);
     final receipts = message.recipients
         .map((id) => message.receipts[id])
@@ -249,17 +270,8 @@ class GroupRoom extends StatelessWidget {
                 ],
               ),
             ),
-          if (!deleted && quote != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              child: Text(
-                presentations[quote]?.text ?? 'Original message unavailable',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-            ),
           MessageBubble(
+            quote: deleted ? null : quote,
             media:
                 manifest?.mimeType.toLowerCase().startsWith('image/') == true ||
                 manifest?.mimeType.toLowerCase().startsWith('video/') == true,
@@ -310,6 +322,30 @@ class GroupRoom extends StatelessWidget {
     );
   }
 
+  Widget _quote(
+    GroupMessage? original,
+    String text, {
+    bool deleted = false,
+    VoidCallback? onJump,
+  }) {
+    final file = deleted ? null : original?.manifest;
+    final image =
+        file != null &&
+        file.mimeType.toLowerCase().startsWith('image/') &&
+        progressFor(file.fileId)?.complete == true;
+    return MessageReplyQuote(
+      key: ValueKey(original?.key),
+      text: text.trim().isNotEmpty ? text : file?.name ?? 'Message',
+      author: original == null
+          ? null
+          : original.senderId == ownId
+          ? 'You'
+          : original.senderName,
+      onJump: onJump,
+      loadImage: image ? () => openFile(file) : null,
+    );
+  }
+
   Future<void> _selectAction(
     BuildContext context,
     PeerMessageActionKind action,
@@ -348,7 +384,7 @@ class GroupRoom extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (reply) Text(text, maxLines: 2, overflow: TextOverflow.ellipsis),
+            if (reply) ...[_quote(message, text), const SizedBox(height: 8)],
             TextFormField(
               autofocus: true,
               initialValue: input,

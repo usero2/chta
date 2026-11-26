@@ -37,6 +37,8 @@ import '../chat/widgets/media_album.dart';
 import '../chat/widgets/message_action_menu.dart';
 import '../chat/widgets/message_day_divider.dart';
 import '../chat/widgets/message_bubble.dart';
+import '../chat/widgets/message_reply_quote.dart';
+import '../chat/widgets/reply_message_list.dart';
 import '../chat/widgets/message_composer.dart';
 import '../chat/widgets/attachment_content.dart';
 import '../profile/profile_controller.dart';
@@ -2786,13 +2788,23 @@ class ConnectionPageState extends State<ConnectionPage> {
       ),
       authorOf: (group) => group.first.incoming,
     );
-    return ListView.builder(
-      key: ValueKey('peer-history-${widget.targetContactId ?? peerIdentityId}'),
+    final originals = {
+      for (final group in groups)
+        for (final message in group) message.id: message,
+    };
+    final hasProgress = incomingProgress.isNotEmpty;
+    return ReplyMessageList(
+      key: ValueKey('peer-history-$peer'),
+      storageId: 'peer-history-$peer',
+      rows: [
+        if (hasProgress) const [],
+        for (final group in groups.reversed)
+          [for (final message in group) message.id],
+      ],
       reverse: true,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 20),
-      itemCount: groups.length + (incomingProgress.isEmpty ? 0 : 1),
-      itemBuilder: (context, index) {
-        if (incomingProgress.isNotEmpty && index == 0) {
+      itemBuilder: (context, index, jumpTo) {
+        if (hasProgress && index == 0) {
           return Column(
             children: [
               for (final progress in incomingProgress.values)
@@ -2811,8 +2823,7 @@ class ConnectionPageState extends State<ConnectionPage> {
             ],
           );
         }
-        final messageIndex =
-            groups.length - 1 - index + (incomingProgress.isEmpty ? 0 : 1);
+        final messageIndex = groups.length - 1 - index + (hasProgress ? 1 : 0);
         final group = groups[messageIndex];
         final time = timeline[messageIndex];
         final message = group.first;
@@ -2872,11 +2883,16 @@ class ConnectionPageState extends State<ConnectionPage> {
               : CrossAxisAlignment.end,
           children: [
             if (time.dayLabel case final label?) MessageDayDivider(label),
-            if (!deleted && quoted != null)
-              _replyContext(
-                presentations[quoted]?.text ?? 'Original message unavailable',
-              ),
             MessageBubble(
+              quote: deleted || quoted == null
+                  ? null
+                  : _replyQuote(
+                      originals[quoted],
+                      presentations[quoted],
+                      onJump: originals.containsKey(quoted)
+                          ? () => jumpTo(quoted)
+                          : null,
+                    ),
               text: presentation.text,
               media:
                   !deleted &&
@@ -2978,40 +2994,51 @@ class ConnectionPageState extends State<ConnectionPage> {
     );
   }
 
-  Widget _replyContext(String text, {VoidCallback? onClear}) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Icon(Icons.reply, size: 16),
-        const SizedBox(width: 6),
-        Flexible(
-          child: Text(
-            text,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelMedium,
-          ),
-        ),
-        if (onClear != null)
-          IconButton(
-            onPressed: onClear,
-            tooltip: 'Cancel reply',
-            icon: const Icon(Icons.close, size: 16),
-          ),
-      ],
-    ),
-  );
+  Widget _replyQuote(
+    PeerMessage? original,
+    MessagePresentation? presentation, {
+    VoidCallback? onJump,
+    VoidCallback? onClear,
+  }) {
+    final image =
+        original != null &&
+        presentation?.deleted != true &&
+        (original.attachment?.kind ?? original.attachmentRef?.kind) == 'image';
+    return MessageReplyQuote(
+      key: ValueKey(original?.id),
+      author: original == null
+          ? null
+          : original.incoming
+          ? targetContact?.displayName ?? peerName
+          : 'You',
+      text: presentation?.deleted == true
+          ? presentation!.text
+          : original?.attachment?.caption ??
+                original?.attachmentRef?.caption ??
+                presentation?.text ??
+                'Original message unavailable',
+      onJump: onJump,
+      onClear: onClear,
+      imageVersion: (original?.attachment, original?.attachmentRef),
+      loadImage: image ? () => history.resolveAttachment(original) : null,
+    );
+  }
 
   Widget _peerComposer() => Column(
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       if (_replyTo case final target?)
-        _replyContext(
-          history.presentationFor(widget.targetContactId, target)?.text ??
-              'Original message unavailable',
-          onClear: () => setState(() => _replyTo = null),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: _replyQuote(
+              messages.where((message) => message.id == target).firstOrNull,
+              history.presentationFor(widget.targetContactId, target),
+              onClear: () => setState(() => _replyTo = null),
+            ),
+          ),
         ),
       MessageComposer(
         key: ValueKey('composer-${widget.targetContactId ?? peerIdentityId}'),

@@ -149,6 +149,48 @@ void main() {
   }, variant: const TargetPlatformVariant({TargetPlatform.windows}));
 
   testWidgets(
+    'Android Attach opens the files picker and stages the selection',
+    (tester) async {
+      final kinds = <AttachmentPickKind>[];
+      final sent = <ChatAttachment>[];
+      final file = ChatAttachment(
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        bytes: Uint8List.fromList([1, 2]),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageComposer(
+              onSend: (_) async => true,
+              onSendBatch: (_, files) async {
+                sent.addAll(files);
+                return true;
+              },
+              pickAttachments: (kind) async {
+                kinds.add(kind);
+                return [file];
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const Key('attach-message')));
+      await tester.pumpAndSettle();
+      expect(kinds, [AttachmentPickKind.file]);
+      expect(find.text('notes.txt'), findsOneWidget);
+      expect(sent, isEmpty);
+
+      await tester.tap(find.byKey(const Key('send-message')));
+      await tester.pumpAndSettle();
+      expect(sent, [file]);
+      expect(find.text('notes.txt'), findsNothing);
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
     'gallery batch stages tiles, keeps failed draft and clears only once queued',
     (tester) async {
       tester.view.physicalSize = const Size(320, 640);
@@ -224,6 +266,7 @@ void main() {
       expect(find.byKey(const Key('pending-attachment-0')), findsNothing);
       expect(tester.takeException(), isNull);
     },
+    variant: const TargetPlatformVariant({TargetPlatform.windows}),
   );
   testWidgets('picker stages files and removing a chip prevents sending it', (
     tester,
@@ -264,7 +307,7 @@ void main() {
     await tester.tap(find.byKey(const Key('send-message')));
     await tester.pump();
     expect(sent, isEmpty);
-  });
+  }, variant: const TargetPlatformVariant({TargetPlatform.windows}));
 
   testWidgets('formatting wraps selection and preview renders markdown', (
     tester,

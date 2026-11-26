@@ -1,5 +1,4 @@
-import 'dart:io';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'incoming_notifications.dart';
@@ -9,7 +8,13 @@ NotificationBackend createNotificationBackend() => _NativeNotificationBackend();
 class _NativeNotificationBackend implements NotificationBackend {
   final _plugin = FlutterLocalNotificationsPlugin();
   Future<bool>? _initialization;
-  bool get _supported => Platform.isAndroid || Platform.isWindows;
+  bool get _isAndroid => defaultTargetPlatform == TargetPlatform.android;
+  bool get _supported =>
+      _isAndroid || defaultTargetPlatform == TargetPlatform.windows;
+  AndroidFlutterLocalNotificationsPlugin? get _android => _plugin
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >();
 
   Future<bool> _prepare() => _initialization ??= _initializePlugin();
 
@@ -31,13 +36,8 @@ class _NativeNotificationBackend implements NotificationBackend {
   @override
   Future<bool> initialize() async {
     if (!await _prepare()) return false;
-    if (Platform.isAndroid) {
-      return await _plugin
-              .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin
-              >()
-              ?.areNotificationsEnabled() ??
-          false;
+    if (_isAndroid) {
+      return await _android?.areNotificationsEnabled() ?? false;
     }
     return true; // Windows notification settings remain controlled by the OS.
   }
@@ -45,13 +45,13 @@ class _NativeNotificationBackend implements NotificationBackend {
   @override
   Future<bool> requestPermissions() async {
     if (!await _prepare()) return false;
-    if (Platform.isAndroid) {
-      return await _plugin
-              .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin
-              >()
-              ?.requestNotificationsPermission() ??
-          false;
+    if (_isAndroid) {
+      final android = _android;
+      if (android == null) return false;
+      // Turning alerts back on can reuse the current OS grant without an
+      // Activity-bound permission request.
+      if (await android.areNotificationsEnabled() == true) return true;
+      return await android.requestNotificationsPermission() ?? false;
     }
     return true;
   }

@@ -10,6 +10,7 @@ import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/chat/attachment_store.dart';
 import 'package:cht/chat/attachment_ref.dart';
+import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/chat/attachment_source.dart';
 import 'package:cht/chat/chunked_attachment_bridge.dart';
 import 'package:cht/chat/widgets/message_composer.dart';
@@ -39,6 +40,103 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('a photo reply previews and jumps to its offscreen album photo', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 720);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final history = PeerHistory(store: Store());
+    await history.load('alice');
+    final account = service_test.Account('alice', ['bob']);
+    for (var i = 0; i < 5; i++) {
+      history.add(
+        'bob',
+        PeerMessage(
+          id: 'photo-$i',
+          text: '[image] trail-$i.png',
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          sentAtMilliseconds: 1000 + i,
+          attachment: ChatAttachment(
+            name: 'trail-$i.png',
+            mimeType: 'image/png',
+            bytes: image.encodePng(image.Image(width: 4, height: 4)),
+            groupId: 'trail-album',
+            groupIndex: i,
+            groupCount: 5,
+          ),
+        ),
+      );
+    }
+    for (var i = 0; i < 70; i++) {
+      history.add(
+        'bob',
+        PeerMessage(
+          id: 'filler-$i',
+          text: List.filled((i % 5) + 1, 'Different message lengths').join(' '),
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          sentAtMilliseconds: 2000 + i,
+        ),
+      );
+    }
+    history.add(
+      'bob',
+      PeerMessage(
+        id: 'chtmsg1_test-reply',
+        text: const PeerMessageAction(
+          PeerMessageActionKind.reply,
+          'photo-4',
+          'Great photo',
+        ).encode(),
+        incoming: false,
+        status: DeliveryStatus.delivered,
+        sentAtMilliseconds: 4000,
+      ),
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConnectionPage(
+            accountBridge: account,
+            bridge: _FakeP2pBridge(),
+            targetContactId: 'bob',
+            chatMode: true,
+            peerHistory: history,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+      final original = find.byKey(const Key('album-item-photo-4'));
+      final quote = find.byTooltip('Go to original message');
+      expect(original.hitTestable(), findsNothing);
+      expect(quote, findsOneWidget);
+      expect(
+        find.descendant(of: quote, matching: find.byType(Image)),
+        findsOneWidget,
+      );
+      await tester.tap(quote);
+      await tester.pumpAndSettle();
+      expect(original.hitTestable(), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: original,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.selected == true,
+          ),
+        ),
+        findsOneWidget,
+      );
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      history.dispose();
+    }
+  });
+
   testWidgets(
     'a partially delivered album shows only its active member progress',
     (tester) async {
@@ -863,8 +961,6 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('attach-message')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Files'));
-      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('send-peer-message')));
       await tester.pump(const Duration(milliseconds: 200));
       final message = history.messagesFor('did:cht:peer').single;
@@ -1054,8 +1150,6 @@ void main() {
           await tester.tap(find.byTooltip('Retry'));
         } else {
           await tester.tap(find.byKey(const Key('attach-message')));
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Files'));
           await tester.pumpAndSettle();
           await tester.tap(find.byKey(const Key('send-peer-message')));
         }
@@ -1449,8 +1543,6 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 500));
     await tester.tap(find.byKey(const Key('attach-message')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Files'));
     await tester.pumpAndSettle();
     expect(find.text('out.txt'), findsOneWidget);
     await tester.tap(find.byKey(const Key('send-peer-message')));

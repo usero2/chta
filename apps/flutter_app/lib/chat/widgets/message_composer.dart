@@ -86,6 +86,13 @@ class _MessageComposerState extends State<MessageComposer> {
     super.dispose();
   }
 
+  Future<void> _openAttachmentPicker() async {
+    final kind = !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? AttachmentPickKind.file
+        : await showAttachmentPickerSheet(context);
+    if (kind != null && mounted) await _pick(kind);
+  }
+
   Future<void> _pick(AttachmentPickKind kind) async {
     if (_picking || _sending) return;
     setState(() => _picking = true);
@@ -251,10 +258,7 @@ class _MessageComposerState extends State<MessageComposer> {
                   icon: const Icon(Icons.add_circle_outline),
                   onPressed: _sending || _picking
                       ? null
-                      : () async {
-                          final kind = await showAttachmentPickerSheet(context);
-                          if (kind != null && mounted) await _pick(kind);
-                        },
+                      : _openAttachmentPicker,
                 ),
               IconButton(
                 key: const Key('markdown-tools'),

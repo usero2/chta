@@ -7,6 +7,7 @@ import '../attachment_files.dart';
 import 'media_viewer.dart';
 import 'message_bubble.dart';
 import 'media_caption.dart';
+import 'reply_message_list.dart';
 
 class MediaAlbum extends StatelessWidget {
   const MediaAlbum({super.key, required this.items, this.onOpen});
@@ -58,7 +59,7 @@ class MediaAlbum extends StatelessWidget {
                   itemBuilder: (context, index) => SizedBox(
                     width: 104,
                     child: _AlbumTile(
-                      key: ValueKey(ordered[index].id),
+                      key: ReplyMessageAnchorKey(ordered[index].id),
                       item: ordered[index],
                       onOpen: () => open(index),
                       color: color,
@@ -77,7 +78,7 @@ class MediaAlbum extends StatelessWidget {
                 ),
                 itemCount: ordered.length,
                 itemBuilder: (context, index) => _AlbumTile(
-                  key: ValueKey(ordered[index].id),
+                  key: ReplyMessageAnchorKey(ordered[index].id),
                   item: ordered[index],
                   onOpen: () => open(index),
                   color: color,

@@ -99,6 +99,7 @@ class MessageBubble extends StatelessWidget {
     this.deliveryDetail,
     this.media = false,
     this.actions,
+    this.quote,
   });
 
   final String text;
@@ -107,6 +108,7 @@ class MessageBubble extends StatelessWidget {
   final int? receivedAtMilliseconds;
   final VoidCallback? onRetry;
   final Widget? content;
+  final Widget? quote;
   final Key? bubbleKey;
   final bool showTime;
   final MessageDeliveryIndicator? deliveryIndicator;
@@ -159,7 +161,17 @@ class MessageBubble extends StatelessWidget {
                   : const Color(0xFF9AE585),
               borderRadius: BorderRadius.circular(18),
             ),
-      child: content ?? _textContent(),
+      child: quote == null
+          ? content ?? _textContent()
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                quote!,
+                const SizedBox(height: 6),
+                content ?? _textContent(),
+              ],
+            ),
     );
     final menu =
         actions ??
