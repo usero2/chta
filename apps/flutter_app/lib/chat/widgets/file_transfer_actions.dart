@@ -9,12 +9,14 @@ class FileTransferActions extends StatefulWidget {
     this.onResume,
     this.onCancel,
     this.progress,
+    this.awaitingAcceptance,
     this.color,
     super.key,
   });
   final PeerMessage message;
   final Future<void> Function()? onPause, onResume, onCancel;
   final Widget? progress;
+  final String? awaitingAcceptance;
   final Color? color;
   @override
   State<FileTransferActions> createState() => _FileTransferActionsState();
@@ -44,13 +46,16 @@ class _FileTransferActionsState extends State<FileTransferActions> {
     final m = widget.message;
     if (!m.hasAttachment) return const SizedBox.shrink();
     final delivered = m.status == DeliveryStatus.delivered;
-    final cancelled = m.failureReason == 'Cancelled';
+    final cancelled =
+        m.failureReason == 'Cancelled' ||
+        m.failureReason == 'Declined by recipient';
     final resumable = m.deliveryPaused || m.status == DeliveryStatus.failed;
     final override =
         _error ?? m.failureReason ?? (m.deliveryPaused ? 'Paused' : null);
     final label = delivered
         ? (m.incoming ? 'Received' : 'Delivered')
         : override ??
+              widget.awaitingAcceptance ??
               switch (m.status) {
                 DeliveryStatus.sent => 'Sent',
                 DeliveryStatus.failed => 'Failed',
@@ -76,7 +81,11 @@ class _FileTransferActionsState extends State<FileTransferActions> {
                   ),
                 ),
         ),
-        if (!delivered && !(m.incoming && cancelled) && primaryAction != null)
+        if (!delivered &&
+            m.failureReason != 'Declined by recipient' &&
+            !(m.incoming && cancelled) &&
+            widget.awaitingAcceptance == null &&
+            primaryAction != null)
           _action(
             tooltip: resumable
                 ? (m.deliveryPaused ? 'Resume transfer' : 'Retry transfer')

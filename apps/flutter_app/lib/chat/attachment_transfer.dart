@@ -38,6 +38,14 @@ class AttachmentTransfer {
   final AttachmentReceiver onReceived;
   final TransferProgress? onProgress;
   final TransferFailure? onFailure;
+  final FutureOr<bool> Function(
+    String id,
+    String name,
+    String mime,
+    int size,
+    String digest,
+  )?
+  mayReceive;
   final Duration ackTimeout;
   final int Function()? maxTransferBytes;
   final Map<String, Completer<int?>> _pending = {};
@@ -67,6 +75,7 @@ class AttachmentTransfer {
     required this.onReceived,
     this.onProgress,
     this.onFailure,
+    this.mayReceive,
     this.maxTransferBytes,
     this.ackTimeout = const Duration(seconds: 45),
   });
@@ -322,6 +331,10 @@ class AttachmentTransfer {
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash)) {
       throw const FormatException('Invalid attachment bounds');
     }
+    if (mayReceive != null && !await mayReceive!(id, name, mime, size, hash)) {
+      return false;
+    }
+    if (_disposed) return false;
     final expectedLength = i == n - 1 ? size - i * chunkSize : chunkSize;
     if (data.length != ((expectedLength + 2) ~/ 3) * 4 ||
         !RegExp(r'^[A-Za-z0-9+/]*={0,2}$').hasMatch(data)) {

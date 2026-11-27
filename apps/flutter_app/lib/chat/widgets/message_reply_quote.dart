@@ -13,6 +13,7 @@ class MessageReplyQuote extends StatefulWidget {
     this.onClear,
     this.loadImage,
     this.imageVersion,
+    this.outgoing = false,
   });
 
   final String text;
@@ -20,6 +21,7 @@ class MessageReplyQuote extends StatefulWidget {
   final VoidCallback? onJump, onClear;
   final Future<ChatAttachment> Function()? loadImage;
   final Object? imageVersion;
+  final bool outgoing;
 
   @override
   State<MessageReplyQuote> createState() => _MessageReplyQuoteState();
@@ -63,6 +65,18 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final background = widget.outgoing
+        ? const Color(0xFF86CA76)
+        : colors.surfaceContainerHigh;
+    final titleColor = widget.outgoing
+        ? const Color(0xFF102A12)
+        : colors.onSurface;
+    final excerptColor = widget.outgoing
+        ? const Color(0xFF21421F)
+        : colors.onSurfaceVariant;
+    final accent = widget.outgoing
+        ? const Color(0xFF427345)
+        : colors.primary.withValues(alpha: .8);
     final quote = Padding(
       padding: const EdgeInsets.fromLTRB(7, 3, 5, 3),
       child: Row(
@@ -79,7 +93,7 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: colors.onSurface,
+                      color: titleColor,
                       fontWeight: FontWeight.w700,
                       height: 1.15,
                     ),
@@ -89,7 +103,7 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.bodySmall?.copyWith(
-                    color: colors.onSurfaceVariant,
+                    color: excerptColor,
                     height: 1.18,
                   ),
                 ),
@@ -138,13 +152,13 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 320),
       child: Material(
-        color: colors.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(6),
+        color: background,
+        borderRadius: BorderRadius.circular(7),
         clipBehavior: Clip.antiAlias,
         child: DecoratedBox(
           decoration: BoxDecoration(
             border: BorderDirectional(
-              start: BorderSide(color: colors.primary, width: 2),
+              start: BorderSide(color: accent, width: 2),
             ),
           ),
           child: widget.onJump == null

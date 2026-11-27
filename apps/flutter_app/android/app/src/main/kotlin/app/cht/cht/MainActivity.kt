@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -58,15 +60,31 @@ class MainActivity : FlutterActivity() {
         }
         ChatRuntime.channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/runtime").apply {
             setMethodCallHandler { call, result ->
-                if (call.method != "configure") result.notImplemented()
-                else try {
-                    result.success(ChatRuntime.configure(appContext,
-                        call.argument<Boolean>("active") == true,
-                        call.argument<Boolean>("enabled"),
-                        call.argument<Boolean>("showLockAction"),
-                        call.argument<Int>("backgroundRefreshSeconds")))
-                } catch (_: Exception) {
-                    result.error("background_unavailable", "Could not start background reception", null)
+                when (call.method) {
+                    "configure" -> try {
+                        result.success(ChatRuntime.configure(appContext,
+                            call.argument<Boolean>("active") == true,
+                            call.argument<Boolean>("enabled"),
+                            call.argument<Boolean>("showLockAction"),
+                            call.argument<Int>("backgroundRefreshSeconds")))
+                    } catch (_: Exception) {
+                        result.error("background_unavailable", "Could not start background reception", null)
+                    }
+                    "openBackgroundNotificationSettings" -> {
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                            result.notImplemented()
+                        } else try {
+                            ChatReceiveService.createNotificationChannel(appContext)
+                            startActivity(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                putExtra(Settings.EXTRA_CHANNEL_ID, ChatReceiveService.NOTIFICATION_CHANNEL_ID)
+                            })
+                            result.success(null)
+                        } catch (_: Exception) {
+                            result.error("settings_unavailable", "Could not open background notification settings", null)
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
         }

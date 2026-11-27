@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
 
 import '../account/account_bridge.dart';
 import '../account/account_models.dart';
@@ -30,6 +31,8 @@ import 'peer_message_action.dart';
 import 'resumable_attachment_transfer.dart';
 import 'account_scheduler.dart';
 import 'file_transfer_progress.dart';
+import 'file_offer.dart';
+import 'file_offer_cover.dart';
 
 /// One unlocked account's transport lifetime. Navigation never selects or tears
 /// down a remote peer's authenticated state.
@@ -55,6 +58,7 @@ class MessagingService extends ChangeNotifier {
       history: history,
       isReady: (peer) => isOnline(peer) || canDepositOffline(peer),
       send: _sendQueued,
+      canSend: _canSendQueued,
     );
     _recovery = NetworkRecovery(
       isCurrent: () => _active && _started,
@@ -76,6 +80,7 @@ class MessagingService extends ChangeNotifier {
   StreamSubscription<NetworkObservation>? _networkChanges;
   Future<void>? _recovering;
   NetworkObservation? _lastNetwork;
+  String? _lastAvailableNetwork;
   bool _pathChanged = false;
   late final DurableOutbox outbox;
   final _peers = <String, _PeerConnection>{};
@@ -162,7 +167,8 @@ class MessagingService extends ChangeNotifier {
       (history.queuedMessages.any(
             (e) =>
                 !e.value.deliveryPaused &&
-                (isOnline(e.key) || canDepositOffline(e.key)),
+                (isOnline(e.key) || canDepositOffline(e.key)) &&
+                _canSendQueued(e.key, e.value),
           ) ||
           _peers.values.any(
             (p) =>
@@ -182,15 +188,20 @@ class MessagingService extends ChangeNotifier {
     final observation = await _monitor?.check();
     if (!_active) return;
     if (observation != null) _observeNetwork(observation);
-    _recovery.resume();
+    if (_lastNetwork?.available == false) return;
+    // A foreground transition alone does not invalidate authenticated routes.
+    _schedulePoll();
+    if (network.online.isEmpty && network.enabled ||
+        seed?.needsRecovery == true) {
+      _recovery.resume();
+    }
   }
 
   void _observeNetwork(NetworkObservation state) {
-    final before = _lastNetwork;
-    if (before != null &&
-        state.available &&
-        (!before.available || before.fingerprint != state.fingerprint)) {
-      _pathChanged = true;
+    if (state.available) {
+      final before = _lastAvailableNetwork;
+      _pathChanged |= before != null && before != state.fingerprint;
+      _lastAvailableNetwork = state.fingerprint;
     }
     _lastNetwork = state;
     _recovery.observe(state);
@@ -286,6 +297,14 @@ class MessagingService extends ChangeNotifier {
     peer.sync = RelayPeerSync(network, send: relay.sendControl);
     peer.attachments = AttachmentTransfer(
       maxTransferBytes: () => ChatAttachment.relayMaxBytes,
+      mayReceive: (transfer, name, mime, size, digest) => _mayReceiveFile(
+        peer,
+        transfer,
+        name: name,
+        mimeType: mime,
+        size: size,
+        digest: digest,
+      ),
       sendPacket: (packet, text, sentAt) =>
           _sendPacket(peer, packet, text, sentAt),
       onProgress: (transfer, progress, incoming) {
@@ -334,6 +353,15 @@ class MessagingService extends ChangeNotifier {
         history: history,
         autoResume: false,
         advertiseMessageActions: true,
+        advertiseFileOffers: true,
+        validateFileOffer: (transfer, ref) => _mayReceiveFile(
+          peer,
+          transfer,
+          name: ref.name,
+          mimeType: ref.mimeType,
+          size: ref.size,
+          digest: ref.digest,
+        ),
         automaticRetries: false,
         sendEncryptedControl: relay.sendControl,
         sendSeedControl: seed == null
@@ -424,6 +452,78 @@ class MessagingService extends ChangeNotifier {
     if (peer != null) unawaited(peer.close());
   }
 
+  Future<void> respondToFileOffer(
+    String peer,
+    String id, {
+    required bool accept,
+  }) async {
+    final offer = history.fileOfferFor(peer, id, incoming: true);
+    if (offer == null || !_active || !_contacts.containsKey(peer)) {
+      throw const FormatException('This file offer is no longer available.');
+    }
+    if (history.decisionFor(peer, offer, incoming: false) != null) {
+      if (history.error != null) history.changed(peer);
+      await history.flush();
+      if (history.error != null) throw StateError('Could not save file choice');
+      return;
+    }
+    final choice = FileOfferDecision(id, offer.digest, accept);
+    await queueMessage(
+      peer,
+      PeerMessage(
+        id: FileOfferDecision.messageId(id),
+        text: choice.encode(),
+        incoming: false,
+        status: DeliveryStatus.pending,
+      ),
+    );
+  }
+
+  bool _supportsFileOffers(String peerId) {
+    final peer = _peers[peerId];
+    return peer?.files?.supportsFileOffers == true ||
+        peer?.relay.supports(fileOfferCapability) == true ||
+        (canDepositOffline(peerId) &&
+            _contacts[peerId]?.capabilities.contains(fileOfferCapability) ==
+                true);
+  }
+
+  String? awaitingFileAcceptance(String peer, PeerMessage message) {
+    if (message.incoming ||
+        !message.hasAttachment ||
+        !message.queuedForDelivery ||
+        message.status == DeliveryStatus.delivered) {
+      return null;
+    }
+    final offer = history.fileOfferFor(peer, message.id, incoming: false);
+    if (offer != null &&
+        history.decisionFor(peer, offer, incoming: true)?.accepted == true) {
+      return null;
+    }
+    return isOnline(peer) && !_supportsFileOffers(peer)
+        ? 'Waiting for an updated app'
+        : 'Waiting for acceptance';
+  }
+
+  Future<bool> _mayReceiveFile(
+    _PeerConnection peer,
+    String id, {
+    required Object? name,
+    required Object? mimeType,
+    required Object? size,
+    required Object? digest,
+  }) async {
+    await _durable(peer);
+    return history.permitsIncomingFile(
+      peer.contact.identityId,
+      id,
+      name: name,
+      mimeType: mimeType,
+      size: size,
+      digest: digest,
+    );
+  }
+
   Future<void> pauseFile(String peer, String id) =>
       _stopFile(peer, id, cancel: false);
   Future<void> cancelFile(String peer, String id) =>
@@ -475,6 +575,7 @@ class MessagingService extends ChangeNotifier {
     if (!_active ||
         message == null ||
         !message.hasAttachment ||
+        message.failureReason == 'Declined by recipient' ||
         message.status == DeliveryStatus.delivered) {
       return;
     }
@@ -522,8 +623,13 @@ class MessagingService extends ChangeNotifier {
   }) async {
     if (!_contacts.containsKey(peer)) await refreshContacts();
     final contact = _contacts[peer];
-    if (!_active || contact == null || !supportsMessageActions(peer)) {
-      throw const FormatException('Both apps need to support message actions.');
+    if (!_active || contact == null) {
+      throw const FormatException(
+        'Verify this contact before sending messages.',
+      );
+    }
+    if (kind != PeerMessageActionKind.reply && !supportsMessageActions(peer)) {
+      throw const FormatException('Edit and delete need an updated app.');
     }
     final target = history
         .visibleMessagesFor(peer)
@@ -830,6 +936,7 @@ class MessagingService extends ChangeNotifier {
         event.receivedAtMilliseconds ?? DateTime.now().millisecondsSinceEpoch,
       );
       if (!_owns(peer)) return;
+      _resumeAcceptedFile(peerId, id);
       if (direct) {
         await peer.files?.acknowledge(id, received);
       } else {
@@ -837,10 +944,12 @@ class MessagingService extends ChangeNotifier {
       }
       return;
     }
-    final existing = history
-        .messagesFor(peerId)
-        .where((m) => m.id == id)
-        .firstOrNull;
+    if (isFileOfferEvent(id) &&
+        FileOffer.decode(id, text) == null &&
+        FileOfferDecision.decode(id, text) == null) {
+      return;
+    }
+    final existing = history.messageById(peerId, id);
     final receivedAt =
         existing?.receivedAtMilliseconds ??
         event.receivedAtMilliseconds ??
@@ -877,10 +986,20 @@ class MessagingService extends ChangeNotifier {
       }
     }
     await _durable(peer);
+    _resumeAcceptedFile(peerId, id);
     if (direct) {
       await peer.files?.acknowledge(id, receivedAt);
     } else {
       await peer.relay.acknowledge(id, receivedAt);
+    }
+  }
+
+  void _resumeAcceptedFile(String peer, String eventId) {
+    if (!isFileOfferEvent(eventId)) return;
+    final row = history.messageById(peer, eventId);
+    final choice = row?.fileOfferDecision;
+    if (row?.incoming == true && choice?.accepted == true) {
+      outbox.retryNow(peer, messageId: choice!.fileId);
     }
   }
 
@@ -937,13 +1056,15 @@ class MessagingService extends ChangeNotifier {
     final text =
         await courier?.liveText(peer.contact.identityId, message) ??
         message.text;
+    final fileEvent = isFileOfferEvent(message.id);
     final chosen = await peer.router.send(message.id, [
       DeliveryRoute(
         id: 'direct',
         kind: DeliveryRouteKind.direct,
         authenticated:
             peer.files?.ready == true &&
-            (message.action == null || peer.files!.supportsMessageActions),
+            (message.action == null || peer.files!.supportsMessageActions) &&
+            (!fileEvent || peer.files!.supportsFileOffers),
         send: () => peer.files!.sendDirectPacket(message.id, text, sentAt),
       ),
       DeliveryRoute(
@@ -952,7 +1073,8 @@ class MessagingService extends ChangeNotifier {
         authenticated:
             peer.relay.authenticated &&
             (message.action == null ||
-                peer.relay.supports(PeerMessageAction.capability)),
+                peer.relay.supports(PeerMessageAction.capability)) &&
+            (!fileEvent || peer.relay.supports(fileOfferCapability)),
         send: () => peer.relay.sendMessage(
           message.id,
           text,
@@ -960,7 +1082,9 @@ class MessagingService extends ChangeNotifier {
           isCurrent: () => _owns(peer) && message.queuedForDelivery,
         ),
       ),
-      if (canDepositOffline(peer.contact.identityId))
+      if (canDepositOffline(peer.contact.identityId) &&
+          (!fileEvent ||
+              peer.contact.capabilities.contains(fileOfferCapability)))
         DeliveryRoute(
           id: 'courier',
           kind: DeliveryRouteKind.courier,
@@ -978,15 +1102,84 @@ class MessagingService extends ChangeNotifier {
     return chosen;
   }
 
+  bool _canSendQueued(String id, PeerMessage message) {
+    if (isFileOfferEvent(message.id)) return _supportsFileOffers(id);
+    if (message.hasAttachment) {
+      final offer = history.fileOfferFor(id, message.id, incoming: false);
+      return offer == null
+          ? _supportsFileOffers(id)
+          : history.decisionFor(id, offer, incoming: true)?.accepted == true;
+    }
+    if (message.action == null) return true;
+    final peer = _peers[id];
+    return peer?.files?.supportsMessageActions == true ||
+        peer?.relay.supports(PeerMessageAction.capability) == true ||
+        (canDepositOffline(id) && supportsMessageActions(id));
+  }
+
   Future<void> _sendQueued(String id, PeerMessage message) async {
-    if (message.action != null && !supportsMessageActions(id)) {
+    if (!_canSendQueued(id, message)) {
       throw const TransferInterrupted('Waiting for an updated app');
     }
-    if (message.hasAttachment && canDepositOffline(id)) {
-      await courier!.queue(id, message);
-      return;
+    if (message.hasAttachment) {
+      if (history.fileOfferFor(id, message.id, incoming: false) == null) {
+        try {
+          await _announceFile(id, message);
+        } on FormatException catch (failure) {
+          throw TransferRejected(failure.message);
+        }
+        return;
+      }
+      if (canDepositOffline(id)) {
+        await courier!.queue(id, message);
+        return;
+      }
     }
     await _sendQueuedLive(id, message);
+  }
+
+  Future<void> _announceFile(String peerId, PeerMessage message) async {
+    final peer = _peers[peerId];
+    if (peer == null || !_owns(peer)) throw const TransferInterrupted();
+    final ref = message.attachmentRef;
+    final isVisual = const {
+      'image',
+      'video',
+    }.contains(ref?.kind ?? message.attachment?.kind);
+    final attachment = ref == null || isVisual
+        ? await history.resolveAttachment(message)
+        : null;
+    final digest =
+        ref?.digest ??
+        (await sha256.bind(attachment!.openRead()).first).toString();
+    final cover = isVisual && attachment != null
+        ? await buildFileOfferCover(attachment)
+        : null;
+    if (!_owns(peer) ||
+        !message.queuedForDelivery ||
+        message.deliveryPaused ||
+        !identical(history.messageById(peerId, message.id), message)) {
+      throw const TransferInterrupted();
+    }
+    final offer = FileOffer(
+      fileId: message.id,
+      name: ref?.name ?? attachment!.name,
+      mimeType: ref?.mimeType ?? attachment!.mimeType,
+      size: ref?.size ?? attachment!.size,
+      caption: ref == null ? attachment!.caption : ref.caption,
+      digest: digest,
+      cover: cover,
+    );
+    await outbox.enqueue(
+      peerId,
+      PeerMessage(
+        id: FileOffer.messageId(message.id),
+        text: offer.encode(),
+        incoming: false,
+        status: DeliveryStatus.pending,
+        sentAtMilliseconds: message.sentAtMilliseconds,
+      ),
+    );
   }
 
   Future<void> _recordDelivery(String peer, String id, int receivedAt) async {

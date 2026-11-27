@@ -7,6 +7,10 @@ import 'package:cht/account/account_bridge.dart';
 import 'package:cht/account/account_models.dart';
 import 'package:cht/contact_requests/contact_request_bridge.dart';
 import 'package:cht/contact_requests/contact_request_controller.dart';
+import 'package:cht/contact_requests/contact_request_transport.dart';
+import 'package:cht/contact_requests/relay_contact_request_transport.dart';
+import 'package:cht/relay/default_relays.dart';
+import 'package:cht/relay/relay_network.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../groups/group_native_relay_test.dart' show NativeWorker, until;
@@ -60,8 +64,11 @@ class _Account implements AccountBridge, ContactRequestBridge {
 
 void main() {
   final dll = Platform.environment['CHTA_GROUP_CORE_DLL'];
+  final publicRelay = Platform.environment['CHTA_PUBLIC_CONTACT_RELAY'];
   test(
-    'one-sided native request survives restart, Review grants trust and KK chat works',
+    publicRelay == null
+        ? 'one-sided native request survives restart, Review grants trust and KK chat works'
+        : 'one-sided native request and approval work on the public data relay',
     () async {
       final root = await Directory.systemTemp.createTemp('chta-contact-qa-');
       final resolved = await root.resolveSymbolicLinks();
@@ -69,6 +76,8 @@ void main() {
       final workers = <NativeWorker>[],
           controllers = <ContactRequestController>[],
           transports = <Transport>[];
+      final routed = <RelayContactRequestTransport>[],
+          networks = <RelayNetwork>[];
       try {
         final ids = <String>[], cards = <String>[];
         for (final name in ['sender', 'recipient']) {
@@ -122,9 +131,41 @@ void main() {
         expect(ca.statusFor(ids[1]), ContactRequestStatus.pending);
         var cb = make(b, 1);
         await cb.initialize();
-        cb.attach(tb);
-        ta.peer = tb;
-        tb.peer = ta;
+        ContactRequestTransport recipientRoute = tb;
+        if (publicRelay == null) {
+          ta.peer = tb;
+          tb.peer = ta;
+        } else {
+          final pin = defaultDataRelays[publicRelay];
+          expect(
+            pin,
+            isNotNull,
+            reason: 'Use one of the configured public relays',
+          );
+          for (var i = 0; i < 2; i++) {
+            final network = RelayNetwork(
+              workers[i],
+              bootstrapRelays: {publicRelay: pin!},
+            );
+            networks.add(network);
+            await network.addSeed(publicRelay);
+            routed.add(
+              RelayContactRequestTransport(
+                ownerId: ids[i],
+                network: network,
+                seed: i == 0 ? ta : null,
+              ),
+            );
+          }
+          await until(
+            () => networks.every(
+              (network) => network.online.contains(publicRelay),
+            ),
+          );
+          ca.attach(routed.first);
+          recipientRoute = routed.last;
+        }
+        cb.attach(recipientRoute);
         await ca.pulse(force: true);
         await until(
           () =>
@@ -155,7 +196,7 @@ void main() {
         controllers.remove(cb);
         cb = make(b, 1);
         await cb.initialize();
-        cb.attach(tb);
+        cb.attach(recipientRoute);
         expect(cb.incoming, hasLength(1));
         tb.peer = null; // Drop the acceptance ACK once.
         final accepted = await cb.accept(
@@ -164,8 +205,10 @@ void main() {
         );
         expect(accepted.verified, isTrue);
         expect(accepted.alias, 'Reviewed sender');
-        tb.peer = ta;
-        await ca.pulse(force: true);
+        if (publicRelay == null) {
+          tb.peer = ta;
+          await ca.pulse(force: true);
+        }
         await until(() => ca.statusFor(ids[1]) == null);
         expect(cb.incoming, isEmpty);
         expect((await a.contacts()).single.alias, 'Local alias');
@@ -196,6 +239,12 @@ void main() {
       } finally {
         for (final controller in controllers) {
           await controller.close();
+        }
+        for (final transport in routed) {
+          await transport.close();
+        }
+        for (final network in networks) {
+          await network.close();
         }
         for (final transport in transports) {
           await transport.close();

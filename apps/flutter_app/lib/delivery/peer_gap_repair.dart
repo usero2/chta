@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 import '../chat/delivery_feedback.dart';
+import '../chat/file_offer.dart';
 import '../chat/peer_history.dart';
 import '../groups/group_blob_bridge.dart';
 import 'delivery_envelope.dart';
@@ -51,6 +52,7 @@ class PeerGapRepair {
               (m) =>
                   !m.incoming &&
                   !m.hasAttachment &&
+                  !isFileOfferEvent(m.id) &&
                   !m.deliveryPaused &&
                   m.sentAtMilliseconds != null &&
                   (m.status == DeliveryStatus.delivered ||

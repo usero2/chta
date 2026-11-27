@@ -157,7 +157,24 @@ fn sealed_scope(a: &AccountCore, b: &AccountCore, scope: &str) -> (Value, Vec<Va
         })
         .collect();
     let event=a.delivery_call("signEvent",json!({"scope":scope,"messageId":"original-file","sentAt":NOW,"kind":"file","payload":"immutable logical file metadata"})).unwrap();
-    let envelope=a.delivery_call("sealManifest",json!({"state":j["state"],"event":event,"metadata":{"size":6,"contentHash":"b".repeat(64),"merkleRoot":proofs[0]["root"],"name":"private.bin","mime":"application/octet-stream"},"now":NOW})).unwrap();
+    let mut args = json!({
+        "state": j["state"],
+        "event": event,
+        "metadata": {
+            "size": 6,
+            "contentHash": "b".repeat(64),
+            "merkleRoot": proofs[0]["root"],
+            "name": "private.bin",
+            "mime": "application/octet-stream"
+        },
+        "now": NOW
+    });
+    if scope.starts_with("group:") {
+        args["metadata"]["offerHeader"] = json!("changed file metadata");
+        assert!(a.delivery_call("sealManifest", args.clone()).is_err());
+        args["metadata"]["offerHeader"] = json!("immutable logical file metadata");
+    }
+    let envelope = a.delivery_call("sealManifest", args).unwrap();
     (envelope, parts, proofs)
 }
 #[test]
@@ -197,6 +214,11 @@ fn group_courier_uses_signed_roster_pins_and_checks_current_and_historical_membe
             json!({"manifest":manifest["manifest"],"now":NOW}),
         )
         .unwrap();
+    assert!(!manifest.to_string().contains("immutable logical file metadata"));
+    assert_eq!(
+        opened["metadata"]["offerHeader"],
+        "immutable logical file metadata"
+    );
     let args = json!({"state":opened["state"],"index":0,"ciphertext":parts[0]["ciphertext"],"proof":proofs[0]["proof"],"now":NOW});
     b.delivery_call("decryptPackage", args.clone()).unwrap();
     let removed = a

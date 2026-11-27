@@ -12,6 +12,7 @@ import '../../chat/attachment_store.dart';
 import '../../chat/managed_attachment_cache.dart';
 import '../../chat/cache_policy.dart';
 import '../../chat/chat_attachment.dart';
+import '../../chat/file_offer_cover.dart';
 import '../group_blob_bridge.dart';
 
 const swarmPieceSize = 256 * 1024;
@@ -39,6 +40,7 @@ class SwarmManifest {
     required this.digest,
     required this.merkleRoot,
     this.caption,
+    this.cover,
   }) {
     if (!_groupPattern.hasMatch(groupId) ||
         epoch < 1 ||
@@ -54,10 +56,13 @@ class SwarmManifest {
     }
     ChatAttachment.validateStreamedMetadata(name, mimeType, size);
     ChatAttachment.validatePresentation(caption, null, null, null);
+    if (cover != null && decodeFileOfferCover(cover) == null) {
+      throw const FormatException('Invalid swarm file cover');
+    }
   }
   final String groupId, uploaderId, fileId, name, mimeType, digest, merkleRoot;
   final int epoch, size, pieceSize;
-  final String? caption;
+  final String? caption, cover;
   int get pieceCount => (size + pieceSize - 1) ~/ pieceSize;
   int pieceLength(int index) {
     if (index < 0 || index >= pieceCount) {
@@ -78,6 +83,7 @@ class SwarmManifest {
     'digest': digest,
     'merkleRoot': merkleRoot,
     if (caption != null) 'caption': caption,
+    if (cover != null) 'cover': cover,
   };
   factory SwarmManifest.fromJson(Map<String, dynamic> json) {
     const required = {
@@ -93,7 +99,9 @@ class SwarmManifest {
       'merkleRoot',
     };
     if (!json.keys.toSet().containsAll(required) ||
-        json.keys.any((k) => !required.contains(k) && k != 'caption') ||
+        json.keys.any(
+          (k) => !required.contains(k) && k != 'caption' && k != 'cover',
+        ) ||
         json['groupId'] is! String ||
         json['epoch'] is! int ||
         json['uploaderId'] is! String ||
@@ -104,7 +112,8 @@ class SwarmManifest {
         json['pieceSize'] is! int ||
         json['digest'] is! String ||
         json['merkleRoot'] is! String ||
-        (json['caption'] != null && json['caption'] is! String)) {
+        (json['caption'] != null && json['caption'] is! String) ||
+        (json['cover'] != null && json['cover'] is! String)) {
       throw const FormatException('Invalid swarm manifest');
     }
     return SwarmManifest(
@@ -119,10 +128,12 @@ class SwarmManifest {
       digest: json['digest'],
       merkleRoot: json['merkleRoot'],
       caption: json['caption'],
+      cover: json['cover'],
     );
   }
-  String get identityHash =>
-      sha256.convert(utf8.encode(jsonEncode(toJson()))).toString();
+  late final String identityHash = sha256
+      .convert(utf8.encode(jsonEncode(toJson())))
+      .toString();
 }
 
 class SwarmPiece {
@@ -262,6 +273,7 @@ class SparseSwarmCache {
     required String uploaderId,
     required String fileId,
     required ChatAttachment file,
+    String? cover,
   }) async {
     ChatAttachment.validateStreamedMetadata(
       file.name,
@@ -289,6 +301,7 @@ class SparseSwarmCache {
       digest: digest,
       merkleRoot: _hex(levels.last.single),
       caption: file.caption,
+      cover: cover,
     );
     final managed = attachments is BudgetedAttachmentStore
         ? attachments as BudgetedAttachmentStore
@@ -532,6 +545,7 @@ class SwarmTransfer extends ChangeNotifier {
     required this.isDirect,
     required this.send,
     required this.onComplete,
+    this.canTransfer,
   });
   final String ownerId;
   final SparseSwarmCache cache;
@@ -540,6 +554,7 @@ class SwarmTransfer extends ChangeNotifier {
   final bool Function(String) isDirect;
   final Future<void> Function(String, String) send;
   final void Function(SwarmManifest) onComplete;
+  final bool Function(SwarmManifest)? canTransfer;
   final _manifests = <String, SwarmManifest>{};
   final _availability = <String, Map<String, Set<int>>>{};
   final _assemblies = <String, Map<int, _Assembly>>{};
@@ -548,25 +563,37 @@ class SwarmTransfer extends ChangeNotifier {
   final _completed = <String>{};
   bool _closed = false;
 
-  /// The caller must validate the enclosing group event signature before registration.
-  void register(SwarmManifest manifest) {
+  void validateRegistration(SwarmManifest manifest) {
     if (_closed) throw StateError('Swarm transfer is closed');
     final existing = _manifests[manifest.fileId];
     if (existing != null && existing.identityHash != manifest.identityHash) {
       throw const FormatException('Conflicting swarm file id');
     }
+  }
+
+  /// The caller must validate the enclosing group event signature before registration.
+  void register(SwarmManifest manifest, {bool complete = false}) {
+    validateRegistration(manifest);
+    final existing = _manifests[manifest.fileId];
+    if (existing != null &&
+        (!complete || _progress[manifest.fileId]!.complete)) {
+      return;
+    }
     _manifests[manifest.fileId] = manifest;
+    if (complete) _completed.add(manifest.fileId);
     _progress[manifest.fileId] = SwarmProgress(
-      verifiedBytes: 0,
+      verifiedBytes: complete ? manifest.size : 0,
       totalBytes: manifest.size,
       sourceCount: 0,
-      complete: false,
+      complete: complete,
       waitingForDirect: false,
     );
     notifyListeners();
   }
 
   SwarmProgress? progressFor(String fileId) => _progress[fileId];
+  bool _canTransfer(SwarmManifest manifest) =>
+      !_closed && (canTransfer?.call(manifest) ?? true);
   Future<void> _emit(String peer, Map<String, Object?> packet) async {
     final frame = 'chta-swarm-v1:${jsonEncode(packet)}';
     if (utf8.encode(frame).length > swarmMaxFrameBytes) {
@@ -641,6 +668,7 @@ class SwarmTransfer extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (!_canTransfer(m)) return;
     final index = packet['index'];
     if (index is! int || index < 0 || index >= m.pieceCount) {
       throw const FormatException('Invalid swarm piece index');
@@ -661,7 +689,7 @@ class SwarmTransfer extends ChangeNotifier {
         throw const FormatException('Invalid swarm part count');
       }
       for (var p = 0; p < parts; p++) {
-        if (_closed || !await authorize(peer, m)) return;
+        if (!await authorize(peer, m) || !_canTransfer(m)) return;
         final start = p * swarmPartSize;
         await _emit(peer, {
           ..._base(m, 'part'),
@@ -741,7 +769,7 @@ class SwarmTransfer extends ChangeNotifier {
     for (var i = 0; i < count; i++) {
       assembled.add(pending.parts[i]!);
     }
-    if (!await authorize(peer, m)) return;
+    if (!await authorize(peer, m) || !_canTransfer(m)) return;
     try {
       await cache.putPiece(m, index, assembled.takeBytes(), pending.proof!);
     } on FormatException {
@@ -749,7 +777,7 @@ class SwarmTransfer extends ChangeNotifier {
       return;
     }
     final status = await cache.status(m);
-    _setProgress(m, status);
+    if (_canTransfer(m)) _setProgress(m, status);
   }
 
   void _setProgress(SwarmManifest m, SwarmCacheStatus status) {
@@ -775,12 +803,14 @@ class SwarmTransfer extends ChangeNotifier {
 
   Future<void> tick() async {
     if (_closed) return;
-    for (final m in _manifests.values) {
+    for (final m in _manifests.values.toList()) {
+      if (!_canTransfer(m)) continue;
       final status = await cache.status(m);
+      if (!_canTransfer(m)) continue;
       _setProgress(m, status);
       final online = peers(m).where((p) => p != ownerId).take(64).toList();
       for (final peer in online) {
-        if (!await authorize(peer, m)) continue;
+        if (!await authorize(peer, m) || !_canTransfer(m)) continue;
         await _emit(peer, {
           ..._base(m, 'have'),
           'bits': _encodeAvailability(status.available, m.pieceCount),
@@ -826,7 +856,9 @@ class SwarmTransfer extends ChangeNotifier {
           (p) => active.contains(p) || active.length < 4,
           orElse: () => '',
         );
-        if (peer.isEmpty || !await authorize(peer, m)) continue;
+        if (peer.isEmpty || !await authorize(peer, m) || !_canTransfer(m)) {
+          continue;
+        }
         pending[item.index] = _Assembly(
           peer,
           item.index,

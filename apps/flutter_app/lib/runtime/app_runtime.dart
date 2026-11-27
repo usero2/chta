@@ -12,12 +12,14 @@ class RuntimeState {
     required this.enabled,
     required this.running,
     this.notificationVisible = true,
+    this.canOpenBackgroundNotificationSettings = false,
     this.showLockAction = true,
     this.backgroundRefreshSeconds = minBackgroundRefreshSeconds,
   });
   final bool enabled;
   final bool running;
   final bool notificationVisible;
+  final bool canOpenBackgroundNotificationSettings;
   final bool showLockAction;
   final int backgroundRefreshSeconds;
 }
@@ -29,6 +31,8 @@ abstract interface class RuntimeBridge {
     bool? showLockAction,
     int? backgroundRefreshSeconds,
   });
+
+  Future<void> openBackgroundNotificationSettings();
 }
 
 class NativeRuntimeBridge implements RuntimeBridge {
@@ -52,6 +56,8 @@ class NativeRuntimeBridge implements RuntimeBridge {
       enabled: state?['enabled'] == true,
       running: state?['running'] == true,
       notificationVisible: state?['notificationVisible'] != false,
+      canOpenBackgroundNotificationSettings:
+          state?['canOpenBackgroundNotificationSettings'] == true,
       showLockAction: state?['showLockAction'] != false,
       backgroundRefreshSeconds:
           savedInterval is int &&
@@ -61,6 +67,10 @@ class NativeRuntimeBridge implements RuntimeBridge {
           : minBackgroundRefreshSeconds,
     );
   }
+
+  @override
+  Future<void> openBackgroundNotificationSettings() =>
+      channel.invokeMethod<void>('openBackgroundNotificationSettings');
 }
 
 /// Lives above navigation and never owns a second messaging isolate.
@@ -76,6 +86,7 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
   bool enabled = true;
   bool running = false;
   bool notificationVisible = true;
+  bool canOpenBackgroundNotificationSettings = false;
   bool showLockAction = true;
   int backgroundRefreshSeconds = minBackgroundRefreshSeconds;
   String? error;
@@ -115,6 +126,9 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> setEnabled(bool value) => _configure(enabled: value);
 
+  Future<void> openBackgroundNotificationSettings() =>
+      bridge.openBackgroundNotificationSettings();
+
   Future<void> setShowLockAction(bool value) =>
       _configure(showLockAction: value);
 
@@ -146,6 +160,8 @@ class AppRuntime extends ChangeNotifier with WidgetsBindingObserver {
         this.enabled = state.enabled;
         running = state.running;
         notificationVisible = state.notificationVisible;
+        canOpenBackgroundNotificationSettings =
+            state.canOpenBackgroundNotificationSettings;
         this.showLockAction = state.showLockAction;
         this.backgroundRefreshSeconds = state.backgroundRefreshSeconds;
         error = null;

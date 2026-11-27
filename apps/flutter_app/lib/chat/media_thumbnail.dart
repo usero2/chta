@@ -11,13 +11,16 @@ import 'chat_attachment.dart';
 Future<void> _thumbnailQueue = Future.value();
 
 /// Decode only app-owned cached media; serialize players to bound memory use.
-Future<Uint8List?> createMediaThumbnail(ChatAttachment file) {
-  final result = _thumbnailQueue.then((_) => _create(file));
+Future<Uint8List?> createMediaThumbnail(
+  ChatAttachment file, {
+  bool localOnly = false,
+}) {
+  final result = _thumbnailQueue.then((_) => _create(file, localOnly));
   _thumbnailQueue = result.then((_) {}, onError: (Object _) {});
   return result;
 }
 
-Future<Uint8List?> _create(ChatAttachment file) async {
+Future<Uint8List?> _create(ChatAttachment file, bool localOnly) async {
   if (file.isStreamed) return null;
   if (file.kind != 'video') return null;
   AttachmentMediaSource? source;
@@ -28,7 +31,11 @@ Future<Uint8List?> _create(ChatAttachment file) async {
   try {
     source = await createAttachmentMediaSource(file);
     MediaKit.ensureInitialized();
-    player = Player(configuration: const PlayerConfiguration(vo: 'null'));
+    player = Player(
+      configuration: localOnly
+          ? const PlayerConfiguration(vo: 'null', protocolWhitelist: ['file'])
+          : const PlayerConfiguration(vo: 'null'),
+    );
     // Native players disable video decoding until a VideoController attaches.
     // This offscreen player has no controller; select the track explicitly.
     if (!kIsWeb) await player.setVideoTrack(VideoTrack.auto());

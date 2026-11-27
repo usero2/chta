@@ -184,6 +184,55 @@ fixture(Crypto crypto, Service service, {int size = 700000}) async {
 }
 
 void main() {
+  test(
+    'a Courier file offer reads zero packages until it is accepted',
+    () async {
+      final crypto = Crypto(), service = Service();
+      final offer = await fixture(crypto, service, size: 17);
+      (crypto.opened['metadata'] as Map)['offerHeader'] =
+          offer.envelope.payloadSource;
+      final budget = CachePolicy(
+        ownerId: 'owner',
+        settings: Disk(),
+        availableSpace: () async => null,
+      );
+      await budget.initialize();
+      var accepted = false, sawOffer = false;
+      CourierReceived? committed;
+      final cache = MemoryChunkCache();
+      final receiver = CourierReceiver(
+        ownerId: 'owner',
+        crypto: crypto,
+        service: service,
+        journal: CourierJournal(
+          ownerId: 'owner',
+          namespace: 'courier_inbox',
+          storage: Disk(),
+        ),
+        cache: cache,
+        budget: budget,
+        clock: () => 2000,
+        authorize: (envelope) async {
+          if (envelope.payload['file'] == null) return true;
+          sawOffer = true;
+          return accepted;
+        },
+        isDeleted: (_) => false,
+        existingReceivedAt: (_) async => committed?.receivedAt,
+        commit: (value) async => committed = value,
+      );
+      expect(await receiver.receive(offer.offers), isNull);
+      expect(sawOffer, isTrue);
+      expect(service.reads, isEmpty);
+      expect(committed, isNull);
+      accepted = true;
+      expect(await receiver.receive(offer.offers), isNotNull);
+      expect(service.reads, isNotEmpty);
+      expect(committed?.attachment?.size, offer.file.length);
+      budget.dispose();
+    },
+  );
+
   test('a concurrent live commit retains its durable receive time in the Courier receipt', () async {
     final crypto = Crypto(),
         service = Service(),

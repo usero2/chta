@@ -3,9 +3,11 @@ import 'dart:convert';
 
 import 'package:cht/account/account_models.dart';
 import 'package:cht/chat/messaging_service.dart';
+import 'package:cht/chat/file_offer.dart';
 import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/relay/relay_network.dart';
+import 'package:cht/runtime/network_monitor.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/chunked_attachment_bridge.dart';
@@ -35,6 +37,7 @@ class Account extends f.SessionAccount {
     capabilities: [
       'peer-sessions-v2',
       'files-v2',
+      fileOfferCapability,
       if (messageActions) PeerMessageAction.capability,
     ],
   );
@@ -97,7 +100,174 @@ class _Peer extends rtc.FakePeer {
   }
 }
 
+class _ResumeMonitor implements NetworkMonitor {
+  var state = const NetworkObservation(available: true, fingerprint: 'wifi');
+  final events = StreamController<NetworkObservation>.broadcast();
+  @override
+  Stream<NetworkObservation> get changes => events.stream;
+  @override
+  Future<NetworkObservation> check() async => state;
+  @override
+  Future<void> close() => events.close();
+}
+
+class _ResumeRelay extends RelayNetwork {
+  _ResumeRelay(super.crypto, {super.connector});
+  final reconnects = <bool>[];
+
+  @override
+  Future<void> recoverNetwork({bool force = true}) async {
+    reconnects.add(force);
+    await super.recoverNetwork(force: force);
+  }
+}
+
 void main() {
+  test(
+    'resuming the same network keeps the relay and recovers a real handover',
+    () async {
+      final hub = f.Hub(f.a, 'relay-a');
+      final monitor = _ResumeMonitor();
+      final history = PeerHistory();
+      await history.load('alice');
+      final network = _ResumeRelay(f.Crypto('alice'), connector: hub.connect);
+      await network.addSeed(f.a);
+      final service = MessagingService(
+        ownerId: 'alice',
+        account: Account('alice', ['bob']),
+        network: network,
+        history: history,
+        ownCard: () async => 'alice',
+        networkMonitor: monitor,
+      );
+      try {
+        await service.start();
+        await f.until(() => network.online.contains(f.a));
+        await service.resumeNetwork();
+        await service.resumeNetwork();
+        await Future<void>.delayed(const Duration(milliseconds: 1000));
+        expect(network.reconnects, isEmpty);
+        expect(hub.sockets, hasLength(1));
+
+        monitor.state = const NetworkObservation(
+          available: true,
+          fingerprint: 'mobile',
+        );
+        await service.resumeNetwork();
+        await f.until(() => network.reconnects.isNotEmpty);
+        expect(network.reconnects, [true]);
+        await f.until(() => network.online.contains(f.a));
+      } finally {
+        await service.close();
+        history.dispose();
+      }
+    },
+  );
+
+  test('file metadata arrives alone before any attachment bytes', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final histories = <String, PeerHistory>{};
+    final services = <String, MessagingService>{};
+    try {
+      for (final name in ['alice', 'bob']) {
+        final other = name == 'alice' ? 'bob' : 'alice';
+        final history = PeerHistory(store: Store(), attachments: Attachments());
+        await history.load(name);
+        histories[name] = history;
+        final network = RelayNetwork(f.Crypto(name), connector: hub.connect);
+        await network.addSeed(f.a);
+        final service = MessagingService(
+          ownerId: name,
+          account: Account(name, [other]),
+          network: network,
+          history: history,
+          ownCard: () async => name,
+          observeNetwork: false,
+        );
+        services[name] = service;
+        await service.start();
+      }
+      final alice = services['alice']!;
+      await alice.queueMessage(
+        'bob',
+        PeerMessage(
+          id: 'fixture-file',
+          text: '[file] Report.txt',
+          incoming: false,
+          status: DeliveryStatus.pending,
+          attachment: ChatAttachment(
+            name: 'Report.txt',
+            mimeType: 'text/plain',
+            bytes: Uint8List.fromList([1, 2, 3]),
+          ),
+        ),
+      );
+      final bob = histories['bob']!;
+      await f.until(() => bob.visibleMessagesFor('alice').isNotEmpty);
+      expect(
+        bob.visibleMessagesFor('alice').single.body,
+        contains('Report.txt'),
+      );
+      expect(bob.visibleMessagesFor('alice').single.hasAttachment, isFalse);
+      expect(bob.cacheReferences, isEmpty);
+      await services['bob']!.respondToFileOffer(
+        'alice',
+        'fixture-file',
+        accept: true,
+      );
+      await f.until(
+        () =>
+            histories['alice']!.messageById('bob', 'fixture-file')?.status ==
+            DeliveryStatus.delivered,
+      );
+      final delivered = bob.visibleMessagesFor('alice').single;
+      expect(delivered.id, 'fixture-file');
+      expect((await bob.resolveAttachment(delivered)).bytes, [1, 2, 3]);
+
+      await alice.queueMessage(
+        'bob',
+        PeerMessage(
+          id: 'other-fixture-file',
+          text: '[file] Notes.txt',
+          incoming: false,
+          status: DeliveryStatus.pending,
+          attachment: ChatAttachment(
+            name: 'Notes.txt',
+            mimeType: 'text/plain',
+            bytes: Uint8List.fromList([4, 5, 6, 7]),
+          ),
+        ),
+      );
+      await f.until(
+        () =>
+            bob.fileOfferFor('alice', 'other-fixture-file', incoming: true) !=
+            null,
+      );
+      await services['bob']!.respondToFileOffer(
+        'alice',
+        'other-fixture-file',
+        accept: false,
+      );
+      await f.until(
+        () =>
+            histories['alice']!
+                .messageById('bob', 'other-fixture-file')
+                ?.failureReason ==
+            'Declined by recipient',
+      );
+      expect(bob.messageById('alice', 'other-fixture-file'), isNull);
+      expect(bob.cacheReferences.length, 1);
+      expect(histories['alice']!.queuedMessages, isEmpty);
+    } finally {
+      for (final service in services.values) {
+        await service.close();
+      }
+      for (final history in histories.values) {
+        history.dispose();
+      }
+    }
+  });
+
   test('reply, edit and delete exchange acknowledgements through encrypted relay chat', () async {
     final hub = f.Hub(f.a, 'relay-a');
     final histories = <String, PeerHistory>{};
@@ -142,6 +312,22 @@ void main() {
       await f.until(
         () => histories['alice']!.visibleMessagesFor('bob').length == 2,
       );
+      final firstReply = received.visibleMessagesFor('alice').last;
+      await bob.queueMessageAction(
+        'alice',
+        PeerMessageActionKind.reply,
+        'original',
+        text: 'Second reply',
+      );
+      await bob.queueMessageAction(
+        'alice',
+        PeerMessageActionKind.reply,
+        firstReply.id,
+        text: 'Nested reply',
+      );
+      await f.until(
+        () => histories['alice']!.visibleMessagesFor('bob').length == 4,
+      );
       await alice.queueMessageAction(
         'bob',
         PeerMessageActionKind.edit,
@@ -167,11 +353,85 @@ void main() {
       expect(received.visibleMessagesFor('alice').map((m) => m.body), [
         'Original text',
         'Reply text',
+        'Second reply',
+        'Nested reply',
       ]);
       expect(
-        received.visibleMessagesFor('alice').last.action?.target,
+        received.visibleMessagesFor('alice')[2].action?.target,
         'original',
       );
+      expect(
+        received.visibleMessagesFor('alice').last.action?.target,
+        firstReply.id,
+      );
+      expect(
+        histories['alice']!.visibleMessagesFor('bob').last.action?.target,
+        firstReply.id,
+      );
+    } finally {
+      for (final service in services.values) {
+        await service.close();
+      }
+      for (final history in histories.values) {
+        history.dispose();
+      }
+    }
+  });
+
+  test('a queued reply does not block plain text to a legacy peer', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final histories = <String, PeerHistory>{};
+    final services = <String, MessagingService>{};
+    try {
+      for (final name in ['alice', 'bob']) {
+        final peer = name == 'alice' ? 'bob' : 'alice';
+        final history = PeerHistory(store: Store());
+        await history.load(name);
+        histories[name] = history;
+        final network = RelayNetwork(f.Crypto(name), connector: hub.connect);
+        await network.addSeed(f.a);
+        final service = MessagingService(
+          ownerId: name,
+          account: Account(name, [peer], messageActions: name != 'alice'),
+          network: network,
+          history: history,
+          ownCard: () async => name,
+          observeNetwork: false,
+        );
+        services[name] = service;
+        await service.start();
+      }
+      final alice = services['alice']!;
+      await f.until(() => alice.isOnline('bob'));
+      expect(alice.supportsMessageActions('bob'), isFalse);
+      final history = histories['alice']!;
+      history.add(
+        'bob',
+        PeerMessage(
+          id: 'old',
+          text: 'Earlier message',
+          incoming: true,
+          status: DeliveryStatus.delivered,
+        ),
+      );
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.reply,
+        'old',
+        text: 'Wait for a compatible session',
+      );
+      final reply = history.visibleMessagesFor('bob').last;
+      await alice.queueText('bob', 'Ordinary text', id: 'ordinary');
+      await f.until(
+        () =>
+            history.visibleMessagesFor('bob').last.status ==
+            DeliveryStatus.delivered,
+      );
+      expect(reply.status, DeliveryStatus.pending);
+      expect(reply.queuedForDelivery, isTrue);
+      expect(histories['bob']!.visibleMessagesFor('alice').map((m) => m.body), [
+        'Ordinary text',
+      ]);
     } finally {
       for (final service in services.values) {
         await service.close();
@@ -378,11 +638,28 @@ void main() {
             ),
           ),
         );
-        await gated.entered.future;
+        await f.until(
+          () =>
+              histories.last.fileOfferFor(
+                'alice',
+                'pause-before-read',
+                incoming: true,
+              ) !=
+              null,
+        );
+        await services.last.respondToFileOffer(
+          'alice',
+          'pause-before-read',
+          accept: true,
+        );
+        await gated.entered.future.timeout(const Duration(seconds: 6));
         await services.first.pauseFile('bob', 'pause-before-read');
         gated.release.complete();
         await Future<void>.delayed(const Duration(milliseconds: 300));
-        expect(histories.last.messagesFor('alice'), isEmpty);
+        expect(
+          histories.last.messageById('alice', 'pause-before-read'),
+          isNull,
+        );
         await services.first.queueText(
           'bob',
           'text still works',
@@ -522,7 +799,6 @@ void main() {
           await service.start();
         }
         await f.until(() => services.every((s) => s.onlinePeers.isNotEmpty));
-        stores[1].fail = true;
         await services[0].queueMessage(
           'bob',
           PeerMessage(
@@ -537,11 +813,25 @@ void main() {
             ),
           ),
         );
-        await Future<void>.delayed(const Duration(milliseconds: 800));
+        await f.until(
+          () =>
+              histories[1].fileOfferFor(
+                'alice',
+                'save-failure',
+                incoming: true,
+              ) !=
+              null,
+        );
+        stores[1].fail = true;
+        await expectLater(
+          services[1].respondToFileOffer('alice', 'save-failure', accept: true),
+          throwsStateError,
+        );
+        expect(histories[1].messageById('alice', 'save-failure'), isNull);
         expect(histories[1].error, isNotNull);
         expect(services[1].incomingProgressFor('alice'), isEmpty);
         expect(
-          histories[0].messagesFor('bob').single.status,
+          histories[0].messageById('bob', 'save-failure')!.status,
           isNot(DeliveryStatus.delivered),
         );
       } finally {
@@ -711,10 +1001,24 @@ void main() {
         await services.first.queueText('bob', text, id: 'long-note');
         await f.until(
           () =>
-              histories.first.messagesFor('bob').single.status ==
+              histories.last.fileOfferFor(
+                'alice',
+                'long-note',
+                incoming: true,
+              ) !=
+              null,
+        );
+        await services.last.respondToFileOffer(
+          'alice',
+          'long-note',
+          accept: true,
+        );
+        await f.until(
+          () =>
+              histories.first.messageById('bob', 'long-note')?.status ==
               DeliveryStatus.delivered,
         );
-        final received = histories.last.messagesFor('alice').single;
+        final received = histories.last.visibleMessagesFor('alice').single;
         final file = await histories.last.resolveAttachment(received);
         expect(received.id, 'long-note');
         expect(file.name, endsWith('.md'));
@@ -860,12 +1164,30 @@ void main() {
               attachment: file,
             ),
           );
-          await Future<void>.delayed(const Duration(milliseconds: 800));
-          expect(
-            histories[0].messagesFor('bob').single.status,
-            DeliveryStatus.delivered,
+          await f.until(
+            () =>
+                histories[1].fileOfferFor(
+                  'alice',
+                  'direct-file',
+                  incoming: true,
+                ) !=
+                null,
           );
-          expect(histories[1].messagesFor('alice').single.hasAttachment, true);
+          expect(histories[1].messageById('alice', 'direct-file'), isNull);
+          await services[1].respondToFileOffer(
+            'alice',
+            'direct-file',
+            accept: true,
+          );
+          await f.until(
+            () =>
+                histories[0].messageById('bob', 'direct-file')?.status ==
+                DeliveryStatus.delivered,
+          );
+          expect(
+            histories[1].visibleMessagesFor('alice').single.hasAttachment,
+            true,
+          );
           expect(
             services[0].outgoingProgressFor('bob'),
             isEmpty,

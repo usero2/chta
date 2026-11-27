@@ -29,11 +29,12 @@ class ChatNetworkMonitor(context: Context) : EventChannel.StreamHandler {
         val network = manager.activeNetwork
         val caps = network?.let { manager.getNetworkCapabilities(it) }
         val transports = (0..7).filter { caps?.hasTransport(it) == true }.joinToString(",")
-        val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         val addresses = network?.let { manager.getLinkProperties(it) }
             ?.linkAddresses?.map { it.toString() }?.sorted()?.joinToString(",").orEmpty()
+        // Captive-portal validation may change without moving the socket to
+        // another network. The network handle and interface addresses are stable.
         return mapOf("available" to (network != null),
-            "fingerprint" to "${network?.networkHandle ?: 0}:$transports:$validated:${addresses.hashCode()}")
+            "fingerprint" to "${network?.networkHandle ?: 0}:$transports:${addresses.hashCode()}")
     }
     private fun emit() {
         main.removeCallbacks(deliver)

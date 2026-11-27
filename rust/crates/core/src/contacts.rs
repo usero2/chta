@@ -169,6 +169,7 @@ impl IdentityManager {
                 "peer-sessions-v2".to_owned(),
                 "delivery-v2".to_owned(),
                 "message-actions-v1".to_owned(),
+                "file-offers-v1".to_owned(),
                 "courier-v1".to_owned(),
             ],
             signature: String::new(),

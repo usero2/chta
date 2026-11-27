@@ -28,6 +28,7 @@ import '../groups/group_dialogs.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../contact_requests/contact_request_bridge.dart';
 import '../contact_requests/contact_request_controller.dart';
+import '../contact_requests/relay_contact_request_transport.dart';
 import '../contact_requests/contact_request_views.dart';
 import '../core/core_bridge.dart';
 import '../notifications/incoming_notifications.dart';
@@ -578,6 +579,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   String? targetGroupId;
   bool exiting = false;
   ContactRequestController? friendRequests;
+  RelayContactRequestTransport? _contactRequestRoutes;
   MessagingService? messaging;
   late final CachePolicy cachePolicy;
 
@@ -989,6 +991,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
               controller.sendBatch(id, caption, files),
           openFile: controller.openFile,
           progressFor: controller.progressFor,
+          fileChoiceFor: controller.fileChoiceFor,
+          onFileChoice: controller.chooseFile,
           onDetails: () => unawaited(_groupDetails(id)),
           onDelete: () => unawaited(_deleteGroupChat(id)),
           onBack: () => widget.router.go('/chats'),
@@ -1066,6 +1070,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
                   isCurrent: () => mounted && peerHistory.ownerId == owner,
                 ),
                 history: peerHistory,
+                requireFileApproval: true,
                 cache: managedCache,
                 contacts: () => chatContacts,
                 isCurrent: () => mounted && peerHistory.ownerId == owner,
@@ -1095,7 +1100,15 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         relayNetwork = network;
         _updateBackgroundNetworking();
         service.addListener(_messagingChanged);
-        if (seed != null) friendRequests?.attach(seed);
+        if (friendRequests case final requests?) {
+          final routes = RelayContactRequestTransport(
+            ownerId: owner,
+            network: network,
+            seed: seed,
+          );
+          _contactRequestRoutes = routes;
+          requests.attach(routes);
+        }
         unawaited(
           service.start().catchError((Object caught) {
             if (mounted) setState(() => historyError = caught);
@@ -1152,6 +1165,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     unawaited(groups?.close());
     friendRequests?.removeListener(_requestsChanged);
     unawaited(friendRequests?.close());
+    unawaited(_contactRequestRoutes?.close());
     super.dispose();
   }
 
@@ -1409,7 +1423,9 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       chatMode: showingPeerChat,
       showChatSidebar: !wide,
       requests: friendRequests,
-      onSeedReady: (seed) => friendRequests?.attach(seed),
+      onSeedReady: (seed) {
+        if (_contactRequestRoutes == null) friendRequests?.attach(seed);
+      },
       onPeerAuthenticated: (contact) {
         unawaited(_loadChatContacts());
         if (index == 2) {

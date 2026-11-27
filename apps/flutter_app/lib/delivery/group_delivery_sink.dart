@@ -47,11 +47,33 @@ class GroupDeliverySink {
     return active && result['allowed'] == true;
   }
 
+  Future<bool> authorizeFetch(
+    DeliveryEnvelope envelope, {
+    int? receivedAt,
+  }) async {
+    if (envelope.payload['file'] == null) return authorize(envelope);
+    final event = await verify(envelope);
+    return _recordFileOffer(envelope, _manifest(event), receivedAt: receivedAt);
+  }
+
+  Future<bool> authorizeLegacyFile(DeliveryEnvelope envelope) async {
+    if (isDeleted(envelope) || !await authorize(envelope)) return false;
+    final row = find(envelope), manifest = row?.manifest;
+    return manifest != null &&
+        row!.sentAt == envelope.sentAt &&
+        scope(envelope) == (manifest.groupId, manifest.epoch) &&
+        controller.canFetchFile(manifest);
+  }
+
   bool isDeleted(DeliveryEnvelope e) {
     final s = scope(e);
-    return s == null ||
+    if (s == null ||
         !active ||
-        controller.isDeletedDelivery(s.$1, e.authorId, e.messageId, e.sentAt);
+        controller.isDeletedDelivery(s.$1, e.authorId, e.messageId, e.sentAt)) {
+      return true;
+    }
+    final message = find(e);
+    return message != null && controller.isMessageRemoved(message);
   }
 
   GroupMessage? find(DeliveryEnvelope e) {
@@ -84,7 +106,7 @@ class GroupDeliverySink {
     );
     _guard();
     final p = e.payload;
-    if (e.kind != 'group' ||
+    if (!['group', 'file'].contains(e.kind) ||
         p['groupEvent'] is! String ||
         p['text'] is! String ||
         p.keys.any((k) => !['groupEvent', 'text', 'file'].contains(k))) {
@@ -107,7 +129,8 @@ class GroupDeliverySink {
       jsonDecode(event['payload'] as String) as Map,
     );
     if (event['kind'] == 'message') {
-      if (p['file'] != null ||
+      if (e.kind != 'group' ||
+          p['file'] != null ||
           original.length != 1 ||
           original['text'] != p['text']) {
         throw const FormatException('Group text mismatch');
@@ -152,7 +175,8 @@ class GroupDeliverySink {
       return null;
     }
     if (m.manifest != null &&
-        (!controller.hasCompletedFile(m.manifest!.fileId) ||
+        (!controller.canFetchFile(m.manifest!) ||
+            !controller.hasCompletedFile(m.manifest!) ||
             !(await controller.cache.status(m.manifest!)).complete)) {
       return null;
     }
@@ -162,6 +186,23 @@ class GroupDeliverySink {
   // Courier staging is copied into the group's swarm cache. It is not a history
   // attachment, so the inbox can discard it after its receipt has been deposited.
   bool referencesFile(String id) => false;
+
+  SwarmManifest _manifest(Map<String, Object?> event) => SwarmManifest.fromJson(
+    Map<String, Object?>.from(jsonDecode(event['payload'] as String) as Map),
+  );
+
+  Future<bool> _recordFileOffer(
+    DeliveryEnvelope e,
+    SwarmManifest manifest, {
+    int? receivedAt,
+  }) => controller.recordFileOffer(
+    e.authorId,
+    e.payload['groupEvent'] as String,
+    e.toJson(),
+    manifest,
+    receivedAt: receivedAt,
+  );
+
   Future<void> commit(CourierReceived received) async {
     final e = received.envelope, event = await verify(e), s = scope(e)!;
     _guard();
@@ -175,18 +216,22 @@ class GroupDeliverySink {
     }
     SwarmManifest? manifest;
     if (event['kind'] == 'file') {
-      manifest = SwarmManifest.fromJson(
-        Map<String, Object?>.from(
-          jsonDecode(event['payload'] as String) as Map,
-        ),
+      manifest = _manifest(event);
+      final accepted = await _recordFileOffer(
+        e,
+        manifest,
+        receivedAt: received.receivedAt,
       );
+      _guard();
+      if (!accepted) throw StateError('Group file has not been accepted');
       final ref = received.attachment;
       if (ref == null) throw StateError('Group attachment missing');
       final file = await controller.attachments.read(controller.ownerId, ref);
       _guard();
       if (generation != controller.conversationGeneration(s.$1) ||
           !await authorize(e) ||
-          isDeleted(e)) {
+          isDeleted(e) ||
+          !controller.canFetchFile(manifest)) {
         throw StateError('Group changed');
       }
       final imported = await controller.cache.importFile(
@@ -195,6 +240,7 @@ class GroupDeliverySink {
         uploaderId: e.authorId,
         fileId: manifest.fileId,
         file: file.withPresentation(caption: manifest.caption),
+        cover: manifest.cover,
       );
       _guard();
       if (jsonEncode(imported.toJson()) != jsonEncode(manifest.toJson())) {

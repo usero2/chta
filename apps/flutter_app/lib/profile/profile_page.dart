@@ -238,19 +238,28 @@ class _ProfilePageState extends State<ProfilePage> {
                                                   TargetPlatform.android
                                           ? 'On · Lock app to stop'
                                           : 'On')
-                                    : 'On · Enable the background notification in system settings')
+                                    : 'On · Notification hidden')
                               : 'Off'),
                     ),
                     value: runtime.enabled,
                     onChanged: saving
                         ? null
-                        : (value) => _run(() async {
-                            if (value && !runtime.notificationVisible) {
-                              await widget.notifications?.requestPermissions();
-                            }
-                            await runtime.setEnabled(value);
-                          }),
+                        : (value) => _run(() => runtime.setEnabled(value)),
                   ),
+                  if (runtime.canOpenBackgroundNotificationSettings)
+                    ListTile(
+                      key: const Key(
+                        'profile-background-notification-settings',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Background notification settings'),
+                      trailing: const Icon(Icons.open_in_new),
+                      onTap: saving
+                          ? null
+                          : () => _run(
+                              runtime.openBackgroundNotificationSettings,
+                            ),
+                    ),
                   if (!kIsWeb &&
                       defaultTargetPlatform == TargetPlatform.android) ...[
                     ListTile(

@@ -47,6 +47,7 @@ class ResumableAttachmentTransfer {
     required this.onCompleted,
     this.onProgress,
     this.checkIncoming,
+    this.validateOffer,
     this.onReceipt,
     this.ackTimeout = const Duration(seconds: 45),
   });
@@ -60,6 +61,7 @@ class ResumableAttachmentTransfer {
   onProgress;
   final Duration ackTimeout;
   final void Function(String id)? checkIncoming;
+  final FutureOr<bool> Function(String id, AttachmentRef ref)? validateOffer;
   final void Function(String id, int receivedAt)? onReceipt;
   static const prefix = 'chtfile2_';
   static const pieceSize = 8 * 1024;
@@ -414,6 +416,12 @@ class ResumableAttachmentTransfer {
           groupIndex: value['groupIndex'] as int?,
           groupCount: value['groupCount'] as int?,
         );
+        if (validateOffer != null && !await validateOffer!(id, ref)) {
+          throw const TransferRejected(
+            'The recipient has not accepted the file',
+          );
+        }
+        _guard(generation);
         final state = await bridge.beginChunkedAttachment(
           ownerId,
           localId,

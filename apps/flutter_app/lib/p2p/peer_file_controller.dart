@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import '../account/account_models.dart';
 import '../chat/attachment_transfer.dart';
+import '../chat/attachment_ref.dart';
+import '../chat/file_offer.dart';
 import '../chat/chunked_attachment_bridge.dart';
 import '../chat/file_transfer_progress.dart';
 import '../chat/peer_history.dart';
@@ -24,6 +26,8 @@ class PeerFileController {
     this.onChanged,
     this.autoResume = true,
     this.advertiseMessageActions = false,
+    this.advertiseFileOffers = false,
+    this.validateFileOffer,
     bool automaticRetries = true,
     int Function()? clock,
     DirectPeerFactory? peerFactory,
@@ -48,8 +52,15 @@ class PeerFileController {
   final String ownerId;
   final bool autoResume;
   final bool advertiseMessageActions;
-  bool _actionCapabilitySent = false, _peerActionCapability = false;
-  bool get supportsMessageActions => ready && _peerActionCapability;
+  final bool advertiseFileOffers;
+  final FutureOr<bool> Function(String id, AttachmentRef ref)?
+  validateFileOffer;
+  final _sentCapabilities = <String>{};
+  final _peerCapabilities = <String>{};
+  bool get supportsMessageActions =>
+      ready && _peerCapabilities.contains(PeerMessageAction.capability);
+  bool get supportsFileOffers =>
+      ready && _peerCapabilities.contains(fileOfferCapability);
   final ChunkedAttachmentBridge cache;
   final PeerHistory history;
   final DirectSignalSender sendEncryptedControl;
@@ -174,8 +185,8 @@ class PeerFileController {
       _pendingMessages.clear();
       progress.clear();
       _peer = selected;
-      _actionCapabilitySent = false;
-      _peerActionCapability = false;
+      _sentCapabilities.clear();
+      _peerCapabilities.clear();
       _capable = capable;
       _seedValidated = false;
       _noiseValidated = false;
@@ -220,6 +231,7 @@ class PeerFileController {
       peerId: peer,
       bridge: cache,
       isDirect: () => ready,
+      validateOffer: validateFileOffer,
       checkIncoming: (id) {
         final message = history
             .messagesFor(peer)
@@ -498,14 +510,10 @@ class PeerFileController {
           return;
         }
         final id = value['id'] as String;
-        if (advertiseMessageActions &&
-            value['type'] == 'capability' &&
-            id == PeerMessageAction.capability) {
-          if (!_peerActionCapability) {
-            _peerActionCapability = true;
-            onChanged?.call();
-          }
-          if (value['reply'] != true) await _sendActionCapability(reply: true);
+        if (value['type'] == 'capability' &&
+            _advertisedCapabilities.contains(id)) {
+          if (_peerCapabilities.add(id)) onChanged?.call();
+          if (value['reply'] != true) await _sendCapability(id, reply: true);
         } else if (value['type'] == 'receipt') {
           final time = value['receivedAt'];
           if (time is int && time >= 0 && time <= 8640000000000000) {
@@ -560,31 +568,33 @@ class PeerFileController {
     }
   }
 
-  Future<void> _sendActionCapability({bool reply = false}) => link.send(
-    jsonEncode({
-      'v': 1,
-      'type': 'capability',
-      'id': PeerMessageAction.capability,
-      'reply': reply,
-    }),
+  Iterable<String> get _advertisedCapabilities sync* {
+    if (advertiseMessageActions) yield PeerMessageAction.capability;
+    if (advertiseFileOffers) yield fileOfferCapability;
+  }
+
+  Future<void> _sendCapability(String id, {bool reply = false}) => link.send(
+    jsonEncode({'v': 1, 'type': 'capability', 'id': id, 'reply': reply}),
   );
 
   void _announceActions() {
-    if (!advertiseMessageActions || !ready || _actionCapabilitySent) return;
-    _actionCapabilitySent = true;
+    if (!ready) return;
     final generation = _generation;
-    unawaited(
-      _sendActionCapability().catchError((Object _) {
-        if (_generation == generation) _actionCapabilitySent = false;
-      }),
-    );
+    for (final id in _advertisedCapabilities) {
+      if (!_sentCapabilities.add(id)) continue;
+      unawaited(
+        _sendCapability(id).catchError((Object _) {
+          if (_generation == generation) _sentCapabilities.remove(id);
+        }),
+      );
+    }
   }
 
   void _linkChanged() {
     if (_closed) return;
     if (!ready) {
-      _actionCapabilitySent = false;
-      _peerActionCapability = false;
+      _sentCapabilities.clear();
+      _peerCapabilities.clear();
       _transfer?.disconnected();
     } else {
       _announceActions();

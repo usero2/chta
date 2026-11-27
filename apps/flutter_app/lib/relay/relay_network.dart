@@ -780,7 +780,7 @@ class RelayNetwork extends ChangeNotifier {
       final catalogInterval = _inBackground ? 60000 : 20000;
       for (final entry in _links.entries.toList()) {
         final link = entry.value;
-        if (now - link.lastReceived > (link.registered ? 65000 : 15000)) {
+        if (_isStale(link)) {
           _disconnect(entry.key, link);
           continue;
         }
@@ -916,6 +916,9 @@ class RelayNetwork extends ChangeNotifier {
     }
   }
 
+  bool _isStale(_Link link) =>
+      now - link.lastReceived > (link.registered ? 65000 : 15000);
+
   Future<void> recoverNetwork({bool force = true}) async {
     if (_closed) return;
     final handover = force
@@ -923,7 +926,7 @@ class RelayNetwork extends ChangeNotifier {
               _links.keys.lastOrNull
         : null;
     for (final entry in _links.entries.toList()) {
-      if (entry.key == handover || now - entry.value.lastReceived > 30000) {
+      if (entry.key == handover || _isStale(entry.value)) {
         _disconnect(entry.key, entry.value);
       }
     }

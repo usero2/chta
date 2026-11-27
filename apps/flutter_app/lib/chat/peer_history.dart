@@ -11,6 +11,7 @@ import 'attachment_store.dart';
 import 'peer_history_store.dart';
 import 'cache_policy.dart';
 import 'peer_message_action.dart';
+import 'file_offer.dart';
 
 enum DeliveryStatus { pending, sent, delivered, failed }
 
@@ -41,11 +42,19 @@ class PeerMessage {
   late final PeerMessageAction? action = hasAttachment
       ? null
       : PeerMessageAction.decode(id, text);
-  bool get isVisible =>
-      !id.startsWith(PeerMessageAction.idPrefix) ||
-      action?.kind == PeerMessageActionKind.reply;
-  String get body =>
-      action?.kind == PeerMessageActionKind.reply ? action!.text! : text;
+  late final FileOffer? fileOffer = FileOffer.decode(id, text);
+  late final FileOfferDecision? fileOfferDecision = FileOfferDecision.decode(
+    id,
+    text,
+  );
+  bool get isVisible => isFileOfferEvent(id)
+      ? incoming && fileOffer != null
+      : !id.startsWith(PeerMessageAction.idPrefix) ||
+            action?.kind == PeerMessageActionKind.reply;
+  String get body => switch (fileOffer) {
+    final offer? => '[file] ${offer.name}',
+    _ => action?.kind == PeerMessageActionKind.reply ? action!.text! : text,
+  };
   ChatAttachment? attachment;
   AttachmentRef? attachmentRef;
   AttachmentRef? thumbnailRef;
@@ -173,8 +182,69 @@ class PeerHistory extends ChangeNotifier {
     return [for (final index in indices) messages[index]];
   }
 
-  List<PeerMessage> visibleMessagesFor(String? peer) =>
-      messagesFor(peer).where((message) => message.isVisible).toList();
+  List<PeerMessage> visibleMessagesFor(String? peer) {
+    final room = messagesFor(peer);
+    final receivedFiles = {
+      for (final message in room)
+        if (message.incoming && message.hasAttachment) message.id,
+    };
+    return room
+        .where(
+          (message) =>
+              message.isVisible &&
+              !receivedFiles.contains(message.fileOffer?.fileId),
+        )
+        .toList();
+  }
+
+  PeerMessage? messageById(String? peer, String id) =>
+      _rooms[peer]?.where((message) => message.id == id).firstOrNull;
+
+  FileOffer? fileOfferFor(String peer, String id, {required bool incoming}) {
+    final row = messageById(peer, FileOffer.messageId(id));
+    return row?.incoming == incoming ? row?.fileOffer : null;
+  }
+
+  FileOfferDecision? decisionFor(
+    String peer,
+    FileOffer offer, {
+    required bool incoming,
+  }) {
+    final row = messageById(peer, FileOfferDecision.messageId(offer.fileId));
+    final decision = row?.fileOfferDecision;
+    return row?.incoming == incoming && decision?.digest == offer.digest
+        ? decision
+        : null;
+  }
+
+  bool permitsIncomingFile(
+    String peer,
+    String id, {
+    required Object? name,
+    required Object? mimeType,
+    required Object? size,
+    required Object? digest,
+  }) {
+    final offer = fileOfferFor(peer, id, incoming: true);
+    if (offer != null) {
+      return decisionFor(peer, offer, incoming: false)?.accepted == true &&
+          offer.matches(
+            name: name,
+            mimeType: mimeType,
+            size: size,
+            digest: digest,
+          );
+    }
+    // A matching cached reference may predate the file approval flow.
+    final existing = messageById(peer, id);
+    final ref = existing?.attachmentRef;
+    return existing?.incoming == true &&
+        ref != null &&
+        ref.name == name &&
+        ref.mimeType == mimeType &&
+        ref.size == size &&
+        ref.digest == digest;
+  }
 
   MessagePresentation? presentationFor(String? peer, String id) =>
       presentationsFor(peer)[id];
@@ -599,6 +669,20 @@ class PeerHistory extends ChangeNotifier {
     if (messages.any((item) => item.id == message.id)) return;
     // Append to storage so existing encrypted history pages keep their hashes.
     messages.add(message);
+    if (message.fileOfferDecision case final choice? when message.incoming) {
+      final offer = fileOfferFor(peerId, choice.fileId, incoming: false);
+      final file = messageById(peerId, choice.fileId);
+      if (offer?.digest == choice.digest &&
+          !choice.accepted &&
+          file?.incoming == false &&
+          file?.hasAttachment == true &&
+          file?.status != DeliveryStatus.delivered) {
+        file!
+          ..queuedForDelivery = false
+          ..status = DeliveryStatus.failed
+          ..failureReason = 'Declined by recipient';
+      }
+    }
     changed(peerId);
   }
 

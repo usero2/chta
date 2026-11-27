@@ -74,6 +74,8 @@ class GroupInvitation {
   );
 }
 
+enum GroupFileChoice { pending, accepted, rejected }
+
 class GroupMessage {
   GroupMessage({
     required this.id,

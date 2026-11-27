@@ -29,6 +29,8 @@ import '../chat/chunked_attachment_bridge.dart';
 import '../chat/resumable_attachment_transfer.dart';
 import '../chat/widgets/message_transfer_status.dart';
 import '../chat/widgets/file_transfer_actions.dart';
+import '../chat/widgets/file_offer_card.dart';
+import '../chat/file_offer.dart';
 import '../chat/managed_attachment_cache.dart';
 import '../chat/media_batch.dart';
 import '../chat/media_item.dart';
@@ -187,6 +189,8 @@ class ConnectionPageState extends State<ConnectionPage> {
   List<PeerMessage> get messages =>
       history.visibleMessagesFor(widget.targetContactId ?? peerIdentityId);
   String? _replyTo;
+  final _answeringFileOffers = <(String, String)>{};
+  final _fileOfferErrors = <(String, String), String>{};
   Timer? timer;
   Timer? answerTimer;
   String connectionState = 'new';
@@ -288,8 +292,20 @@ class ConnectionPageState extends State<ConnectionPage> {
     stun = TextEditingController(text: widget.stunUrl);
     unawaited(_initializeNode());
     _loadTargetContact();
-    unawaited(_poll());
-    timer = Timer.periodic(const Duration(milliseconds: 400), (_) => _poll());
+    _updatePollTimer();
+  }
+
+  void _updatePollTimer() {
+    final needsNativePoll =
+        widget.messaging == null ||
+        bridge.supportsListening && !widget.chatMode;
+    if (!needsNativePoll) {
+      timer?.cancel();
+      timer = null;
+    } else if (timer == null) {
+      unawaited(_poll());
+      timer = Timer.periodic(const Duration(milliseconds: 400), (_) => _poll());
+    }
   }
 
   Future<void> _initializeFileController() async {
@@ -490,6 +506,7 @@ class ConnectionPageState extends State<ConnectionPage> {
       service.addListener(_sharedChanged);
       relayNetwork!.addListener(_historyChanged);
       initializingRelays = false;
+      _sharedChanged();
       widget.onRelayNetworkReady?.call(service.network);
       if (service.seed != null) widget.onSeedReady?.call(service.seed!);
       if (service.network.hostEnabled && relayHost != null) {
@@ -805,6 +822,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   @override
   void didUpdateWidget(covariant ConnectionPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.chatMode != widget.chatMode) _updatePollTimer();
     if (oldWidget.requests != widget.requests) {
       oldWidget.requests?.removeListener(_requestsChanged);
       widget.requests?.addListener(_requestsChanged);
@@ -822,6 +840,8 @@ class ConnectionPageState extends State<ConnectionPage> {
         unawaited(
           fileController?.updatePeer(null, encryptedAuthenticated: false),
         );
+      } else {
+        _sharedChanged();
       }
     }
   }
@@ -859,13 +879,15 @@ class ConnectionPageState extends State<ConnectionPage> {
 
   Future<void> _poll() async {
     if (widget.messaging != null) {
-      if (!mounted || polling) return;
+      if (!mounted || polling || !bridge.supportsListening || widget.chatMode) {
+        return;
+      }
       polling = true;
       try {
-        if (bridge.supportsListening) {
-          nativeListener = await bridge.listenerStatus();
+        final listener = await bridge.listenerStatus();
+        if (mounted && !widget.chatMode) {
+          setState(() => nativeListener = listener);
         }
-        if (mounted) _sharedChanged();
       } catch (_) {
       } finally {
         polling = false;
@@ -2695,6 +2717,7 @@ class ConnectionPageState extends State<ConnectionPage> {
       key: ValueKey('attachment-transfer-${message.id}'),
       message: message,
       color: color,
+      awaitingAcceptance: service?.awaitingFileAcceptance(peer, message),
       progress:
           MessageTransferStatus.visibleFor(
             message,
@@ -2805,6 +2828,63 @@ class ConnectionPageState extends State<ConnectionPage> {
     }
   }
 
+  Future<void> _answerFileOffer(
+    String peer,
+    FileOffer offer,
+    bool accept,
+  ) async {
+    final service = widget.messaging;
+    final key = (peer, offer.fileId);
+    if (service == null || !_answeringFileOffers.add(key)) return;
+    setState(() => _fileOfferErrors.remove(key));
+    try {
+      await service.respondToFileOffer(peer, offer.fileId, accept: accept);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () =>
+              _fileOfferErrors[key] = 'Could not save your choice. Try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _answeringFileOffers.remove(key));
+    }
+  }
+
+  Widget _incomingFileOffer(String peer, FileOffer offer) {
+    final choice = history.error == null
+        ? history.decisionFor(peer, offer, incoming: false)
+        : null;
+    final key = (peer, offer.fileId);
+    return KeyedSubtree(
+      key: ReplyMessageAnchorKey(FileOffer.messageId(offer.fileId)),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: FileOfferCard(
+          key: ValueKey(key),
+          fileName: offer.name,
+          mimeType: offer.mimeType,
+          sizeBytes: offer.size,
+          caption: offer.caption,
+          cover: offer.cover,
+          status: choice == null
+              ? null
+              : choice.accepted
+              ? 'Accepted ? waiting for file'
+              : 'Rejected',
+          error: _fileOfferErrors[key],
+          busy: _answeringFileOffers.contains(key),
+          onAccept: widget.messaging == null
+              ? null
+              : () => _answerFileOffer(peer, offer, true),
+          onReject: widget.messaging == null
+              ? null
+              : () => _answerFileOffer(peer, offer, false),
+        ),
+      ),
+    );
+  }
+
   Widget _peerMessageList() {
     final peer = widget.targetContactId ?? peerIdentityId ?? '';
     final presentations = history.presentationsFor(peer);
@@ -2864,6 +2944,15 @@ class ConnectionPageState extends State<ConnectionPage> {
         final group = groups[messageIndex];
         final time = timeline[messageIndex];
         final message = group.first;
+        if (message.fileOffer case final offer? when message.incoming) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (time.dayLabel case final label?) MessageDayDivider(label),
+              _incomingFileOffer(peer, offer),
+            ],
+          );
+        }
         final presentation = presentations[message.id]!;
         final deleted = presentation.deleted;
         final album =
@@ -2894,6 +2983,10 @@ class ConnectionPageState extends State<ConnectionPage> {
             : null;
         final deliveryDetail = delivered
             ? 'Delivered'
+            : pending?.action != null &&
+                  service?.isOnline(peer) == true &&
+                  !supportsActions
+            ? 'Waiting for an updated app'
             : courierLabel ??
                   (pending == null
                       ? null
@@ -2919,6 +3012,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                   : _replyQuote(
                       originals[quoted],
                       presentations[quoted],
+                      outgoing: outgoing,
                       onJump: originals.containsKey(quoted)
                           ? () => jumpTo(quoted)
                           : null,
@@ -2951,9 +3045,16 @@ class ConnectionPageState extends State<ConnectionPage> {
                       copyText: message.hasAttachment
                           ? null
                           : presentation.text,
-                      unavailableReason: supportsActions
-                          ? null
-                          : 'Both apps need to support message actions.',
+                      unavailableReason: !supportsActions && !message.incoming
+                          ? 'Edit and delete need an updated app.'
+                          : null,
+                      onReply: widget.messaging != null
+                          ? () => _messageAction(
+                              PeerMessageActionKind.reply,
+                              message,
+                              presentation.text,
+                            )
+                          : null,
                       onSelected: supportsActions
                           ? (action) => _messageAction(
                               action,
@@ -3011,6 +3112,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     MessagePresentation? presentation, {
     VoidCallback? onJump,
     VoidCallback? onClear,
+    bool outgoing = false,
   }) {
     final image =
         original != null &&
@@ -3031,6 +3133,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                 'Original message unavailable',
       onJump: onJump,
       onClear: onClear,
+      outgoing: outgoing,
       imageVersion: (original?.attachment, original?.attachmentRef),
       loadImage: image ? () => history.resolveAttachment(original) : null,
     );

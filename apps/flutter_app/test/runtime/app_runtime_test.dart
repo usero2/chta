@@ -31,6 +31,9 @@ class FakeRuntime implements RuntimeBridge {
       backgroundRefreshSeconds: this.backgroundRefreshSeconds,
     );
   }
+
+  @override
+  Future<void> openBackgroundNotificationSettings() async {}
 }
 
 void main() {

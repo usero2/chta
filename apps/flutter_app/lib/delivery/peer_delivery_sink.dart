@@ -2,6 +2,7 @@ import 'package:crypto/crypto.dart';
 
 import '../chat/attachment_ref.dart';
 import '../chat/delivery_feedback.dart';
+import '../chat/file_offer.dart';
 import '../chat/peer_history.dart';
 import '../courier/courier_receiver.dart';
 import 'delivery_crypto_bridge.dart';
@@ -14,11 +15,13 @@ class PeerDeliverySink {
     required this.crypto,
     required this.history,
     required this.isTrusted,
+    this.requireFileApproval = false,
     bool Function()? isCurrent,
   }) : _isCurrent = isCurrent ?? (() => true);
   final String ownerId;
   final DeliveryCryptoBridge crypto;
   final PeerHistory history;
+  final bool requireFileApproval;
   final bool Function(String peer) isTrusted;
   final bool Function() _isCurrent;
   bool get active => _isCurrent() && history.ownerId == ownerId;
@@ -26,11 +29,40 @@ class PeerDeliverySink {
     if (!active) throw StateError('Delivery identity changed');
   }
 
-  Future<bool> authorize(DeliveryEnvelope envelope) async =>
-      active &&
-      envelope.authorId != ownerId &&
-      isTrusted(envelope.authorId) &&
-      envelope.scope == directDeliveryScope(ownerId, envelope.authorId);
+  Future<bool> authorize(DeliveryEnvelope envelope) async {
+    final peer = envelope.authorId;
+    if (!active ||
+        peer == ownerId ||
+        !isTrusted(peer) ||
+        envelope.scope != directDeliveryScope(ownerId, peer)) {
+      return false;
+    }
+    if (!requireFileApproval || envelope.kind == 'text') return true;
+    await history.flush();
+    if (!active || history.error != null || !isTrusted(peer)) return false;
+    final id = envelope.messageId;
+    final file = envelope.payload['file'];
+    if (file is Map) {
+      return history.permitsIncomingFile(
+        peer,
+        id,
+        name: file['name'],
+        mimeType: file['mime'],
+        size: file['size'],
+        digest: file['digest'],
+      );
+    }
+    // The authenticated Courier manifest contains the event kind and ID.
+    // Stop unsolicited file jobs before requesting any encrypted packages.
+    final offer = history.fileOfferFor(peer, id, incoming: true);
+    if (offer != null) {
+      return history.decisionFor(peer, offer, incoming: false)?.accepted ==
+          true;
+    }
+    final existing = history.messageById(peer, id);
+    return existing?.incoming == true && existing?.hasAttachment == true;
+  }
+
   bool isDeleted(DeliveryEnvelope envelope) =>
       !active ||
       history.isDeletedDelivery(
@@ -74,7 +106,13 @@ class PeerDeliverySink {
       throw const FormatException('Invalid private message descriptor');
     }
     if (payload['file'] == null) {
-      validateOutgoingText(payload['text'] as String);
+      final text = payload['text'] as String;
+      validateOutgoingText(text);
+      if (isFileOfferEvent(envelope.messageId) &&
+          FileOffer.decode(envelope.messageId, text) == null &&
+          FileOfferDecision.decode(envelope.messageId, text) == null) {
+        throw const FormatException('Invalid file offer event');
+      }
       if (envelope.kind != 'text') {
         throw const FormatException('Message kind mismatch');
       }

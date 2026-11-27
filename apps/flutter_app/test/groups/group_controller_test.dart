@@ -8,6 +8,7 @@ import 'package:cht/groups/group_controller.dart';
 import 'package:cht/groups/group_crypto_bridge.dart';
 import 'package:cht/groups/group_models.dart';
 import 'package:cht/groups/group_transport.dart';
+import 'package:cht/groups/swarm/swarm.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -126,6 +127,7 @@ class ModelCrypto implements GroupCryptoBridge {
 
 class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
   final _frames = StreamController<GroupPeerFrame>.broadcast(sync: true);
+  final sent = <String>[];
 
   @override
   Stream<GroupPeerFrame> get frames => _frames.stream;
@@ -141,7 +143,9 @@ class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
     const GroupPeerFrame(friend, 'chta-group-cap-v1:message-actions-v1'),
   );
   @override
-  Future<void> send(String id, String text) async {}
+  Future<void> send(String id, String text) async => sent.add(text);
+  @override
+  bool isDirect(String id) => id == friend;
   @override
   Future<void> close() => _frames.close();
   @override
@@ -161,6 +165,8 @@ class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
       ),
     );
   }
+
+  void frame(String text) => _frames.add(GroupPeerFrame(friend, text));
 }
 
 class PausedSource implements AttachmentSource {
@@ -493,6 +499,105 @@ void main() {
     expect(c.messagesFor(gid), isEmpty);
     await c.close();
   });
+  test(
+    'only accepted group file offers request pieces after restart',
+    () async {
+      final blobs = Blobs(), attachments = Attachments();
+      GroupController create() => GroupController(
+        ownerId: owner,
+        crypto: ModelCrypto()..includeFriend = true,
+        blobs: blobs,
+        attachments: attachments,
+        displayName: () => 'Alice',
+      );
+      var controller = create();
+      await controller.initialize();
+      await controller.createGroup('Team', []);
+      var transport = IncomingGroupFrames();
+      await controller.attachTransport(transport);
+
+      Future<SwarmManifest> offer(String fileId, int sequence) async {
+        final cache = SparseSwarmCache(
+          friend,
+          blobs: blobs,
+          attachments: attachments,
+        );
+        final manifest = await cache.importFile(
+          groupId: gid,
+          epoch: 1,
+          uploaderId: friend,
+          fileId: fileId,
+          file: ChatAttachment(
+            name: 'small.bin',
+            mimeType: 'application/octet-stream',
+            bytes: Uint8List.fromList([1, 2, 3]),
+          ),
+        );
+        transport.event(
+          friend,
+          jsonEncode({
+            'id': 'offer-$sequence',
+            'sender': friend,
+            'groupId': gid,
+            'kind': 'file',
+            'epoch': 1,
+            'sentAt': sequence,
+            'payload': jsonEncode(manifest.toJson()),
+          }),
+          sequence,
+        );
+        await controller.flush();
+        return manifest;
+      }
+
+      final accepted = await offer('a' * 32, 100);
+      final rejected = await offer('b' * 32, 101);
+      Future<void> advertise(SwarmManifest manifest) async {
+        transport.frame(
+          'chta-swarm-v1:${jsonEncode({
+            'kind': 'have',
+            'fileId': manifest.fileId,
+            'manifest': manifest.identityHash,
+            'bits': base64UrlEncode([1]),
+          })}',
+        );
+        await controller.flush();
+      }
+
+      Iterable<String> requested() =>
+          transport.sent.where((frame) => frame.contains('"kind":"request"'));
+      await advertise(accepted);
+      await advertise(rejected);
+      await controller.swarm.tick();
+      expect(requested(), isEmpty);
+      expect(controller.messagesFor(gid), hasLength(2));
+      expect(controller.fileChoiceFor(accepted), GroupFileChoice.pending);
+      expect(
+        await controller.chooseFile(accepted, GroupFileChoice.accepted),
+        isTrue,
+      );
+      expect(
+        await controller.chooseFile(rejected, GroupFileChoice.rejected),
+        isTrue,
+      );
+      await controller.close();
+
+      controller = create();
+      addTearDown(controller.close);
+      await controller.initialize();
+      transport = IncomingGroupFrames();
+      await controller.attachTransport(transport);
+      expect(controller.fileChoiceFor(accepted), GroupFileChoice.accepted);
+      expect(controller.fileChoiceFor(rejected), GroupFileChoice.rejected);
+      await advertise(accepted);
+      await advertise(rejected);
+      await controller.swarm.tick();
+      expect(requested(), isNotEmpty);
+      expect(requested(), everyElement(contains(accepted.fileId)));
+      expect((await controller.cache.status(rejected)).available, isEmpty);
+    },
+  );
+
   test('file completion retries receipt and persistence after a transient write failure', () async {
     final blobs = FailOnceReceiptBlobs(), attachments = Attachments();
     final crypto = ModelCrypto();
@@ -535,6 +640,7 @@ void main() {
       jsonDecode(blobs.m['$owner:groups-index-v1']!) as Map,
     );
     index['rooms'] = {gid: 1};
+    index['fileChoices'] = {manifest.identityHash: 'accepted'};
     blobs.m['$owner:groups-index-v1'] = jsonEncode(index);
     final roomKey = sha256.convert(utf8.encode(gid)).toString();
     blobs.m['$owner:g-room-$roomKey-0'] = jsonEncode({

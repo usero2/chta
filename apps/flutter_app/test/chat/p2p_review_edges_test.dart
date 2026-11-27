@@ -75,11 +75,25 @@ void main() {
           );
           await services.first.queueMessage('bob', message);
           if (cancelDuringEncryption) {
+            await f.until(
+              () =>
+                  histories.last.fileOfferFor(
+                    'alice',
+                    message.id,
+                    incoming: true,
+                  ) !=
+                  null,
+            );
+            await services.last.respondToFileOffer(
+              'alice',
+              message.id,
+              accept: true,
+            );
             await gated.entered.future.timeout(const Duration(seconds: 3));
             await services.first.cancelFile('bob', message.id);
             gated.release.complete();
             await Future<void>.delayed(const Duration(milliseconds: 200));
-            expect(histories.last.messagesFor('alice'), isEmpty);
+            expect(histories.last.messageById('alice', message.id), isNull);
             await services.first.queueText(
               'bob',
               'text after cancel',

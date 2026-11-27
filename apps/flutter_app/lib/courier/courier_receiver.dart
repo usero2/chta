@@ -46,6 +46,7 @@ class CourierReceiver {
     required this.cache,
     required this.budget,
     required this.authorize,
+    this.authorizeManifest,
     required this.isDeleted,
     required this.existingReceivedAt,
     required this.commit,
@@ -63,6 +64,8 @@ class CourierReceiver {
   final ChunkedAttachmentBridge? cache;
   final CachePolicy budget;
   final Future<bool> Function(DeliveryEnvelope) authorize;
+  final Future<bool> Function(DeliveryEnvelope, Map<String, Object?>)?
+  authorizeManifest;
   final bool Function(DeliveryEnvelope) isDeleted;
   final Future<int?> Function(DeliveryEnvelope) existingReceivedAt;
   final Future<void> Function(CourierReceived) commit;
@@ -243,7 +246,7 @@ class CourierReceiver {
     });
     _guard();
     final event = Map<String, Object?>.from(opened['event'] as Map),
-        metadata = opened['metadata'] as Map;
+        metadata = Map<String, Object?>.from(opened['metadata'] as Map);
     final size = metadata['size'], count = opened['count'];
     if (size is! int ||
         size < 4 ||
@@ -263,7 +266,12 @@ class CourierReceiver {
       'event': event,
       'payload': '{}',
     });
-    if (isDeleted(provisional) || !await authorize(provisional)) return null;
+    if (isDeleted(provisional) ||
+        !await authorize(provisional) ||
+        (authorizeManifest != null &&
+            !await authorizeManifest!(provisional, metadata))) {
+      return null;
+    }
     _guard();
     var entry =
         old ??
@@ -335,12 +343,20 @@ class CourierReceiver {
     final known = cachedEnvelope?.call(provisional);
     if (entry['header'] is String) {
       header = base64Url.decode(base64Url.normalize(entry['header'] as String));
+    } else if (metadata['offerHeader'] case final String payload) {
+      if (utf8.encode(jsonEncode(payload)).length > 11500) {
+        throw const FormatException('Courier file offer is too large');
+      }
+      header = _encodeHeader(
+        DeliveryEnvelope.fromJson({
+          'version': 2,
+          'event': event,
+          'payload': payload,
+        }),
+      );
     } else if (known != null &&
         known.event['signature'] == event['signature']) {
-      final json = utf8.encode(jsonEncode(known.toJson()));
-      header = Uint8List(4 + json.length);
-      ByteData.sublistView(header).setUint32(0, json.length, Endian.big);
-      header.setRange(4, header.length, json);
+      header = _encodeHeader(known);
     } else {
       final buffer = BytesBuilder(copy: false);
       int? target;
@@ -364,6 +380,9 @@ class CourierReceiver {
         throw const FormatException('Courier header truncated');
       }
       header = Uint8List.sublistView(bytes, 0, target);
+    }
+    if (header.length < 5 || header.length > 65540 || header.length > size) {
+      throw const FormatException('Invalid Courier header length');
     }
     envelope = DeliveryEnvelope.fromJson(
       Map<String, Object?>.from(
@@ -495,6 +514,14 @@ class CourierReceiver {
     entry = {...entry, 'committedAt': durableTime};
     await _save(key, entry);
     return _makeReceipt(key, entry, durableTime);
+  }
+
+  Uint8List _encodeHeader(DeliveryEnvelope envelope) {
+    final json = utf8.encode(jsonEncode(envelope.toJson()));
+    final header = Uint8List(4 + json.length);
+    ByteData.sublistView(header).setUint32(0, json.length, Endian.big);
+    header.setRange(4, header.length, json);
+    return header;
   }
 
   /// Called after confirmed receipt deposits; cached owner attachments remain.

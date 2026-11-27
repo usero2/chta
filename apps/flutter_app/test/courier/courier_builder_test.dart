@@ -17,6 +17,7 @@ import 'courier_journal_test.dart' show Disk;
 class Crypto extends envelope.Crypto {
   bool interrupt = false, active = true;
   int encryptions = 0;
+  Map<String, Object?>? sealedMetadata;
   @override
   Future<Map<String, Object?>> deliveryCall(
     String op,
@@ -24,7 +25,7 @@ class Crypto extends envelope.Crypto {
   ) async {
     if (op == 'newJob') {
       return {
-        'state': 'opaque-protected-state',
+        'state': 'opaque-protected-state:${args['jobId']}',
         'mailbox': 'b' * 64,
         'bucket': 0,
         'receiptChallenge': 'A' * 43,
@@ -46,10 +47,11 @@ class Crypto extends envelope.Crypto {
       };
     }
     if (op == 'sealManifest') {
+      sealedMetadata = Map<String, Object?>.from(args['metadata'] as Map);
       return {
         'manifest': {
           'version': 1,
-          'jobId': args['jobId'] ?? 'a' * 32,
+          'jobId': (args['state'] as String).split(':').last,
           'mailbox': 'b' * 64,
           'expiresAt': 86402000,
           'box': 'A' * 128,
@@ -186,6 +188,72 @@ void main() {
     jobs.close();
     budget.dispose();
   });
+  test(
+    'group Courier seals an optional signed file offer in its manifest',
+    () async {
+      final crypto = Crypto(), owner = 'did:cht:${'a' * 64}';
+      final budget = CachePolicy(
+        ownerId: owner,
+        settings: Disk(),
+        availableSpace: () async => null,
+      );
+      final jobs = CourierSenderJobs(
+        journal: CourierJournal(
+          ownerId: owner,
+          namespace: 'courier_send',
+          storage: Disk(),
+        ),
+        crypto: crypto,
+        clock: () => 2000,
+      );
+      addTearDown(jobs.close);
+      addTearDown(budget.dispose);
+      final builder = CourierBuilder(
+        jobs: jobs,
+        crypto: crypto,
+        budget: budget,
+        clock: () => 2000,
+      );
+      final file = ChatAttachment(
+        name: 'draft.pdf',
+        mimeType: 'application/pdf',
+        bytes: Uint8List.fromList([1, 2, 3]),
+      );
+      final proof = await DeliveryEnvelope.create(
+        crypto,
+        scope: 'group:${'c' * 64}:1',
+        messageId: 'draft',
+        sentAt: 1000,
+        kind: 'file',
+        payload: {
+          'text': 'Draft',
+          'groupEvent': '{}',
+          'file': {
+            'name': 'draft.pdf',
+            'mime': 'application/pdf',
+            'size': 3,
+            'digest': sha256.convert(file.bytes).toString(),
+          },
+        },
+      );
+      final peer = 'did:cht:${'b' * 64}';
+      await builder.prepare(
+        id: 'a' * 32,
+        peerId: peer,
+        envelope: proof,
+        file: file,
+        includeOfferHeader: true,
+      );
+      expect(crypto.sealedMetadata?['offerHeader'], proof.payloadSource);
+      await builder.prepare(
+        id: 'b' * 32,
+        peerId: peer,
+        envelope: proof,
+        file: file,
+      );
+      expect(crypto.sealedMetadata, isNot(contains('offerHeader')));
+    },
+  );
   test(
     'insufficient free disk cannot create a sender job or stage ciphertext',
     () async {

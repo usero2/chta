@@ -327,6 +327,20 @@ void main() {
           ),
         );
         await until(
+          () =>
+              histories[2].fileOfferFor(
+                ids[0],
+                'cached-file',
+                incoming: true,
+              ) !=
+              null,
+        );
+        await services[2].respondToFileOffer(
+          ids[0],
+          'cached-file',
+          accept: true,
+        );
+        await until(
           () => histories[0]
               .messagesFor(ids[2])
               .any(

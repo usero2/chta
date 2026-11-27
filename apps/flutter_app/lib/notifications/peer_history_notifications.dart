@@ -83,17 +83,21 @@ class PeerHistoryNotifications {
       }
       if (history.presentationFor(peerId, message.id)?.deleted == true) return;
       _completed.add(key);
+      final offer = message.fileOffer;
       final mimeType =
           message.attachmentRef?.mimeType ?? message.attachment?.mimeType;
       await notifications.notifyIncoming(
         peerId: peerId,
         displayName: name,
         messageId: message.id,
-        kind: message.hasAttachment
+        kind: message.hasAttachment || offer != null
             ? IncomingNotificationKind.file
             : IncomingNotificationKind.message,
-        fileName: message.attachmentRef?.name ?? message.attachment?.name,
-        messageText: message.hasAttachment
+        fileName:
+            offer?.name ??
+            message.attachmentRef?.name ??
+            message.attachment?.name,
+        messageText: message.hasAttachment || offer != null
             ? null
             : history.presentationFor(peerId, message.id)?.text,
         markdownSize: message.attachmentRef?.size ?? message.attachment?.size,

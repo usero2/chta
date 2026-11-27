@@ -478,10 +478,10 @@ void main() {
     }),
   );
 
-  testWidgets('messages offer the floating menu even with an older contact', (
+  testWidgets('offline contact allows repeated and nested replies', (
     tester,
   ) async {
-    final history = PeerHistory(store: Store());
+    final history = _CountingPeerHistory();
     await history.load('alice');
     final account = service_test.Account('alice', [
       'bob',
@@ -510,20 +510,49 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 400));
+      final projections = history.projections;
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(history.projections, projections);
       final menu = find.byKey(const Key('peer-message-actions-legacy'));
       expect(menu, findsOneWidget);
       await tester.tap(menu);
       await tester.pumpAndSettle();
       expect(find.text('Copy'), findsOneWidget);
       expect(find.text('Reply'), findsOneWidget);
-      expect(
-        find.text('Both apps need to support message actions.'),
-        findsOneWidget,
-      );
+      expect(find.text('Edit and delete need an updated app.'), findsOneWidget);
       final edit = tester.widget<TextButton>(
         find.widgetWithText(TextButton, 'Edit'),
       );
       expect(edit.onPressed, isNull);
+      Future<PeerMessage> replyTo(String target, String text) async {
+        await tester.tap(find.widgetWithText(TextButton, 'Reply'));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('Cancel reply'), findsOneWidget);
+        await tester.enterText(
+          find.byKey(const Key('peer-message-input')),
+          text,
+        );
+        await tester.tap(find.byKey(const Key('send-peer-message')));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('Cancel reply'), findsNothing);
+        final reply = history.visibleMessagesFor('bob').last;
+        expect(reply.action?.target, target);
+        expect(reply.body, text);
+        expect(reply.queuedForDelivery, isTrue);
+        return reply;
+      }
+
+      final first = await replyTo('legacy', 'First reply');
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      final second = await replyTo('legacy', 'Second reply');
+      expect(second.id, isNot(first.id));
+
+      await tester.tap(
+        find.byKey(ValueKey('peer-message-actions-${first.id}')),
+      );
+      await tester.pumpAndSettle();
+      await replyTo(first.id, 'Nested reply');
     } finally {
       await tester.pumpWidget(const SizedBox());
       await service.close();
@@ -2258,4 +2287,16 @@ class _QuietDirectPeer implements DirectPeer {
 
   @override
   Future<void> close() async {}
+}
+
+class _CountingPeerHistory extends PeerHistory {
+  _CountingPeerHistory() : super(store: Store());
+
+  int projections = 0;
+
+  @override
+  Map<String, MessagePresentation> presentationsFor(String? peer) {
+    projections++;
+    return super.presentationsFor(peer);
+  }
 }

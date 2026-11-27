@@ -39,6 +39,13 @@ fn relay_catalog_capability_is_signed_and_verified() {
     let verified = ContactStore::verify_card(&card).unwrap();
     assert!(verified.card.capabilities.iter().any(|v|v=="delivery-v2"));
     assert!(verified.card.capabilities.iter().any(|v| v == "message-actions-v1"));
+    assert!(
+        verified
+            .card
+            .capabilities
+            .iter()
+            .any(|value| value == "file-offers-v1")
+    );
     assert!(verified.card.capabilities.iter().any(|v|v=="courier-v1"));
     assert!(
         verified

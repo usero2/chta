@@ -11,12 +11,14 @@ class DurableOutbox {
     required this.history,
     required this.isReady,
     required this.send,
+    this.canSend,
     int Function()? clock,
   }) : _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
   final String ownerId;
   final PeerHistory history;
   final bool Function(String peer) isReady;
   final Future<void> Function(String peer, PeerMessage message) send;
+  final bool Function(String peer, PeerMessage message)? canSend;
   final int Function() _clock;
   final _running = <String>{}, _runningPeers = <String>{};
   final _runningFiles = <String>{}, _runningTexts = <String>{};
@@ -54,6 +56,9 @@ class DurableOutbox {
     pump();
   }
 
+  bool _ready(String peer, PeerMessage message) =>
+      isReady(peer) && (canSend?.call(peer, message) ?? true);
+
   void pump() {
     if (!_active || history.error != null) return;
     final pending = history.queuedMessages.toList();
@@ -69,7 +74,7 @@ class DurableOutbox {
       if (_runningPeers.contains(lane) ||
           _running.contains(key) ||
           (_nextAttempt[key] ?? 0) > _clock() ||
-          !isReady(peer)) {
+          !_ready(peer, message)) {
         continue;
       }
       final generation = history.loadGeneration,
@@ -89,7 +94,7 @@ class DurableOutbox {
               !message.queuedForDelivery ||
               message.deliveryPaused ||
               !history.messagesFor(peer).contains(message) ||
-              !isReady(peer)) {
+              !_ready(peer, message)) {
             return;
           }
           await send(peer, message);
@@ -131,8 +136,12 @@ class DurableOutbox {
     if (_active && history.error == null) _nextAttempt.remove(_key(peer, id));
   }
 
-  void retryNow(String peer) {
-    _nextAttempt.removeWhere((key, _) => key.startsWith('$peer\u0000'));
+  void retryNow(String peer, {String? messageId}) {
+    if (messageId == null) {
+      _nextAttempt.removeWhere((key, _) => key.startsWith('$peer\u0000'));
+    } else {
+      _nextAttempt.remove(_key(peer, messageId));
+    }
     pump();
   }
 

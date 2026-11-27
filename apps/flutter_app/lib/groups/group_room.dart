@@ -6,6 +6,7 @@ import '../chat/message_timestamp.dart';
 import '../chat/media_item.dart';
 import '../chat/media_thumbnail.dart';
 import '../chat/widgets/attachment_content.dart';
+import '../chat/widgets/file_offer_card.dart';
 import '../chat/widgets/media_album.dart';
 import '../chat/widgets/message_action_menu.dart';
 import '../chat/widgets/message_bubble.dart';
@@ -35,6 +36,8 @@ class GroupRoom extends StatelessWidget {
     this.onBack,
     this.deliveryLabel,
     this.onMessageAction,
+    this.fileChoiceFor,
+    this.onFileChoice,
     super.key,
   });
 
@@ -47,6 +50,8 @@ class GroupRoom extends StatelessWidget {
   final Future<bool> Function(String, List<ChatAttachment>) onSendBatch;
   final Future<ChatAttachment> Function(SwarmManifest) openFile;
   final SwarmProgress? Function(String) progressFor;
+  final GroupFileChoice Function(SwarmManifest)? fileChoiceFor;
+  final Future<bool> Function(SwarmManifest, GroupFileChoice)? onFileChoice;
   final VoidCallback onDetails;
   final VoidCallback onDelete;
   final VoidCallback? onBack;
@@ -174,6 +179,7 @@ class GroupRoom extends StatelessWidget {
                             presentations[target]?.text ??
                                 'Original message unavailable',
                             deleted: presentations[target]?.deleted == true,
+                            outgoing: message.senderId == ownId,
                             onJump: original == null
                                 ? null
                                 : () => jumpTo(target),
@@ -297,7 +303,7 @@ class GroupRoom extends StatelessWidget {
                         ? 'All members need to support message actions.'
                         : null,
                   ),
-            text: presentation.text,
+            text: content is _GroupFileOffer ? '' : presentation.text,
             incoming: incoming,
             sentAtMilliseconds: message.sentAt,
             receivedAtMilliseconds: receiveTime,
@@ -326,6 +332,7 @@ class GroupRoom extends StatelessWidget {
     GroupMessage? original,
     String text, {
     bool deleted = false,
+    bool outgoing = false,
     VoidCallback? onJump,
   }) {
     final file = deleted ? null : original?.manifest;
@@ -342,6 +349,7 @@ class GroupRoom extends StatelessWidget {
           ? 'You'
           : original.senderName,
       onJump: onJump,
+      outgoing: outgoing,
       loadImage: image ? () => openFile(file) : null,
     );
   }
@@ -415,6 +423,21 @@ class GroupRoom extends StatelessWidget {
   }
 
   Widget _fileContent(GroupMessage message, SwarmManifest manifest) {
+    final choice = fileChoiceFor?.call(manifest);
+    if (message.senderId != ownId &&
+        (choice == GroupFileChoice.pending ||
+            choice == GroupFileChoice.rejected)) {
+      return _GroupFileOffer(
+        key: ValueKey(manifest.fileId),
+        manifest: manifest,
+        status: choice == GroupFileChoice.rejected
+            ? 'Rejected'
+            : !enabled || onFileChoice == null
+            ? 'File unavailable'
+            : null,
+        onChoice: (choice) => onFileChoice!(manifest, choice),
+      );
+    }
     final progress = progressFor(manifest.fileId);
     if (progress?.complete != true) {
       final value = progress;
@@ -462,6 +485,55 @@ class GroupRoom extends StatelessWidget {
       openFile: openFile,
     );
   }
+}
+
+class _GroupFileOffer extends StatefulWidget {
+  const _GroupFileOffer({
+    super.key,
+    required this.manifest,
+    required this.status,
+    required this.onChoice,
+  });
+
+  final SwarmManifest manifest;
+  final String? status;
+  final Future<bool> Function(GroupFileChoice) onChoice;
+
+  @override
+  State<_GroupFileOffer> createState() => _GroupFileOfferState();
+}
+
+class _GroupFileOfferState extends State<_GroupFileOffer> {
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _choose(GroupFileChoice choice) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final saved = await widget.onChoice(choice);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _error = saved ? null : 'Could not save your choice.';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => FileOfferCard(
+    fileName: widget.manifest.name,
+    mimeType: widget.manifest.mimeType,
+    sizeBytes: widget.manifest.size,
+    caption: widget.manifest.caption,
+    cover: widget.manifest.cover,
+    status: widget.status,
+    error: _error,
+    busy: _busy,
+    onAccept: () => _choose(GroupFileChoice.accepted),
+    onReject: () => _choose(GroupFileChoice.rejected),
+  );
 }
 
 class _CompletedGroupFile extends StatefulWidget {

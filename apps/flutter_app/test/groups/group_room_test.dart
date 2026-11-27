@@ -24,6 +24,7 @@ void main() {
     var deleted = false;
     var sentText = '';
     var fileOpenCount = 0;
+    var fileChoice = GroupFileChoice.pending;
     final room = GroupView(
       groupId: 'group:${'c' * 64}',
       name: 'A very long group name that should fit on a phone',
@@ -88,35 +89,42 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: GroupRoom(
-            group: room,
-            ownId: ownerId,
-            messages: messages,
-            enabled: true,
-            onMessageAction: (_, _, _) async => true,
-            onlineCount: 1,
-            onSend: (text) async {
-              sentText = text;
-              return true;
-            },
-            onSendBatch: (_, _) async => true,
-            openFile: (_) async {
-              fileOpenCount++;
-              return ChatAttachment(
-                name: 'draft.pdf',
-                mimeType: 'application/pdf',
-                bytes: Uint8List.fromList([1, 2, 3]),
-              );
-            },
-            progressFor: (_) => const SwarmProgress(
-              verifiedBytes: 40,
-              totalBytes: 100,
-              sourceCount: 2,
-              complete: false,
-              waitingForDirect: false,
+          body: StatefulBuilder(
+            builder: (context, setState) => GroupRoom(
+              group: room,
+              ownId: ownerId,
+              messages: messages,
+              enabled: true,
+              onMessageAction: (_, _, _) async => true,
+              onlineCount: 1,
+              onSend: (text) async {
+                sentText = text;
+                return true;
+              },
+              onSendBatch: (_, _) async => true,
+              openFile: (_) async {
+                fileOpenCount++;
+                return ChatAttachment(
+                  name: 'draft.pdf',
+                  mimeType: 'application/pdf',
+                  bytes: Uint8List.fromList([1, 2, 3]),
+                );
+              },
+              progressFor: (_) => const SwarmProgress(
+                verifiedBytes: 40,
+                totalBytes: 100,
+                sourceCount: 2,
+                complete: false,
+                waitingForDirect: false,
+              ),
+              fileChoiceFor: (_) => fileChoice,
+              onFileChoice: (_, choice) async {
+                setState(() => fileChoice = choice);
+                return true;
+              },
+              onDetails: () => detailsOpened = true,
+              onDelete: () => deleted = true,
             ),
-            onDetails: () => detailsOpened = true,
-            onDelete: () => deleted = true,
           ),
         ),
       ),
@@ -135,6 +143,12 @@ void main() {
     expect(find.text('Mali'), findsWidgets);
     expect(find.text('Hello from Mali'), findsOneWidget);
     expect(find.text('draft.pdf'), findsOneWidget);
+    expect(find.text('application/pdf · 100 B'), findsOneWidget);
+    expect(find.text('Reject'), findsOneWidget);
+    expect(find.textContaining('40%'), findsNothing);
+    expect(fileOpenCount, 0);
+    await tester.tap(find.text('Accept'));
+    await tester.pumpAndSettle();
     expect(find.textContaining('40%'), findsOneWidget);
     expect(find.textContaining('2 sources'), findsOneWidget);
     expect(find.text('1/2 delivered'), findsNothing);

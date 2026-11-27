@@ -8,6 +8,7 @@ use zeroize::Zeroize;
 const DAY: u64 = 86_400_000;
 const PACKAGE: usize = 256 * 1024;
 const MAX_COUNT: u32 = 40960;
+const MAX_OFFER_HEADER_JSON_BYTES: usize = 11_500;
 const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_SHA256";
 fn trusted_peer(
     identity: &IdentityManager,
@@ -202,9 +203,11 @@ struct Metadata {
     name: String,
     #[serde(default)]
     mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offer_header: Option<String>,
 }
 impl Metadata {
-    fn validate(&self, state: &JobState) -> Result<(), String> {
+    fn validate(&self, state: &JobState, event: &DeliveryEvent) -> Result<(), String> {
         if self.size > 10 * 1024 * 1024 * 1024
             || self.size > u64::from(state.count) * PACKAGE as u64
             || !hex(&self.content_hash, 64)
@@ -215,6 +218,18 @@ impl Metadata {
             || self.mime.contains(['\0', '\r', '\n'])
         {
             return Err("Invalid Courier content metadata".into());
+        }
+        if let Some(header) = &self.offer_header {
+            if !state.scope.starts_with("group:")
+                || !["file", "group"].contains(&event.kind.as_str())
+                || digest(header.as_bytes()) != event.payload_hash
+                || serde_json::to_vec(header)
+                    .map_err(|_| "Invalid Courier offer header")?
+                    .len()
+                    > MAX_OFFER_HEADER_JSON_BYTES
+            {
+                return Err("Invalid Courier offer header".into());
+            }
         }
         Ok(())
     }
@@ -431,7 +446,7 @@ pub(super) fn call(
                 return Err("Manifest owner/scope mismatch".into());
             }
             a.event.verify(a.now)?;
-            a.metadata.validate(&state)?;
+            a.metadata.validate(&state, &a.event)?;
             state.merkle_root = Some(a.metadata.merkle_root.clone());
             let mut sealed = SealedManifest {
                 version: 1,
@@ -490,7 +505,7 @@ pub(super) fn call(
             let s = &manifest.state;
             s.validate(a.now)?;
             manifest.event.verify(a.now)?;
-            manifest.metadata.validate(s)?;
+            manifest.metadata.validate(s, &manifest.event)?;
             let sender = trusted_peer(
                 identity,
                 contacts,

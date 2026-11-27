@@ -37,6 +37,7 @@ class CourierBuilder {
     required String peerId,
     required DeliveryEnvelope envelope,
     ChatAttachment? file,
+    bool includeOfferHeader = false,
     bool Function()? isCurrent,
   }) => jobs.withPreparation(
     id,
@@ -45,6 +46,7 @@ class CourierBuilder {
       peerId: peerId,
       envelope: envelope,
       file: file,
+      includeOfferHeader: includeOfferHeader,
       isCurrent: isCurrent,
     ),
   );
@@ -53,6 +55,7 @@ class CourierBuilder {
     required String peerId,
     required DeliveryEnvelope envelope,
     ChatAttachment? file,
+    required bool includeOfferHeader,
     bool Function()? isCurrent,
   }) async {
     void guard() {
@@ -208,6 +211,13 @@ class CourierBuilder {
           'merkleRoot': tree.root,
           'name': file?.name ?? 'message',
           'mime': file?.mimeType ?? 'application/vnd.chta.delivery+json',
+          // The Rust private manifest cap also includes the event and job
+          // state. Budget the escaped payload inside that bounded manifest.
+          if (includeOfferHeader &&
+              file != null &&
+              envelope.scope.startsWith('group:') &&
+              utf8.encode(jsonEncode(envelope.payloadSource)).length <= 11500)
+            'offerHeader': envelope.payloadSource,
         },
         'now': _clock(),
       });

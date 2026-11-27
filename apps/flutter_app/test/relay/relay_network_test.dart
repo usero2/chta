@@ -298,6 +298,26 @@ class SessionAccount extends Account implements GroupCryptoBridge {
 }
 
 void main() {
+  test('non-forced recovery keeps a healthy idle relay', () async {
+    final hub = Hub(a, 'relay-a');
+    var now = DateTime.now().millisecondsSinceEpoch;
+    final network = RelayNetwork(
+      Crypto('alice'),
+      connector: hub.connect,
+      clock: () => now,
+    );
+    try {
+      await network.addSeed(a);
+      await until(() => network.online.contains(a));
+      now += 35000;
+      await network.recoverNetwork(force: false);
+      expect(network.online, contains(a));
+      expect(hub.sockets, hasLength(1));
+    } finally {
+      await network.close();
+    }
+  });
+
   test('300-second refresh keeps the relay alive between refreshes', () async {
     final hub = Hub(a, 'relay-a');
     var now = 100000;

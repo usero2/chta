@@ -7,6 +7,7 @@ class MessageActionMenu {
   const MessageActionMenu({
     this.buttonKey,
     this.onSelected,
+    this.onReply,
     this.showReply = true,
     this.canEdit = false,
     this.canDelete = false,
@@ -16,6 +17,7 @@ class MessageActionMenu {
 
   final Key? buttonKey;
   final ValueChanged<PeerMessageActionKind>? onSelected;
+  final VoidCallback? onReply;
   final bool showReply, canEdit, canDelete;
   final String? copyText, unavailableReason;
 
@@ -37,6 +39,7 @@ class MessageActionMenu {
       if (canDelete) _MessageMenuItem.delete,
       if (details != null) _MessageMenuItem.info,
     ];
+    if (tiles.isEmpty) return;
     final maxWidth = (overlay.size.width - 32).clamp(13.0, 284.0);
     final columns = (maxWidth / 68).floor().clamp(1, tiles.length);
     final width = (columns * 68 + 12).clamp(13.0, maxWidth).toDouble();
@@ -67,7 +70,11 @@ class MessageActionMenu {
                         width: (width - 12) / columns,
                         height: 60,
                         child: TextButton(
-                          onPressed: tile.action == null || onSelected != null
+                          onPressed:
+                              tile.action == null ||
+                                  onSelected != null ||
+                                  (tile == _MessageMenuItem.reply &&
+                                      onReply != null)
                               ? () => navigator.pop(tile)
                               : null,
                           style: TextButton.styleFrom(
@@ -127,6 +134,8 @@ class MessageActionMenu {
           ],
         ),
       );
+    } else if (selected == _MessageMenuItem.reply && onReply != null) {
+      onReply!();
     } else {
       onSelected?.call(selected.action!);
     }

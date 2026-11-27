@@ -45,10 +45,13 @@ object ChatRuntime {
             context.stopService(Intent(context, ChatReceiveService::class.java))
         }
         val manager = context.getSystemService(NotificationManager::class.java)
-        val channelEnabled = Build.VERSION.SDK_INT < 26 ||
-            manager.getNotificationChannel("cht.receive")?.importance != NotificationManager.IMPORTANCE_NONE
+        val hasNotificationChannels = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        val channelEnabled = !hasNotificationChannels ||
+            manager.getNotificationChannel(ChatReceiveService.NOTIFICATION_CHANNEL_ID)?.importance !=
+                NotificationManager.IMPORTANCE_NONE
         return mapOf("enabled" to keepAlive, "running" to running,
             "notificationVisible" to (manager.areNotificationsEnabled() && channelEnabled),
+            "canOpenBackgroundNotificationSettings" to hasNotificationChannels,
             "showLockAction" to this.showLockAction(context),
             "backgroundRefreshSeconds" to prefs.getInt("backgroundRefreshSeconds", 10))
     }

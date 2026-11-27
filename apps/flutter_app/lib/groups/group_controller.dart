@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../chat/attachment_store.dart';
 import '../chat/chat_attachment.dart';
 import '../chat/chat_models.dart';
+import '../chat/file_offer_cover.dart';
 import '../chat/peer_message_action.dart';
 import '../delivery/gap_repair.dart';
 import '../delivery/peer_gap_repair.dart' show ProtectedGapCursor;
@@ -25,6 +26,7 @@ const _maxOutboxBytes = 16 * 1024 * 1024, _maxHistoryMessages = 10000;
 const _maxGroupTextPayloadBytes = 32768;
 const _courierCapability = 'chta-group-cap-v1:courier-v1';
 const _actionsCapability = 'chta-group-cap-v1:message-actions-v1';
+const _fileOffersCapability = 'chta-group-cap-v1:file-offers-v1';
 
 class GroupController extends ChangeNotifier {
   GroupController({
@@ -44,6 +46,7 @@ class GroupController extends ChangeNotifier {
       isDirect: (peer) => _transport?.isDirect(peer) == true,
       send: (peer, text) => _transport!.send(peer, text),
       onComplete: _fileComplete,
+      canTransfer: canFetchFile,
     );
     swarm.addListener(_changed);
   }
@@ -64,9 +67,9 @@ class GroupController extends ChangeNotifier {
       !_pendingHistory.contains(message);
   final _jobs = <String, GroupControlJob>{};
   final _invitations = <String, GroupInvitation>{};
-  final _seenControls = <String>{},
-      _left = <String>{},
-      _completedFiles = <String>{};
+  final _seenControls = <String>{}, _left = <String>{};
+  final _completedFiles = <String, String>{};
+  final _fileChoices = <String, GroupFileChoice>{};
   final _deleted = <String, Set<String>>{};
   final _deletedBefore = <String, int>{};
   final _roomGenerations = <String, int>{};
@@ -76,6 +79,7 @@ class GroupController extends ChangeNotifier {
   final _repairTurns = <String, int>{}, _nextRepair = <String, int>{};
   final _courierPeers = <String>{}, _capSent = <String>{};
   final _actionPeers = <String>{}, _actionCapSent = <String>{};
+  final _fileCoverPeers = <String>{}, _fileCoverCapSent = <String>{};
   bool supportsMessageActions(String groupId) =>
       canSend(groupId) &&
       _groups[groupId]!.members.every(
@@ -87,6 +91,8 @@ class GroupController extends ChangeNotifier {
 
   bool _courierEnabled = false;
   bool supportsCourier(String peer) => _courierPeers.contains(peer);
+  bool supportsFileOffers(String peer) =>
+      peer == ownerId || _fileCoverPeers.contains(peer);
   void setCourierEnabled(bool value) {
     _courierEnabled = value;
     if (value) unawaited(_pulse());
@@ -113,7 +119,60 @@ class GroupController extends ChangeNotifier {
             row.action?.target == target.key,
       ) ==
       true;
-  bool hasCompletedFile(String fileId) => _completedFiles.contains(fileId);
+  bool hasCompletedFile(SwarmManifest manifest) =>
+      _completedFiles[manifest.fileId] == manifest.identityHash;
+  GroupFileChoice fileChoiceFor(SwarmManifest manifest) =>
+      _fileChoices[manifest.identityHash] ??
+      (manifest.uploaderId == ownerId || hasCompletedFile(manifest)
+          ? GroupFileChoice.accepted
+          : GroupFileChoice.pending);
+
+  GroupMessage? _fileMessage(SwarmManifest manifest) => _rooms[manifest.groupId]
+      ?.where((row) => row.manifest?.identityHash == manifest.identityHash)
+      .firstOrNull;
+
+  bool canFetchFile(SwarmManifest manifest) {
+    if (!canSend(manifest.groupId) ||
+        fileChoiceFor(manifest) != GroupFileChoice.accepted) {
+      return false;
+    }
+    final message = _fileMessage(manifest);
+    return message != null &&
+        isDurableMessage(message) &&
+        !isMessageRemoved(message);
+  }
+
+  Future<bool> chooseFile(
+    SwarmManifest manifest,
+    GroupFileChoice choice,
+  ) async {
+    try {
+      final saved = await _run(() async {
+        final message = _fileMessage(manifest);
+        if (choice == GroupFileChoice.pending ||
+            manifest.uploaderId == ownerId ||
+            !canSend(manifest.groupId) ||
+            message == null ||
+            !isDurableMessage(message) ||
+            isMessageRemoved(message)) {
+          return false;
+        }
+        final current = fileChoiceFor(manifest);
+        if (current != GroupFileChoice.pending) return current == choice;
+        final choices = {..._fileChoices, manifest.identityHash: choice};
+        await _saveIndex(fileChoices: choices);
+        _fileChoices[manifest.identityHash] = choice;
+        _schedulePulse();
+        _changed();
+        return true;
+      });
+      if (saved && choice == GroupFileChoice.accepted) unawaited(_pulse());
+      return saved;
+    } catch (_) {
+      return false;
+    }
+  }
+
   List<GroupView> get groups => List.unmodifiable(_groups.values);
   List<GroupInvitation> get invitations =>
       List.unmodifiable(_invitations.values);
@@ -160,8 +219,13 @@ class GroupController extends ChangeNotifier {
           .length ??
       0;
   SwarmProgress? progressFor(String id) => swarm.progressFor(id);
-  Future<ChatAttachment> openFile(SwarmManifest manifest) =>
-      cache.open(manifest);
+  Future<ChatAttachment> openFile(SwarmManifest manifest) {
+    if (fileChoiceFor(manifest) != GroupFileChoice.accepted) {
+      return Future.error(StateError('Attachment has not been accepted'));
+    }
+    return cache.open(manifest);
+  }
+
   List<ConversationView> get conversations => groups.map((g) {
     final rows = messagesFor(g.groupId);
     final last = rows.where((m) => m.isVisible).lastOrNull;
@@ -239,6 +303,7 @@ class GroupController extends ChangeNotifier {
   Future<void> _saveIndex({
     Map<String, List<GroupMessage>>? rooms,
     Map<String, GroupControlJob>? jobs,
+    Map<String, GroupFileChoice>? fileChoices,
   }) async {
     final generation = _generation;
     final exported = await crypto.groupCall('export', {});
@@ -253,12 +318,18 @@ class GroupController extends ChangeNotifier {
       'invitations': _invitations.keys.toList(),
       'seen': _seenControls.toList(),
       'left': _left.toList(),
-      'completedFiles': _completedFiles.toList(),
+      'completedFiles': _completedFiles.keys.toList(),
+      'completedFileHashes': _completedFiles,
+      'fileChoices': {
+        for (final e in (fileChoices ?? _fileChoices).entries)
+          e.key: e.value.name,
+      },
       'deleted': {for (final e in _deleted.entries) e.key: e.value.toList()},
       'generations': _roomGenerations,
       'deletedBefore': _deletedBefore,
       'courierPeers': _courierPeers.toList(),
       'actionPeers': _actionPeers.toList(),
+      'fileCoverPeers': _fileCoverPeers.toList(),
     });
   }
 
@@ -284,6 +355,7 @@ class GroupController extends ChangeNotifier {
   Future<void> initialize() => _run(() async {
     if (_ready) return;
     final index = await _load('groups-index-v1');
+    final legacyCompleted = <String>{};
     if (index != null) {
       if (index['version'] != 1) {
         throw const FormatException('Unsupported saved groups');
@@ -291,9 +363,23 @@ class GroupController extends ChangeNotifier {
       await crypto.groupCall('import', {'data': index['core']});
       _seenControls.addAll((index['seen'] as List? ?? []).cast<String>());
       _left.addAll((index['left'] as List? ?? []).cast<String>());
-      _completedFiles.addAll(
-        (index['completedFiles'] as List? ?? []).cast<String>(),
-      );
+      if (index['completedFileHashes'] != null) {
+        _completedFiles.addAll(
+          _map(index['completedFileHashes']).cast<String, String>(),
+        );
+      } else {
+        legacyCompleted.addAll(
+          (index['completedFiles'] as List? ?? []).cast<String>(),
+        );
+      }
+      for (final e in _map(index['fileChoices'] ?? {}).entries) {
+        switch (e.value) {
+          case 'accepted':
+            _fileChoices[e.key] = GroupFileChoice.accepted;
+          case 'rejected':
+            _fileChoices[e.key] = GroupFileChoice.rejected;
+        }
+      }
       _roomGenerations.addAll(
         _map(index['generations'] ?? {}).cast<String, int>(),
       );
@@ -308,6 +394,11 @@ class GroupController extends ChangeNotifier {
       _courierPeers.addAll(capabilities);
       _actionPeers.addAll(
         (index['actionPeers'] as List? ?? const []).cast<String>().take(1024),
+      );
+      _fileCoverPeers.addAll(
+        (index['fileCoverPeers'] as List? ?? const []).cast<String>().take(
+          1024,
+        ),
       );
       for (final e in _map(index['deleted'] ?? {}).entries) {
         _deleted[e.key] = (e.value as List).cast<String>().toSet();
@@ -360,7 +451,11 @@ class GroupController extends ChangeNotifier {
     for (final room in _rooms.values) {
       for (final message in room) {
         if (message.manifest != null && !_left.contains(message.groupId)) {
-          swarm.register(message.manifest!);
+          final manifest = message.manifest!;
+          if (legacyCompleted.contains(manifest.fileId)) {
+            _completedFiles[manifest.fileId] = manifest.identityHash;
+          }
+          swarm.register(manifest, complete: hasCompletedFile(manifest));
         }
       }
     }
@@ -375,7 +470,8 @@ class GroupController extends ChangeNotifier {
       (room) => room.any(
         (message) =>
             message.manifest != null &&
-            !_completedFiles.contains(message.manifest!.fileId) &&
+            fileChoiceFor(message.manifest!) == GroupFileChoice.accepted &&
+            !hasCompletedFile(message.manifest!) &&
             !isMessageRemoved(message),
       ),
     );
@@ -415,6 +511,7 @@ class GroupController extends ChangeNotifier {
     _syncedPeers.removeWhere((p) => !online.contains(p));
     _capSent.removeWhere((p) => !online.contains(p));
     _actionCapSent.removeWhere((p) => !online.contains(p));
+    _fileCoverCapSent.removeWhere((p) => !online.contains(p));
     for (final peer
         in _repairs.keys.where((p) => !online.contains(p)).toList()) {
       _repairs.remove(peer)?.close();
@@ -448,7 +545,7 @@ class GroupController extends ChangeNotifier {
           final m = message.manifest;
           if (m != null &&
               swarm.progressFor(m.fileId)?.complete == true &&
-              !_completedFiles.contains(m.fileId) &&
+              !hasCompletedFile(m) &&
               canSend(m.groupId)) {
             _fileComplete(m);
           }
@@ -472,6 +569,12 @@ class GroupController extends ChangeNotifier {
             try {
               await transport.send(peer, _actionsCapability);
               if (!_closed) _actionCapSent.add(peer);
+            } catch (_) {}
+          }
+          if (transport.connected(peer) && !_fileCoverCapSent.contains(peer)) {
+            try {
+              await transport.send(peer, _fileOffersCapability);
+              if (!_closed) _fileCoverCapSent.add(peer);
             } catch (_) {}
           }
         }
@@ -503,8 +606,8 @@ class GroupController extends ChangeNotifier {
           } catch (_) {}
           if (_closed) return;
         }
-        await swarm.tick();
       }
+      await swarm.tick();
     } finally {
       _pulsing = false;
     }
@@ -834,12 +937,18 @@ class GroupController extends ChangeNotifier {
         final file = files[index].withPresentation(
           caption: index == 0 ? caption : files[index].caption,
         );
+        // Older clients reject unknown manifest fields. Send the optional
+        // cover once each current member has advertised support.
+        final cover = g.members.every((m) => supportsFileOffers(m.identityId))
+            ? await buildFileOfferCover(file)
+            : null;
         final manifest = await cache.importFile(
           groupId: gid,
           epoch: g.epoch,
           uploaderId: ownerId,
           fileId: groupRandomId(),
           file: file,
+          cover: cover,
         );
         _check(generation);
         if ((_roomGenerations[gid] ?? 0) != roomGeneration) return false;
@@ -937,7 +1046,7 @@ class GroupController extends ChangeNotifier {
       }
       rethrow;
     }
-    if (manifest != null) swarm.register(manifest);
+    if (manifest != null) swarm.register(manifest, complete: true);
     _schedulePulse();
     error = null;
     _changed();
@@ -957,6 +1066,15 @@ class GroupController extends ChangeNotifier {
           _actionPeers.add(peer)) {
         await _saveIndex();
         _changed();
+      }
+      return;
+    }
+    if (text == _fileOffersCapability) {
+      if (_fileCoverPeers.length < 1024 &&
+          _transport?.connected(peer) == true &&
+          groups.any((g) => canSend(g.groupId) && g.contains(peer)) &&
+          _fileCoverPeers.add(peer)) {
+        await _saveIndex();
       }
       return;
     }
@@ -1185,8 +1303,9 @@ class GroupController extends ChangeNotifier {
     final existing = room.where((m) => m.key == key).firstOrNull;
     GroupMessage message;
     if (existing != null) {
-      if (repair && existing.event != source) {
-        throw const FormatException('Conflicting group repair event');
+      if ((repair || existing.manifest != null || e['kind'] == 'file') &&
+          existing.event != source) {
+        throw const FormatException('Conflicting group event');
       }
       message = existing;
     } else {
@@ -1198,6 +1317,14 @@ class GroupController extends ChangeNotifier {
               manifest.uploaderId != sender ||
               manifest.epoch != e['epoch'])) {
         throw const FormatException('Manifest group binding mismatch');
+      }
+      if (manifest != null) {
+        swarm.validateRegistration(manifest);
+        if (_rooms.values.any(
+          (room) => room.any((m) => m.manifest?.fileId == manifest.fileId),
+        )) {
+          throw const FormatException('Conflicting swarm file id');
+        }
       }
       if (manifest == null &&
           (payload.length != 1 || payload['text'] is! String)) {
@@ -1238,7 +1365,7 @@ class GroupController extends ChangeNotifier {
     }
     if (message.manifest != null) {
       swarm.register(message.manifest!);
-      if (_completedFiles.contains(message.manifest!.fileId)) {
+      if (hasCompletedFile(message.manifest!)) {
         await _receipt(message);
       }
     } else {
@@ -1273,16 +1400,21 @@ class GroupController extends ChangeNotifier {
     if (_closed || _left.contains(m.groupId) || !canSend(m.groupId)) {
       return false;
     }
-    final message = _rooms[m.groupId]
-        ?.where((row) => row.manifest?.fileId == m.fileId)
-        .firstOrNull;
-    if (message == null || isMessageRemoved(message)) return false;
+    final message = _fileMessage(m);
+    if (message == null ||
+        !isDurableMessage(message) ||
+        isMessageRemoved(message)) {
+      return false;
+    }
     final result = await crypto.groupCall('authorize', {
       'peerId': peer,
       'groupId': m.groupId,
       'epoch': m.epoch,
     });
-    return !_closed && !isMessageRemoved(message) && result['allowed'] == true;
+    return canSend(m.groupId) &&
+        identical(_fileMessage(m), message) &&
+        !isMessageRemoved(message) &&
+        result['allowed'] == true;
   }
 
   List<String> _filePeers(SwarmManifest m) =>
@@ -1292,43 +1424,42 @@ class GroupController extends ChangeNotifier {
           .toList() ??
       [];
   void _fileComplete(SwarmManifest manifest) {
-    if (_closed || _completedFiles.contains(manifest.fileId)) return;
+    if (_closed || hasCompletedFile(manifest)) return;
     unawaited(
-      _run(() async {
-        if (_completedFiles.contains(manifest.fileId)) return;
-        final message = _rooms[manifest.groupId]
-            ?.where((m) => m.manifest?.fileId == manifest.fileId)
-            .firstOrNull;
-        if (message == null || isMessageRemoved(message)) return;
-        _completedFiles.add(manifest.fileId);
-        try {
-          if (message.senderId != ownerId && !message.repaired) {
-            await _receipt(message);
-          }
-          await _saveIndex();
-        } catch (_) {
-          _completedFiles.remove(manifest.fileId);
-          rethrow;
-        }
-        _changed();
-        if (message.senderId != ownerId && !message.repaired) {
-          await notifications?.notifyIncoming(
-            peerId: manifest.groupId,
-            displayName:
-                '${_groups[manifest.groupId]?.name ?? 'Group'} · ${message.senderName}',
-            messageId: message.key,
-            fileName: manifest.name,
-            kind: IncomingNotificationKind.file,
-            markdownSize: manifest.size,
-            loadMarkdown:
-                manifest.mimeType.toLowerCase() ==
-                    ChatAttachment.markdownMimeType
-                ? () => openFile(manifest)
-                : null,
-          );
-        }
-      }).catchError((Object _) {}),
+      _run(() => _commitFileComplete(manifest)).catchError((Object _) {}),
     );
+  }
+
+  Future<void> _commitFileComplete(SwarmManifest manifest) async {
+    if (hasCompletedFile(manifest) || !canFetchFile(manifest)) return;
+    final message = _fileMessage(manifest)!;
+    _completedFiles[manifest.fileId] = manifest.identityHash;
+    try {
+      if (message.senderId != ownerId && !message.repaired) {
+        await _receipt(message);
+      }
+      await _saveIndex();
+    } catch (_) {
+      _completedFiles.remove(manifest.fileId);
+      rethrow;
+    }
+    swarm.register(manifest, complete: true);
+    _changed();
+    if (message.senderId != ownerId && !message.repaired) {
+      await notifications?.notifyIncoming(
+        peerId: manifest.groupId,
+        displayName:
+            '${_groups[manifest.groupId]?.name ?? 'Group'} · ${message.senderName}',
+        messageId: message.key,
+        fileName: manifest.name,
+        kind: IncomingNotificationKind.file,
+        markdownSize: manifest.size,
+        loadMarkdown:
+            manifest.mimeType.toLowerCase() == ChatAttachment.markdownMimeType
+            ? () => openFile(manifest)
+            : null,
+      );
+    }
   }
 
   void _cancelGroupJobs(String gid, {bool keepMembership = false}) {
@@ -1418,10 +1549,11 @@ class GroupController extends ChangeNotifier {
       throw StateError('Group unavailable');
     }
     if (file != null) {
-      if (!(await cache.status(file)).complete) {
+      if (!canFetchFile(file) || !(await cache.status(file)).complete) {
         throw StateError('Group file not committed');
       }
-      _completedFiles.add(file.fileId);
+      await _commitFileComplete(file);
+      return;
     }
     await _event(
       peer,
@@ -1435,21 +1567,44 @@ class GroupController extends ChangeNotifier {
     if (saved == null || saved.deliveryEnvelope == null) {
       throw StateError('Group history not committed');
     }
-    if (file != null) {
-      await notifications?.notifyIncoming(
-        peerId: gid,
-        displayName: '${_groups[gid]!.name} · ${saved.senderName}',
-        messageId: saved.key,
-        fileName: file.name,
-        kind: IncomingNotificationKind.file,
-        markdownSize: file.size,
-        loadMarkdown:
-            file.mimeType.toLowerCase() == ChatAttachment.markdownMimeType
-            ? () => openFile(file)
-            : null,
-      );
-    }
     _changed();
+  });
+
+  Future<bool> recordFileOffer(
+    String peer,
+    String source,
+    Map<String, Object?> envelope,
+    SwarmManifest manifest, {
+    int? receivedAt,
+  }) => _run(() async {
+    final event = _map(jsonDecode(source));
+    if (!canSend(manifest.groupId) ||
+        event['groupId'] != manifest.groupId ||
+        event['kind'] != 'file' ||
+        isDeletedDelivery(
+          manifest.groupId,
+          peer,
+          event['id'] as String,
+          event['sentAt'] as int,
+        )) {
+      return false;
+    }
+    final existing = _fileMessage(manifest);
+    if (existing != null && existing.event != source) {
+      throw const FormatException('Conflicting group file offer');
+    }
+    if (existing == null ||
+        !isDurableMessage(existing) ||
+        existing.deliveryEnvelope == null) {
+      await _event(
+        peer,
+        source,
+        receivedAt: receivedAt,
+        deliveryEnvelope: envelope,
+      );
+      _changed();
+    }
+    return canFetchFile(manifest);
   });
   Future<void> recordCourierReceipt(
     String gid,

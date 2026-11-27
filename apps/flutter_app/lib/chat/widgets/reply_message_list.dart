@@ -31,39 +31,69 @@ class ReplyMessageList extends StatefulWidget {
 class _ReplyMessageListState extends State<ReplyMessageList> {
   final _scroll = AutoScrollController();
   bool _jumping = false;
-  String? _highlighted;
+  final _highlighted = ValueNotifier<String?>(null);
+  final _indices = <String, int>{};
+  final _childIndices = <String?, int>{};
   Timer? _clearHighlight;
+
+  @override
+  void initState() {
+    super.initState();
+    _indexRows();
+  }
+
+  @override
+  void didUpdateWidget(covariant ReplyMessageList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.rows, widget.rows)) _indexRows();
+  }
+
+  void _indexRows() {
+    _indices.clear();
+    _childIndices.clear();
+    for (var i = 0; i < widget.rows.length; i++) {
+      final ids = widget.rows[i];
+      _childIndices[ids.firstOrNull] = i;
+      for (final id in ids) {
+        _indices[id] = i;
+      }
+    }
+  }
 
   @override
   void dispose() {
     _clearHighlight?.cancel();
+    _highlighted.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
-  int _indexOf(String id) => widget.rows.indexWhere((ids) => ids.contains(id));
+  BuildContext? _rowAt(int index) => _scroll.tagMap[index]?.context;
 
   Future<void> _jumpTo(String id) async {
-    if (_jumping || !_scroll.hasClients) return;
-    final index = _indexOf(id);
-    if (index < 0) return;
+    final index = _indices[id];
+    if (_jumping || !_scroll.hasClients || index == null) return;
     _jumping = true;
     try {
-      await _scroll.scrollToIndex(
-        index,
-        preferPosition: AutoScrollPosition.middle,
-      );
+      final alreadyBuilt = _rowAt(index)?.mounted == true;
+      if (!alreadyBuilt) {
+        await _scroll.scrollToIndex(
+          index,
+          preferPosition: AutoScrollPosition.middle,
+        );
+      }
       if (!mounted || !_scroll.hasClients) return;
-      final current = _indexOf(id);
-      if (current < 0) return;
+      final current = _indices[id];
+      if (current == null) return;
       if (current != index) {
         await _scroll.scrollToIndex(
           current,
           preferPosition: AutoScrollPosition.middle,
         );
       }
-      if (!mounted || _indexOf(id) != current) return;
-      final row = _scroll.tagMap[current]?.context;
+      if (!mounted || _indices[id] != current) return;
+      final row = _rowAt(current);
+      if (row == null || !row.mounted) return;
       Element? anchor;
       void findAnchor(Element element) {
         if (element.widget.key == ReplyMessageAnchorKey(id)) {
@@ -73,19 +103,20 @@ class _ReplyMessageListState extends State<ReplyMessageList> {
         }
       }
 
-      row?.visitChildElements(findAnchor);
-      if (anchor case final target?) {
+      row.visitChildElements(findAnchor);
+      if (anchor != null || alreadyBuilt && current == index) {
         await Scrollable.ensureVisible(
-          target,
+          anchor ?? row,
           alignment: .5,
-          duration: const Duration(milliseconds: 140),
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
         );
       }
-      if (mounted && _indexOf(id) == current) {
+      if (mounted && _indices[id] == current) {
         _clearHighlight?.cancel();
-        setState(() => _highlighted = id);
+        _highlighted.value = id;
         _clearHighlight = Timer(const Duration(milliseconds: 1400), () {
-          setState(() => _highlighted = null);
+          _highlighted.value = null;
         });
       }
     } finally {
@@ -100,28 +131,41 @@ class _ReplyMessageListState extends State<ReplyMessageList> {
     reverse: widget.reverse,
     padding: widget.padding,
     itemCount: widget.rows.length,
-    findChildIndexCallback: (key) {
-      final id = (key as ValueKey<String?>).value;
-      final index = widget.rows.indexWhere((row) => row.firstOrNull == id);
-      return index < 0 ? null : index;
-    },
-    itemBuilder: (context, index) => AutoScrollTag(
-      key: ValueKey<String?>(widget.rows[index].firstOrNull),
-      controller: _scroll,
-      index: index,
-      child: Semantics(
-        selected: widget.rows[index].contains(_highlighted) ? true : null,
-        child: ColoredBox(
-          color: widget.rows[index].contains(_highlighted)
-              ? Theme.of(context).colorScheme.primary.withValues(alpha: .16)
-              : Colors.transparent,
+    findChildIndexCallback: (key) =>
+        _childIndices[(key as ValueKey<String?>).value],
+    itemBuilder: (context, index) {
+      final ids = widget.rows[index];
+      return AutoScrollTag(
+        key: ValueKey<String?>(ids.firstOrNull),
+        controller: _scroll,
+        index: index,
+        child: ValueListenableBuilder<String?>(
+          valueListenable: _highlighted,
           child: widget.itemBuilder(
             context,
             index,
             (id) => unawaited(_jumpTo(id)),
           ),
+          builder: (context, highlighted, child) {
+            final selected = ids.contains(highlighted);
+            return Semantics(
+              selected: selected ? true : null,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOut,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: selected
+                      ? Theme.of(context).colorScheme.primary
+                            .withValues(alpha: .10)
+                      : Colors.transparent,
+                ),
+                child: child,
+              ),
+            );
+          },
         ),
-      ),
-    ),
+      );
+    },
   );
 }

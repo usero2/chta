@@ -109,6 +109,49 @@ void main() {
     expect(find.text('On · Lock app to stop'), findsNothing);
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+  testWidgets(
+    'Android opens background notification settings with reception on',
+    (tester) async {
+      final calls = <String>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(NativeRuntimeBridge.channel, (
+        call,
+      ) async {
+        calls.add(call.method);
+        if (call.method == 'configure') {
+          return {
+            'enabled': true,
+            'running': true,
+            'notificationVisible': false,
+            'canOpenBackgroundNotificationSettings': true,
+          };
+        }
+        return null;
+      });
+      final runtime = AppRuntime(bridge: NativeRuntimeBridge());
+      AppRuntime.instance = runtime;
+      addTearDown(() {
+        AppRuntime.instance = null;
+        runtime.dispose();
+        messenger.setMockMethodCallHandler(NativeRuntimeBridge.channel, null);
+      });
+      await runtime.attach(
+        'test-identity',
+        flush: () async {},
+        lock: () async {},
+      );
+      await showProfile(tester);
+      expect(find.text('On · Notification hidden'), findsOneWidget);
+      await tapControl(
+        tester,
+        const Key('profile-background-notification-settings'),
+      );
+      expect(calls, ['configure', 'openBackgroundNotificationSettings']);
+      expect(runtime.running, isTrue);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
   testWidgets('Android Profile validates and saves background refresh', (
     tester,
   ) async {

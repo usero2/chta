@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:cht/chat/chat_attachment.dart';
+import 'package:cht/chat/file_offer_cover.dart';
 import 'package:cht/chat/media_thumbnail.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -43,6 +44,11 @@ void main() {
       expect(frame.image.height, inInclusiveRange(1, 480));
       frame.image.dispose();
       codec.dispose();
+      expect(await scratch.list().toList(), isEmpty);
+
+      final offerCover = decodeFileOfferCover(await buildFileOfferCover(video));
+      expect(offerCover, isNotNull);
+      expect(offerCover!.length, lessThanOrEqualTo(5 * 1024));
       expect(await scratch.list().toList(), isEmpty);
     } finally {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

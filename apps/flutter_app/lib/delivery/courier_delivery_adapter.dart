@@ -33,6 +33,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
     required this.contacts,
     this.cache,
     this.automatic = true,
+    bool requireFileApproval = false,
     int Function()? clock,
     bool Function()? isCurrent,
   }) : _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch),
@@ -42,6 +43,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       crypto: service.crypto,
       history: history,
       isTrusted: (id) => _contact(id)?.verified == true,
+      requireFileApproval: requireFileApproval,
       isCurrent: () => active,
     );
     builder = CourierBuilder(
@@ -63,8 +65,19 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       cache: cache,
       budget: service.budget,
       authorize: (e) => e.scope.startsWith('group:')
-          ? groupSink?.authorize(e) ?? Future.value(false)
+          ? groupSink?.authorizeFetch(e) ?? Future.value(false)
           : sink.authorize(e),
+      authorizeManifest: (e, metadata) async {
+        if (!e.scope.startsWith('group:') || metadata['offerHeader'] is String) {
+          return true;
+        }
+        if (e.kind == 'group' &&
+            metadata['name'] == 'message' &&
+            metadata['mime'] == 'application/vnd.chta.delivery+json') {
+          return true;
+        }
+        return await groupSink?.authorizeLegacyFile(e) ?? false;
+      },
       isDeleted: (e) => e.scope.startsWith('group:')
           ? groupSink?.isDeleted(e) ?? true
           : sink.isDeleted(e),
@@ -827,12 +840,16 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       e = DeliveryEnvelope.fromJson(m.deliveryEnvelope!);
     } else {
       final file = m.manifest;
+      final fileOfferGroup = file != null &&
+          c.group(m.groupId)!.members.every(
+            (member) => c.supportsFileOffers(member.identityId),
+          );
       e = await DeliveryEnvelope.create(
         service.crypto,
         scope: '${m.groupId}:$epoch',
         messageId: m.id,
         sentAt: m.sentAt,
-        kind: 'group',
+        kind: fileOfferGroup ? 'file' : 'group',
         payload: {
           'groupEvent': m.event,
           'text': m.text,
@@ -858,6 +875,7 @@ class CourierDeliveryAdapter extends ChangeNotifier {
       peerId: peer,
       envelope: e,
       file: file,
+      includeOfferHeader: file != null && c.supportsFileOffers(peer),
       isCurrent: () => _groupOwns(m, peer),
     );
     if (!_groupOwns(m, peer)) return;

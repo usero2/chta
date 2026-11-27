@@ -6,6 +6,7 @@ import 'package:cht/courier/courier_receiver.dart';
 import 'package:cht/delivery/delivery_envelope.dart';
 import 'package:cht/delivery/group_delivery_sink.dart';
 import 'package:cht/groups/group_controller.dart';
+import 'package:cht/groups/group_models.dart';
 import 'package:cht/groups/swarm/swarm.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/foundation.dart';
@@ -242,6 +243,30 @@ void main() {
     final ref = await controller.attachments.put(g.friend, file),
         sink = GroupDeliverySink(controller: controller, crypto: root.Crypto()),
         e = await message(manifest: manifest);
+    final provisional = DeliveryEnvelope.fromJson({
+      ...e.toJson(),
+      'payload': '{}',
+    });
+    expect(await sink.authorizeLegacyFile(provisional), isFalse);
+    expect(await sink.authorizeFetch(e, receivedAt: 2000), isFalse);
+    expect(
+      controller.messagesFor(g.gid).single.manifest?.fileId,
+      manifest.fileId,
+    );
+    expect(await sink.authorizeFetch(e, receivedAt: 3000), isFalse);
+    expect(controller.messagesFor(g.gid), hasLength(1));
+    await expectLater(
+      sink.commit(CourierReceived(e, 2000, attachment: ref)),
+      throwsStateError,
+    );
+    expect((await controller.cache.status(manifest)).available, isEmpty);
+    expect(await sink.existingReceivedAt(e), isNull);
+    expect(
+      await controller.chooseFile(manifest, GroupFileChoice.accepted),
+      isTrue,
+    );
+    expect(await sink.authorizeLegacyFile(provisional), isTrue);
+    expect(await sink.authorizeFetch(e), isTrue);
     await expectLater(sink.commit(CourierReceived(e, 2000)), throwsStateError);
     await sink.commit(CourierReceived(e, 2000, attachment: ref));
     expect((await controller.cache.status(manifest)).complete, isTrue);
