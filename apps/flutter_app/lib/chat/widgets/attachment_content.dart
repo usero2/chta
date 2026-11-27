@@ -20,9 +20,11 @@ class CachedAttachmentContent extends StatefulWidget {
     super.key,
     required this.history,
     required this.message,
+    this.transfer,
   });
   final PeerHistory history;
   final PeerMessage message;
+  final Widget? transfer;
   @override
   State<CachedAttachmentContent> createState() =>
       _CachedAttachmentContentState();
@@ -42,6 +44,20 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
     if (!_waiting) _file = widget.history.resolveAttachment(widget.message);
   }
 
+  Widget _withTransfer(Widget content) {
+    final transfer = widget.transfer;
+    return transfer == null
+        ? content
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              content,
+              SizedBox(width: 260, child: transfer),
+            ],
+          );
+  }
+
   @override
   void didUpdateWidget(covariant CachedAttachmentContent oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -57,13 +73,15 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
 
   @override
   Widget build(BuildContext context) => _waiting
-      ? Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.insert_drive_file_outlined),
-            const SizedBox(width: 8),
-            Flexible(child: Text(widget.message.attachmentRef!.name)),
-          ],
+      ? _withTransfer(
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.insert_drive_file_outlined),
+              const SizedBox(width: 8),
+              Flexible(child: Text(widget.message.attachmentRef!.name)),
+            ],
+          ),
         )
       : FutureBuilder<ChatAttachment>(
           future: _file,
@@ -72,6 +90,7 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
               return AttachmentContent(
                 attachment: snapshot.data!,
                 incoming: widget.message.incoming,
+                transfer: widget.transfer,
                 loadThumbnail: () => widget.history.thumbnailFor(
                   widget.message,
                   generate: createMediaThumbnail,
@@ -79,16 +98,21 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
               );
             }
             if (snapshot.hasError) {
-              return TextButton.icon(
-                onPressed: () => setState(
-                  () =>
-                      _file = widget.history.resolveAttachment(widget.message),
+              return _withTransfer(
+                TextButton.icon(
+                  onPressed: () => setState(
+                    () => _file = widget.history.resolveAttachment(
+                      widget.message,
+                    ),
+                  ),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry cached file'),
                 ),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry cached file'),
               );
             }
-            return const SizedBox(width: 180, child: LinearProgressIndicator());
+            return _withTransfer(
+              const SizedBox(width: 180, child: LinearProgressIndicator()),
+            );
           },
         );
 }
@@ -99,10 +123,12 @@ class AttachmentContent extends StatelessWidget {
     required this.attachment,
     required this.incoming,
     this.loadThumbnail,
+    this.transfer,
   });
   final ChatAttachment attachment;
   final bool incoming;
   final Future<Uint8List?> Function()? loadThumbnail;
+  final Widget? transfer;
 
   Future<String> _readMarkdown() async {
     if (!attachment.isStreamed) {
@@ -122,6 +148,7 @@ class AttachmentContent extends StatelessWidget {
         key: ObjectKey(
           attachment.isStreamed ? attachment.source : attachment.bytes,
         ),
+        footerFor: transfer == null ? null : (_) => transfer!,
         items: [
           MediaItem(
             id: attachment.name,
@@ -248,10 +275,11 @@ class AttachmentContent extends StatelessWidget {
                   ],
                 ),
               ),
-              const Tooltip(
-                message: 'Cached',
-                child: Icon(Icons.offline_pin_outlined, size: 14),
-              ),
+              if (transfer == null)
+                const Tooltip(
+                  message: 'Cached',
+                  child: Icon(Icons.offline_pin_outlined, size: 14),
+                ),
               IconButton(
                 onPressed: save,
                 tooltip: 'Save copy',
@@ -262,6 +290,7 @@ class AttachmentContent extends StatelessWidget {
             ],
           ),
         ),
+        if (transfer case final footer?) SizedBox(width: 260, child: footer),
         if (attachment.caption?.trim().isNotEmpty == true && visualMedia)
           MediaCaption(text: attachment.caption!, incoming: incoming)
         else if (!visualMedia && attachment.caption?.isNotEmpty == true)

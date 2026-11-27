@@ -64,7 +64,7 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final quote = Padding(
-      padding: const EdgeInsets.fromLTRB(9, 5, 7, 5),
+      padding: const EdgeInsets.fromLTRB(7, 3, 5, 3),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -78,9 +78,10 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
                     author,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelMedium?.copyWith(
+                    style: theme.textTheme.labelSmall?.copyWith(
                       color: colors.onSurface,
                       fontWeight: FontWeight.w700,
+                      height: 1.15,
                     ),
                   ),
                 Text(
@@ -89,17 +90,18 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: colors.onSurfaceVariant,
+                    height: 1.18,
                   ),
                 ),
               ],
             ),
           ),
           if (widget.loadImage != null) ...[
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             ClipRRect(
               borderRadius: BorderRadius.circular(5),
               child: SizedBox.square(
-                dimension: 40,
+                dimension: 32,
                 child: FutureBuilder<Uint8List?>(
                   future: _preview,
                   builder: (context, snapshot) {
@@ -110,8 +112,8 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
                       bytes,
                       semanticLabel: 'Quoted photo',
                       fit: BoxFit.cover,
-                      cacheWidth: 120,
-                      cacheHeight: 120,
+                      cacheWidth: 96,
+                      cacheHeight: 96,
                       errorBuilder: (_, _, _) => placeholder,
                     );
                   },
@@ -124,6 +126,11 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
               onPressed: widget.onClear,
               tooltip: 'Cancel reply',
               icon: const Icon(Icons.close, size: 16),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(36, 36),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
             ),
         ],
       ),
@@ -132,12 +139,12 @@ class _MessageReplyQuoteState extends State<MessageReplyQuote> {
       constraints: const BoxConstraints(maxWidth: 320),
       child: Material(
         color: colors.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
         clipBehavior: Clip.antiAlias,
         child: DecoratedBox(
           decoration: BoxDecoration(
             border: BorderDirectional(
-              start: BorderSide(color: colors.primary, width: 3),
+              start: BorderSide(color: colors.primary, width: 2),
             ),
           ),
           child: widget.onJump == null

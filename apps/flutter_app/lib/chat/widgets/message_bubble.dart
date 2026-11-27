@@ -140,9 +140,9 @@ class MessageBubble extends StatelessWidget {
         : null;
     final detailsRows = [
       if (messageDateTime(sentAtMilliseconds) != null)
-        'เวลาส่ง ${formatMessageTimestamp(sentAtMilliseconds)}',
+        'Sent ${formatMessageTimestamp(sentAtMilliseconds)}',
       if (messageDateTime(receivedAtMilliseconds) != null)
-        'เวลารับ ${formatMessageTimestamp(receivedAtMilliseconds)}',
+        'Received ${formatMessageTimestamp(receivedAtMilliseconds)}',
       ?deliveryDetail,
     ];
     final details = detailsRows.isEmpty ? null : detailsRows.join('\n');
@@ -152,7 +152,9 @@ class MessageBubble extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: 520),
       padding: media
           ? EdgeInsets.zero
-          : const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
+          : quote == null
+          ? const EdgeInsets.symmetric(horizontal: 15, vertical: 11)
+          : const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: media
           ? null
           : BoxDecoration(
@@ -168,8 +170,11 @@ class MessageBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 quote!,
-                const SizedBox(height: 6),
-                content ?? _textContent(),
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
+                  child: content ?? _textContent(),
+                ),
               ],
             ),
     );

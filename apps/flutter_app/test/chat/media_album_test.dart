@@ -3,6 +3,9 @@ import 'dart:typed_data';
 
 import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/media_item.dart';
+import 'package:cht/chat/peer_history.dart';
+import 'package:cht/chat/widgets/file_transfer_actions.dart';
+import 'package:cht/chat/widgets/reply_message_list.dart';
 import 'package:cht/chat/widgets/media_album.dart';
 import 'package:cht/chat/widgets/media_viewer.dart';
 import 'package:flutter/material.dart';
@@ -101,6 +104,77 @@ void main() {
     expect(find.byTooltip('Save copy'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+  testWidgets('video album keeps transfer controls with each file', (
+    tester,
+  ) async {
+    final paused = <String>[];
+    final cancelled = <String>[];
+    final videos = [
+      for (final id in ['clip-a', 'clip-b'])
+        MediaItem(
+          id: id,
+          name: '$id.mp4',
+          kind: 'video',
+          incoming: false,
+          groupIndex: id == 'clip-a' ? 0 : 1,
+          loadFile: () async => ChatAttachment(
+            name: '$id.mp4',
+            mimeType: 'video/mp4',
+            bytes: Uint8List(3),
+          ),
+        ),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 232,
+            child: MediaAlbum(
+              items: videos,
+              footerFor: (video) => FileTransferActions(
+                message: PeerMessage(
+                  id: video.id,
+                  text: video.name,
+                  incoming: false,
+                  status: video.id == 'clip-a'
+                      ? DeliveryStatus.delivered
+                      : DeliveryStatus.pending,
+                  attachment: ChatAttachment(
+                    name: video.name,
+                    mimeType: 'video/mp4',
+                    bytes: Uint8List(3),
+                  ),
+                ),
+                onPause: () async => paused.add(video.id),
+                onCancel: () async => cancelled.add(video.id),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final completed = find.byKey(const ReplyMessageAnchorKey('clip-a'));
+    final pending = find.byKey(const ReplyMessageAnchorKey('clip-b'));
+    final pause = find.byTooltip('Pause transfer');
+    final cancel = find.byTooltip('Cancel transfer');
+    expect(
+      find.descendant(of: completed, matching: find.text('Delivered')),
+      findsOneWidget,
+    );
+    expect(find.descendant(of: completed, matching: cancel), findsNothing);
+    expect(
+      find.descendant(of: pending, matching: find.text('Queued')),
+      findsOneWidget,
+    );
+    await tester.tap(find.descendant(of: pending, matching: pause));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: pending, matching: cancel));
+    expect(paused, ['clip-b']);
+    expect(cancelled, ['clip-b']);
+    expect(tester.takeException(), isNull);
+  });
+
   test('groups only explicit IDs, media kind and sender direction', () {
     final a = item('a', 0),
         b = item('b', 1),

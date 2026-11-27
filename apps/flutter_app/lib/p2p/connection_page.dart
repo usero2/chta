@@ -2680,11 +2680,48 @@ class ConnectionPageState extends State<ConnectionPage> {
       loadFile: () => history.resolveAttachment(message),
       loadThumbnail: () =>
           history.thumbnailFor(message, generate: createMediaThumbnail),
-      onRetry: message.status == DeliveryStatus.failed
-          ? () {
-              _send(retry: message);
+    );
+  }
+
+  Widget _fileTransfer(String peer, PeerMessage message) {
+    final snapshot = fileController?.progress[message.id];
+    final legacyProgress = transferProgress[message.id];
+    final kind = message.attachment?.kind ?? message.attachmentRef?.kind;
+    final service = widget.messaging;
+    final color = const {'image', 'video'}.contains(kind) || message.incoming
+        ? Theme.of(context).colorScheme.onSurface
+        : const Color(0xFF0B0B0B);
+    return FileTransferActions(
+      key: ValueKey('attachment-transfer-${message.id}'),
+      message: message,
+      color: color,
+      progress:
+          MessageTransferStatus.visibleFor(
+            message,
+            snapshot: snapshot,
+            legacyProgress: legacyProgress,
+          )
+          ? MessageTransferStatus(
+              message: message,
+              snapshot: snapshot,
+              legacyProgress: legacyProgress,
+              compact: true,
+              color: color,
+            )
+          : null,
+      onPause: service == null
+          ? null
+          : () => service.pauseFile(peer, message.id),
+      onResume: service != null
+          ? () => service.resumeFile(peer, message.id)
+          : !message.incoming && message.status == DeliveryStatus.failed
+          ? () async {
+              await _send(retry: message);
             }
           : null,
+      onCancel: service == null
+          ? null
+          : () => service.cancelFile(peer, message.id),
     );
   }
 
@@ -2834,13 +2871,6 @@ class ConnectionPageState extends State<ConnectionPage> {
             message.hasAttachment &&
             _mediaItem(message).groupKey != null;
         final quoted = message.action?.target;
-        final hasTransferStatus = group.any(
-          (item) => MessageTransferStatus.visibleFor(
-            item,
-            snapshot: fileController?.progress[item.id],
-            legacyProgress: transferProgress[item.id],
-          ),
-        );
         final outgoing = !message.incoming && !deleted;
         final delivered =
             outgoing &&
@@ -2903,9 +2933,11 @@ class ConnectionPageState extends State<ConnectionPage> {
               sentAtMilliseconds: message.sentAtMilliseconds,
               receivedAtMilliseconds: message.receivedAtMilliseconds,
               showTime: time.showTime,
-              deliveryIndicator: delivered
+              deliveryIndicator: message.hasAttachment
+                  ? null
+                  : delivered
                   ? MessageDeliveryIndicator.delivered
-                  : pending != null && !hasTransferStatus
+                  : pending != null
                   ? MessageDeliveryIndicator.pending
                   : null,
               deliveryDetail: deliveryDetail,
@@ -2932,7 +2964,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                     ),
               onRetry:
                   !deleted &&
-                      !album &&
+                      !message.hasAttachment &&
                       message.status == DeliveryStatus.failed &&
                       attachmentUsesRelay == null
                   ? () => _send(retry: message)
@@ -2943,6 +2975,8 @@ class ConnectionPageState extends State<ConnectionPage> {
                   ? MediaAlbum(
                       key: ValueKey(_mediaItem(message).groupKey),
                       items: group.map(_mediaItem).toList(),
+                      footerFor: (item) =>
+                          _fileTransfer(peer, originals[item.id]!),
                     )
                   : !message.hasAttachment
                   ? null
@@ -2950,11 +2984,13 @@ class ConnectionPageState extends State<ConnectionPage> {
                   ? AttachmentContent(
                       attachment: message.attachment!,
                       incoming: message.incoming,
+                      transfer: _fileTransfer(peer, message),
                     )
                   : CachedAttachmentContent(
                       key: ObjectKey(message),
                       history: history,
                       message: message,
+                      transfer: _fileTransfer(peer, message),
                     ),
             ),
             if (presentation.pending || presentation.edited)
@@ -2964,30 +3000,6 @@ class ConnectionPageState extends State<ConnectionPage> {
                     : 'Edited',
                 style: Theme.of(context).textTheme.labelSmall,
               ),
-            for (final item in group)
-              if (presentations[item.id]?.deleted != true) ...[
-                MessageTransferStatus(
-                  message: item,
-                  snapshot: fileController?.progress[item.id],
-                  legacyProgress: transferProgress[item.id],
-                ),
-                if (widget.messaging case final service?)
-                  FileTransferActions(
-                    message: item,
-                    onPause: () => service.pauseFile(
-                      widget.targetContactId ?? peerIdentityId ?? '',
-                      item.id,
-                    ),
-                    onResume: () => service.resumeFile(
-                      widget.targetContactId ?? peerIdentityId ?? '',
-                      item.id,
-                    ),
-                    onCancel: () => service.cancelFile(
-                      widget.targetContactId ?? peerIdentityId ?? '',
-                      item.id,
-                    ),
-                  ),
-              ],
           ],
         );
       },
@@ -3030,7 +3042,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     children: [
       if (_replyTo case final target?)
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.fromLTRB(12, 2, 12, 3),
           child: Align(
             alignment: AlignmentDirectional.centerStart,
             child: _replyQuote(

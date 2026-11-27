@@ -14,6 +14,7 @@ import 'package:cht/chat/peer_message_action.dart';
 import 'package:cht/chat/attachment_source.dart';
 import 'package:cht/chat/chunked_attachment_bridge.dart';
 import 'package:cht/chat/widgets/message_composer.dart';
+import 'package:cht/chat/widgets/reply_message_list.dart';
 
 import 'package:cht/account/account_bridge.dart';
 import 'package:cht/account/account_models.dart';
@@ -114,6 +115,7 @@ void main() {
       final quote = find.byTooltip('Go to original message');
       expect(original.hitTestable(), findsNothing);
       expect(quote, findsOneWidget);
+      expect(tester.getSize(quote).height, lessThanOrEqualTo(44));
       expect(
         find.descendant(of: quote, matching: find.byType(Image)),
         findsOneWidget,
@@ -194,6 +196,16 @@ void main() {
         await tester.pump();
         expect(find.text('50%'), findsOneWidget);
         expect(find.text('100%'), findsNothing);
+        final sent = find.byKey(const ReplyMessageAnchorKey('album-0'));
+        final sending = find.byKey(const ReplyMessageAnchorKey('album-1'));
+        expect(
+          find.descendant(of: sent, matching: find.text('Delivered')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: sending, matching: find.text('50%')),
+          findsOneWidget,
+        );
         final bubble = tester.widget<Container>(
           find.byKey(const Key('peer-message-album-0')),
         );
@@ -335,8 +347,8 @@ void main() {
           ),
         );
         await tester.pump(const Duration(milliseconds: 400));
-        expect(find.text('2 ม.ค. 2024'), findsOneWidget);
-        expect(find.text('3 ม.ค. 2024'), findsOneWidget);
+        expect(find.text('Jan 2, 2024'), findsOneWidget);
+        expect(find.text('Jan 3, 2024'), findsOneWidget);
         expect(find.text('03:04'), findsOneWidget);
         expect(find.text('05:06'), findsOneWidget);
         expect(find.byIcon(Icons.done_all), findsNWidgets(2));
@@ -349,7 +361,7 @@ void main() {
         expect(infoTooltip, findsOneWidget);
         expect(
           tester.widget<Tooltip>(infoTooltip).message,
-          'เวลารับ 2024-01-03 05:06:00.000',
+          'Received 2024-01-03 05:06:00.000',
         );
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -1147,7 +1159,7 @@ void main() {
         await tester.pumpWidget(screen('did:cht:peer'));
         await tester.pump(const Duration(milliseconds: 500));
         if (retry) {
-          await tester.tap(find.byTooltip('Retry'));
+          await tester.tap(find.byTooltip('Retry transfer'));
         } else {
           await tester.tap(find.byKey(const Key('attach-message')));
           await tester.pumpAndSettle();
@@ -1408,8 +1420,7 @@ void main() {
     expect(
       find.byWidgetPredicate(
         (widget) =>
-            widget is Tooltip &&
-            (widget.message?.startsWith('เวลาส่ง ') ?? false),
+            widget is Tooltip && (widget.message?.startsWith('Sent ') ?? false),
       ),
       findsOneWidget,
     );

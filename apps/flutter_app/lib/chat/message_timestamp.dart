@@ -63,21 +63,21 @@ bool _sameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
 
 String _dayLabel(DateTime date, DateTime today, DateTime yesterday) {
-  if (_sameDay(date, today)) return 'วันนี้';
-  if (_sameDay(date, yesterday)) return 'เมื่อวาน';
+  if (_sameDay(date, today)) return 'Today';
+  if (_sameDay(date, yesterday)) return 'Yesterday';
   const months = [
-    'ม.ค.',
-    'ก.พ.',
-    'มี.ค.',
-    'เม.ย.',
-    'พ.ค.',
-    'มิ.ย.',
-    'ก.ค.',
-    'ส.ค.',
-    'ก.ย.',
-    'ต.ค.',
-    'พ.ย.',
-    'ธ.ค.',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
-  return '${date.day} ${months[date.month - 1]} ${date.year}';
+  return '${months[date.month - 1]} ${date.day}, ${date.year}';
 }

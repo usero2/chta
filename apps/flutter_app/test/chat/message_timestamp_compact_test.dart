@@ -38,10 +38,10 @@ void main() {
     ]);
     // ascii source input is retained across Windows PowerShell here-strings.
     expect(markers.map((m) => m.dayLabel), [
-      '31 \u0e18.\u0e04. 2025',
-      '\u0e40\u0e21\u0e37\u0e48\u0e2d\u0e27\u0e32\u0e19',
+      'Dec 31, 2025',
+      'Yesterday',
       null,
-      '\u0e27\u0e31\u0e19\u0e19\u0e35\u0e49',
+      'Today',
       null,
       null,
       null,

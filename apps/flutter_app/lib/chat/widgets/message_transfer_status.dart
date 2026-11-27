@@ -11,10 +11,14 @@ class MessageTransferStatus extends StatelessWidget {
     required this.message,
     this.snapshot,
     this.legacyProgress,
+    this.compact = false,
+    this.color,
   });
   final PeerMessage message;
   final TransferProgressSnapshot? snapshot;
   final double? legacyProgress;
+  final bool compact;
+  final Color? color;
 
   static bool visibleFor(
     PeerMessage message, {
@@ -36,6 +40,7 @@ class MessageTransferStatus extends StatelessWidget {
     )) {
       return const SizedBox.shrink();
     }
+    if (compact) return _compactProgress(context);
     final Widget content;
     if (snapshot case final value?) {
       content = FileTransferStatus(snapshot: value);
@@ -59,6 +64,45 @@ class MessageTransferStatus extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10, right: 8),
         child: content,
+      ),
+    );
+  }
+
+  Widget _compactProgress(BuildContext context) {
+    final value = (snapshot?.fraction ?? legacyProgress!).clamp(0.0, 1.0);
+    final phase = snapshot?.phase;
+    final label = switch (phase) {
+      FileTransferPhase.preparing => 'Preparing',
+      FileTransferPhase.waiting => 'Waiting',
+      FileTransferPhase.verifying => 'Verifying',
+      FileTransferPhase.failed => 'Failed',
+      _ => value >= 1 ? 'Sent' : '${(value * 100).round()}%',
+    };
+    return Tooltip(
+      message: label == 'Sent'
+          ? 'Waiting for receipt'
+          : snapshot == null
+          ? label
+          : '$label · ${snapshot!.transport}',
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall
+                ?.copyWith(color: color),
+          ),
+          if ((phase == null ||
+                  phase == FileTransferPhase.sending ||
+                  phase == FileTransferPhase.receiving) &&
+              value < 1) ...[
+            const SizedBox(height: 2),
+            LinearProgressIndicator(value: value, minHeight: 2, color: color),
+          ],
+        ],
       ),
     );
   }

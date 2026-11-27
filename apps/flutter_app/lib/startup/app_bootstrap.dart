@@ -58,6 +58,7 @@ class _AppBootstrapState extends State<AppBootstrap> {
       _app ??
       MaterialApp(
         debugShowCheckedModeBanner: false,
+        locale: const Locale('en', 'US'),
         theme: ThemeData.dark(),
         // No temporary Navigator: keep the browser's requested deep link intact.
         builder: (context, child) => Scaffold(

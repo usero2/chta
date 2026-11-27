@@ -30,6 +30,7 @@ class ChtApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'chta',
+    locale: const Locale('en', 'US'),
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       brightness: Brightness.dark,

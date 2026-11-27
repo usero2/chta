@@ -10,9 +10,15 @@ import 'media_caption.dart';
 import 'reply_message_list.dart';
 
 class MediaAlbum extends StatelessWidget {
-  const MediaAlbum({super.key, required this.items, this.onOpen});
+  const MediaAlbum({
+    super.key,
+    required this.items,
+    this.onOpen,
+    this.footerFor,
+  });
   final List<MediaItem> items;
   final ValueChanged<int>? onOpen;
+  final Widget Function(MediaItem)? footerFor;
   @override
   Widget build(BuildContext context) {
     final ordered = List<MediaItem>.of(items)
@@ -41,6 +47,14 @@ class MediaAlbum extends StatelessWidget {
       );
     }
 
+    Widget tile(int index) => _AlbumTile(
+      key: ReplyMessageAnchorKey(ordered[index].id),
+      item: ordered[index],
+      onOpen: () => open(index),
+      color: color,
+      footer: footerFor?.call(ordered[index]),
+    );
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: SizedBox(
@@ -51,38 +65,41 @@ class MediaAlbum extends StatelessWidget {
           children: [
             if (ordered.first.kind == 'video' && ordered.length > 1)
               SizedBox(
-                height: 142,
+                height: footerFor == null ? 142 : 178,
                 child: ListView.separated(
                   scrollDirection: Axis.horizontal,
                   itemCount: ordered.length,
                   separatorBuilder: (_, _) => const SizedBox(width: 6),
                   itemBuilder: (context, index) => SizedBox(
-                    width: 104,
-                    child: _AlbumTile(
-                      key: ReplyMessageAnchorKey(ordered[index].id),
-                      item: ordered[index],
-                      onOpen: () => open(index),
-                      color: color,
-                    ),
+                    width: footerFor == null ? 104 : 112,
+                    child: tile(index),
                   ),
                 ),
               )
             else
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: ordered.length > 1 ? 2 : 1,
-                  crossAxisSpacing: 5,
-                  mainAxisSpacing: 5,
-                ),
-                itemCount: ordered.length,
-                itemBuilder: (context, index) => _AlbumTile(
-                  key: ReplyMessageAnchorKey(ordered[index].id),
-                  item: ordered[index],
-                  onOpen: () => open(index),
-                  color: color,
-                ),
+              LayoutBuilder(
+                builder: (context, bounds) {
+                  const gap = 5.0;
+                  final columns =
+                      ordered.length > 1 &&
+                          (footerFor == null || bounds.maxWidth >= 165)
+                      ? 2
+                      : 1;
+                  final tileWidth =
+                      (bounds.maxWidth - gap * (columns - 1)) / columns;
+                  return GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: columns,
+                      crossAxisSpacing: gap,
+                      mainAxisSpacing: gap,
+                      mainAxisExtent: footerFor == null ? null : tileWidth + 36,
+                    ),
+                    itemCount: ordered.length,
+                    itemBuilder: (context, index) => tile(index),
+                  );
+                },
               ),
             if (caption != null && visualMedia)
               MediaCaption(text: caption, incoming: ordered.first.incoming)
@@ -104,10 +121,12 @@ class _AlbumTile extends StatefulWidget {
     required this.item,
     required this.onOpen,
     required this.color,
+    this.footer,
   });
   final MediaItem item;
   final VoidCallback onOpen;
   final Color color;
+  final Widget? footer;
   @override
   State<_AlbumTile> createState() => _AlbumTileState();
 }
@@ -175,27 +194,28 @@ class _AlbumTileState extends State<_AlbumTile> {
                       color: Colors.white,
                     ),
                   ),
-                Positioned(
-                  left: 6,
-                  bottom: 6,
-                  child: Tooltip(
-                    message: 'Cached',
-                    child: DecoratedBox(
-                      decoration: const BoxDecoration(
-                        color: Color(0x99000000),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Padding(
-                        padding: EdgeInsets.all(3),
-                        child: Icon(
-                          Icons.offline_pin_outlined,
-                          size: 15,
-                          color: Colors.white,
+                if (widget.footer == null)
+                  Positioned(
+                    left: 6,
+                    bottom: 6,
+                    child: Tooltip(
+                      message: 'Cached',
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          color: Color(0x99000000),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Padding(
+                          padding: EdgeInsets.all(3),
+                          child: Icon(
+                            Icons.offline_pin_outlined,
+                            size: 15,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
                 Positioned(
                   right: 0,
                   bottom: 0,
@@ -227,6 +247,18 @@ class _AlbumTileState extends State<_AlbumTile> {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(fontSize: 11, color: widget.color),
+        ),
+      if (widget.footer case final footer?)
+        Container(
+          margin: const EdgeInsets.only(top: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          constraints: const BoxConstraints(minHeight: 32),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          alignment: Alignment.centerLeft,
+          child: footer,
         ),
     ],
   );
