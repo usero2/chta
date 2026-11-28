@@ -6,6 +6,7 @@ use futures::{SinkExt, StreamExt};
 use libp2p::identity::Keypair;
 use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
@@ -108,6 +109,45 @@ async fn registered_with_catalog(url: &str, key: &SigningKey, subscribe: bool) -
         }
     }
     (socket, id)
+}
+
+async fn request_health(url: &str, method: &str) -> String {
+    let authority = url.trim_start_matches("ws://").trim_end_matches("/cht");
+    let mut stream = TcpStream::connect(authority).await.unwrap();
+    let line = format!("{method} /healthz HTTP/1.1\r\n");
+    stream.write_all(line.as_bytes()).await.unwrap();
+    let headers = format!("Host: {authority}\r\nConnection: close\r\n\r\n");
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    timeout(Duration::from_secs(3), stream.read_to_string(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    response
+}
+
+#[tokio::test]
+async fn health_reports_only_public_capabilities_without_websocket_upgrade() {
+    let server = node(free_port(), vec![]).await;
+    let response = request_health(&server.url, "GET").await;
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert!(headers.contains("Content-Type: application/json"));
+    assert!(headers.contains("Cache-Control: no-store"));
+    let health: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(health["ok"], true);
+    assert_eq!(health["protocol"], "chta-data-relay");
+    assert_eq!(health["protocolVersion"], 1);
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(health["offlineStorage"], false);
+    assert!(health["capabilities"].as_array().unwrap().contains(&json!("root-auth-v1")));
+    assert_eq!(health.as_object().unwrap().len(), 6);
+    let response = request_health(&server.url, "HEAD").await;
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert!(body.is_empty());
+    let response = request_health(&server.url, "POST").await;
+    assert!(response.starts_with("HTTP/1.1 405"));
 }
 
 #[tokio::test]

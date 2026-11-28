@@ -31,6 +31,7 @@ import '../chat/widgets/message_transfer_status.dart';
 import '../chat/widgets/file_transfer_actions.dart';
 import '../chat/widgets/file_offer_card.dart';
 import '../chat/file_offer.dart';
+import '../chat/file_offer_cover.dart';
 import '../chat/managed_attachment_cache.dart';
 import '../chat/media_batch.dart';
 import '../chat/media_item.dart';
@@ -38,6 +39,7 @@ import '../chat/media_thumbnail.dart';
 import '../chat/widgets/media_album.dart';
 import '../chat/widgets/message_action_menu.dart';
 import '../chat/widgets/message_day_divider.dart';
+import '../chat/widgets/message_sender_avatar.dart';
 import '../chat/widgets/message_bubble.dart';
 import '../chat/widgets/message_reply_quote.dart';
 import '../chat/widgets/reply_message_list.dart';
@@ -48,6 +50,9 @@ import '../profile/profile_avatar.dart';
 import 'p2p_bridge.dart';
 import 'p2p_bridge_factory.dart';
 import 'direct_file_link.dart';
+import 'direct_peer_factory.dart';
+import 'turn_settings.dart';
+import 'turn_settings_tile.dart';
 import '../contact_requests/contact_request_controller.dart';
 import 'peer_file_controller.dart';
 import '../relay/relay_crypto_bridge.dart';
@@ -90,6 +95,7 @@ class ConnectionPage extends StatefulWidget {
     this.onConversationAction,
     this.onOnlinePeersChanged,
     this.extraConversations = const [],
+    this.unreadCountFor,
     this.autoStartListener = true,
     this.relayHostFactory = createRelayHost,
     this.onRelayNetworkReady,
@@ -98,6 +104,7 @@ class ConnectionPage extends StatefulWidget {
     this.relayConnector,
     this.pickAttachments,
     this.directPeerFactory,
+    this.turnSettings,
     super.key,
   });
 
@@ -122,6 +129,7 @@ class ConnectionPage extends StatefulWidget {
   final ConversationActionCallback? onConversationAction;
   final ValueChanged<Set<String>>? onOnlinePeersChanged;
   final List<ConversationView> extraConversations;
+  final int Function(String)? unreadCountFor;
   final bool autoStartListener;
   final RelayHost? Function() relayHostFactory;
   final ValueChanged<RelayNetwork>? onRelayNetworkReady;
@@ -131,6 +139,7 @@ class ConnectionPage extends StatefulWidget {
   final Future<List<ChatAttachment>> Function(AttachmentPickKind)?
   pickAttachments;
   final DirectPeerFactory? directPeerFactory;
+  final TurnSettings? turnSettings;
 
   @override
   State<ConnectionPage> createState() => ConnectionPageState();
@@ -189,6 +198,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   List<PeerMessage> get messages =>
       history.visibleMessagesFor(widget.targetContactId ?? peerIdentityId);
   String? _replyTo;
+  ComposerEdit? _edit;
   final _answeringFileOffers = <(String, String)>{};
   final _fileOfferErrors = <(String, String), String>{};
   Timer? timer;
@@ -328,7 +338,8 @@ class ConnectionPageState extends State<ConnectionPage> {
         onPacket: _onDirectPacket,
         onReceipt: _onDirectReceipt,
         onChanged: _historyChanged,
-        peerFactory: widget.directPeerFactory,
+        peerFactory: widget.directPeerFactory ??
+            createDirectPeerFactory(turnServers: widget.turnSettings?.iceServers),
       );
       fileController = controller;
       await _updateFilePeer(authenticated);
@@ -638,6 +649,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     if (peerIdentityId != id) {
       peerGeneration++;
       _replyTo = null;
+      _edit = null;
       attachments.reset();
       transferProgress.clear();
       incomingProgress.clear();
@@ -801,6 +813,8 @@ class ConnectionPageState extends State<ConnectionPage> {
   String? get _requestLabel => widget.targetContactId == null
       ? null
       : widget.requests?.labelFor(widget.targetContactId!);
+  bool get _peerReconnecting =>
+      widget.messaging?.isReconnecting(widget.targetContactId) == true;
 
   Future<void> refreshTrustedContact(String id) async {
     final known = await widget.accountBridge.contacts();
@@ -833,6 +847,8 @@ class ConnectionPageState extends State<ConnectionPage> {
       transferProgress.clear();
       incomingProgress.clear();
       messageInput.clear();
+      _edit = null;
+      _replyTo = null;
       automaticConnectionAttempted = false;
       seedClient?.selectContact(null);
       _loadTargetContact();
@@ -2651,6 +2667,8 @@ class ConnectionPageState extends State<ConnectionPage> {
           id: contact.identityId,
           title: contact.displayName,
           avatarBase64: contact.avatarBase64,
+          online: _reportedOnlinePeers.contains(contact.identityId),
+          unreadCount: widget.unreadCountFor?.call(contact.identityId) ?? 0,
           preview:
               history.conversationPreview(contact.identityId) ??
               ((contact.identityId == peerIdentityId && authenticated) ||
@@ -2690,6 +2708,7 @@ class ConnectionPageState extends State<ConnectionPage> {
   MediaItem _mediaItem(PeerMessage message) {
     final file = message.attachment;
     final ref = message.attachmentRef;
+    final peer = widget.targetContactId ?? peerIdentityId ?? '';
     return MediaItem(
       id: message.id,
       name: file?.name ?? ref!.name,
@@ -2700,9 +2719,17 @@ class ConnectionPageState extends State<ConnectionPage> {
       groupIndex: file?.groupIndex ?? ref?.groupIndex,
       groupCount: file?.groupCount ?? ref?.groupCount,
       loadFile: () => history.resolveAttachment(message),
-      loadThumbnail: () =>
-          history.thumbnailFor(message, generate: createMediaThumbnail),
+      loadThumbnail: () async =>
+          decodeFileOfferCover(_offeredCoverFor(peer, message)) ??
+          await history.thumbnailFor(message, generate: createMediaThumbnail),
     );
+  }
+
+  String? _offeredCoverFor(String peer, PeerMessage message) {
+    if (!message.incoming || message.attachmentRef?.isChunked != true) {
+      return null;
+    }
+    return history.fileOfferFor(peer, message.id, incoming: true)?.cover;
   }
 
   Widget _fileTransfer(String peer, PeerMessage message) {
@@ -2756,67 +2783,66 @@ class ConnectionPageState extends State<ConnectionPage> {
     final peer = widget.targetContactId, service = widget.messaging;
     if (peer == null || service == null) return;
     if (action == PeerMessageActionKind.reply) {
-      setState(() => _replyTo = message.id);
+      setState(() {
+        _edit = null;
+        _replyTo = message.id;
+      });
       return;
     }
+    if (action == PeerMessageActionKind.edit) {
+      setState(() {
+        _edit = (
+          id: message.id,
+          original: text,
+          save: (value) =>
+              _savePeerMutation(peer, service, action, message.id, text: value),
+        );
+      });
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete message for everyone?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted || widget.targetContactId != peer) {
+      return;
+    }
+    await _savePeerMutation(peer, service, action, message.id);
+  }
+
+  Future<bool> _savePeerMutation(
+    String peer,
+    MessagingService service,
+    PeerMessageActionKind action,
+    String messageId, {
+    String? text,
+  }) async {
+    if (widget.targetContactId != peer) return false;
     try {
-      if (action == PeerMessageActionKind.edit) {
-        var revised = text;
-        final edit = await showDialog<String>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Edit message'),
-            content: TextFormField(
-              initialValue: text,
-              autofocus: true,
-              maxLines: 8,
-              minLines: 2,
-              onChanged: (value) => revised = value,
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, revised.trim()),
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        );
-        if (edit == null ||
-            edit == text ||
-            !mounted ||
-            widget.targetContactId != peer) {
-          return;
-        }
-        await service.queueMessageAction(peer, action, message.id, text: edit);
-      } else {
-        final confirmed = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Delete message for everyone?'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('Delete'),
-              ),
-            ],
-          ),
-        );
-        if (confirmed != true || !mounted || widget.targetContactId != peer) {
-          return;
-        }
-        await service.queueMessageAction(peer, action, message.id);
-      }
+      await service.queueMessageAction(peer, action, messageId, text: text);
       if (mounted && widget.targetContactId == peer) {
         setState(() => error = null);
+        if (!service.isOnline(peer) || !service.supportsMessageActions(peer)) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Saved. Waiting to sync with your friend.'),
+            ),
+          );
+        }
       }
+      return true;
     } on FormatException catch (failure) {
       if (mounted && widget.targetContactId == peer) {
         setState(() => error = failure.message);
@@ -2826,6 +2852,7 @@ class ConnectionPageState extends State<ConnectionPage> {
         setState(() => error = 'Could not save message. Try again.');
       }
     }
+    return false;
   }
 
   Future<void> _answerFileOffer(
@@ -2887,6 +2914,10 @@ class ConnectionPageState extends State<ConnectionPage> {
 
   Widget _peerMessageList() {
     final peer = widget.targetContactId ?? peerIdentityId ?? '';
+    final selected = targetContact;
+    final sender = selected?.identityId == peer && selected != null
+        ? history.withCachedAvatar(selected)
+        : null;
     final presentations = history.presentationsFor(peer);
     final supportsActions =
         widget.messaging?.supportsMessageActions(peer) == true;
@@ -2944,14 +2975,28 @@ class ConnectionPageState extends State<ConnectionPage> {
         final group = groups[messageIndex];
         final time = timeline[messageIndex];
         final message = group.first;
+        final startsRun =
+            messageIndex == 0 ||
+            time.dayLabel != null ||
+            groups[messageIndex - 1].first.incoming != message.incoming;
+        Widget row(Widget body) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (time.dayLabel case final label?) MessageDayDivider(label),
+            if (message.incoming && sender != null)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  MessageSenderAvatar(sender: sender, show: startsRun),
+                  Expanded(child: body),
+                ],
+              )
+            else
+              body,
+          ],
+        );
         if (message.fileOffer case final offer? when message.incoming) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (time.dayLabel case final label?) MessageDayDivider(label),
-              _incomingFileOffer(peer, offer),
-            ],
-          );
+          return row(_incomingFileOffer(peer, offer));
         }
         final presentation = presentations[message.id]!;
         final deleted = presentation.deleted;
@@ -2997,111 +3042,113 @@ class ConnectionPageState extends State<ConnectionPage> {
                                       pending.attachment?.size ??
                                       0) >
                                   ChatAttachment.relayMaxBytes &&
-                              fileController?.ready != true,
+                              fileController?.unmetered != true,
                           online: service?.isOnline(peer) ?? authenticated,
                         ));
-        return Column(
-          crossAxisAlignment: message.incoming
-              ? CrossAxisAlignment.start
-              : CrossAxisAlignment.end,
-          children: [
-            if (time.dayLabel case final label?) MessageDayDivider(label),
-            MessageBubble(
-              quote: deleted || quoted == null
-                  ? null
-                  : _replyQuote(
-                      originals[quoted],
-                      presentations[quoted],
-                      outgoing: outgoing,
-                      onJump: originals.containsKey(quoted)
-                          ? () => jumpTo(quoted)
-                          : null,
+        return row(
+          Column(
+            crossAxisAlignment: message.incoming
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.end,
+            children: [
+              MessageBubble(
+                quote: deleted || quoted == null
+                    ? null
+                    : _replyQuote(
+                        originals[quoted],
+                        presentations[quoted],
+                        outgoing: outgoing,
+                        onJump: originals.containsKey(quoted)
+                            ? () => jumpTo(quoted)
+                            : null,
+                      ),
+                text: presentation.text,
+                linkPreview: presentation.preview,
+                media:
+                    !deleted &&
+                    const {'image', 'video'}.contains(
+                      message.attachment?.kind ?? message.attachmentRef?.kind,
                     ),
-              text: presentation.text,
-              media:
-                  !deleted &&
-                  const {'image', 'video'}.contains(
-                    message.attachment?.kind ?? message.attachmentRef?.kind,
-                  ),
-              incoming: message.incoming,
-              sentAtMilliseconds: message.sentAtMilliseconds,
-              receivedAtMilliseconds: message.receivedAtMilliseconds,
-              showTime: time.showTime,
-              deliveryIndicator: message.hasAttachment
-                  ? null
-                  : delivered
-                  ? MessageDeliveryIndicator.delivered
-                  : pending != null
-                  ? MessageDeliveryIndicator.pending
-                  : null,
-              deliveryDetail: deliveryDetail,
-              bubbleKey: Key('peer-message-${message.id}'),
-              actions: deleted
-                  ? null
-                  : MessageActionMenu(
-                      buttonKey: ValueKey('peer-message-actions-${message.id}'),
-                      canEdit: !message.incoming && !message.hasAttachment,
-                      canDelete: !message.incoming,
-                      copyText: message.hasAttachment
-                          ? null
-                          : presentation.text,
-                      unavailableReason: !supportsActions && !message.incoming
-                          ? 'Edit and delete need an updated app.'
-                          : null,
-                      onReply: widget.messaging != null
-                          ? () => _messageAction(
-                              PeerMessageActionKind.reply,
-                              message,
-                              presentation.text,
-                            )
-                          : null,
-                      onSelected: supportsActions
-                          ? (action) => _messageAction(
-                              action,
-                              message,
-                              presentation.text,
-                            )
-                          : null,
-                    ),
-              onRetry:
-                  !deleted &&
-                      !message.hasAttachment &&
-                      message.status == DeliveryStatus.failed &&
-                      attachmentUsesRelay == null
-                  ? () => _send(retry: message)
-                  : null,
-              content: deleted
-                  ? null
-                  : album
-                  ? MediaAlbum(
-                      key: ValueKey(_mediaItem(message).groupKey),
-                      items: group.map(_mediaItem).toList(),
-                      footerFor: (item) =>
-                          _fileTransfer(peer, originals[item.id]!),
-                    )
-                  : !message.hasAttachment
-                  ? null
-                  : message.attachment != null
-                  ? AttachmentContent(
-                      attachment: message.attachment!,
-                      incoming: message.incoming,
-                      transfer: _fileTransfer(peer, message),
-                    )
-                  : CachedAttachmentContent(
-                      key: ObjectKey(message),
-                      history: history,
-                      message: message,
-                      transfer: _fileTransfer(peer, message),
-                    ),
-            ),
-            if (presentation.pending || presentation.edited)
-              Text(
-                presentation.pending
-                    ? (deleted ? 'Delete pending' : 'Edit pending')
-                    : 'Edited',
-                style: Theme.of(context).textTheme.labelSmall,
+                incoming: message.incoming,
+                sentAtMilliseconds: message.sentAtMilliseconds,
+                receivedAtMilliseconds: message.receivedAtMilliseconds,
+                showTime: time.showTime,
+                deliveryIndicator: message.hasAttachment
+                    ? null
+                    : delivered
+                    ? MessageDeliveryIndicator.delivered
+                    : pending != null
+                    ? MessageDeliveryIndicator.pending
+                    : null,
+                deliveryDetail: deliveryDetail,
+                bubbleKey: Key('peer-message-${message.id}'),
+                actions: deleted
+                    ? null
+                    : MessageActionMenu(
+                        buttonKey: ValueKey(
+                          'peer-message-actions-${message.id}',
+                        ),
+                        canEdit: !message.incoming && !message.hasAttachment,
+                        canDelete: !message.incoming,
+                        copyText: message.hasAttachment
+                            ? null
+                            : presentation.text,
+                        onReply: widget.messaging != null
+                            ? () => _messageAction(
+                                PeerMessageActionKind.reply,
+                                message,
+                                presentation.text,
+                              )
+                            : null,
+                        onSelected: widget.messaging != null
+                            ? (action) => _messageAction(
+                                action,
+                                message,
+                                presentation.text,
+                              )
+                            : null,
+                      ),
+                onRetry:
+                    !deleted &&
+                        !message.hasAttachment &&
+                        message.status == DeliveryStatus.failed &&
+                        attachmentUsesRelay == null
+                    ? () => _send(retry: message)
+                    : null,
+                content: deleted
+                    ? null
+                    : album
+                    ? MediaAlbum(
+                        key: ValueKey(_mediaItem(message).groupKey),
+                        items: group.map(_mediaItem).toList(),
+                        footerFor: (item) =>
+                            _fileTransfer(peer, originals[item.id]!),
+                      )
+                    : !message.hasAttachment
+                    ? null
+                    : message.attachment != null
+                    ? AttachmentContent(
+                        attachment: message.attachment!,
+                        incoming: message.incoming,
+                        transfer: _fileTransfer(peer, message),
+                      )
+                    : CachedAttachmentContent(
+                        key: ObjectKey(message),
+                        history: history,
+                        message: message,
+                        offeredCover: _offeredCoverFor(peer, message),
+                        transfer: _fileTransfer(peer, message),
+                      ),
               ),
-          ],
+              if (presentation.pending || presentation.edited)
+                Text(
+                  presentation.pending
+                      ? (deleted ? 'Delete pending' : 'Edit pending')
+                      : 'Edited',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+            ],
+          ),
         );
       },
     );
@@ -3143,14 +3190,14 @@ class ConnectionPageState extends State<ConnectionPage> {
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      if (_replyTo case final target?)
+      if (_edit == null && _replyTo != null)
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 2, 12, 3),
           child: Align(
             alignment: AlignmentDirectional.centerStart,
             child: _replyQuote(
-              messages.where((message) => message.id == target).firstOrNull,
-              history.presentationFor(widget.targetContactId, target),
+              messages.where((message) => message.id == _replyTo).firstOrNull,
+              history.presentationFor(widget.targetContactId, _replyTo!),
               onClear: () => setState(() => _replyTo = null),
             ),
           ),
@@ -3158,6 +3205,8 @@ class ConnectionPageState extends State<ConnectionPage> {
       MessageComposer(
         key: ValueKey('composer-${widget.targetContactId ?? peerIdentityId}'),
         controller: messageInput,
+        edit: _edit,
+        onCancelEdit: () => setState(() => _edit = null),
         inputKey: const Key('peer-message-input'),
         sendKey: const Key('send-peer-message'),
         onSend: (text) => _send(value: text),
@@ -3210,6 +3259,8 @@ class ConnectionPageState extends State<ConnectionPage> {
                     children: [
                       Text(
                         contact?.displayName ?? 'Friend',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w600,
@@ -3218,18 +3269,22 @@ class ConnectionPageState extends State<ConnectionPage> {
                       Text(
                         connected
                             ? (direct
-                                  ? 'Direct · connected securely'
+                                  ? '${fileController?.routeLabel ?? 'Direct'} · connected securely'
                                   : usingRelayChat
                                   ? 'Relay · connected securely'
                                   : 'Direct · connected securely')
                             : _requestLabel ??
-                                  (widget.requests != null
+                                  (_peerReconnecting
+                                      ? 'Reconnecting…'
+                                      : widget.requests != null
                                       ? (seedClient?.peerOnline == true
                                             ? 'Connecting'
                                             : 'Not connected')
                                       : seedClient?.registered == true
                                       ? 'Waiting for Direct'
                                       : 'Offline'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: connected
                               ? const Color(0xFF9AE585)
@@ -3415,7 +3470,9 @@ class ConnectionPageState extends State<ConnectionPage> {
             targetContact == null
                 ? 'Friend is not available'
                 : _requestLabel ??
-                      (widget.requests != null
+                      (_peerReconnecting
+                          ? 'Reconnecting to ${targetContact!.displayName}'
+                          : widget.requests != null
                           ? (seedClient?.peerOnline == true
                                 ? 'Connecting with ${targetContact!.displayName}'
                                 : 'Not connected to ${targetContact!.displayName}')
@@ -3430,6 +3487,8 @@ class ConnectionPageState extends State<ConnectionPage> {
                       : 'Keep both apps open.')
                 : targetContact?.verified == false
                 ? 'Verify this friend in Contacts to reconnect.'
+                : _peerReconnecting
+                ? 'Restoring the secure connection.'
                 : relayNetwork != null &&
                       !relayNetwork!.enabled &&
                       canScanRelayQr
@@ -3440,7 +3499,7 @@ class ConnectionPageState extends State<ConnectionPage> {
                       true
                 ? 'Messages can wait for this friend in Courier.'
                 : relayNetwork?.enabled == true
-                ? 'Reconnecting. Keep both apps online.'
+                ? 'Keep both apps online to reconnect.'
                 : !kIsWeb && bridge.supportsAutomaticContact
                 ? 'Connect through USB or add an internet relay.'
                 : 'Ask your friend to open chta, then reconnect.',
@@ -3701,6 +3760,13 @@ class ConnectionPageState extends State<ConnectionPage> {
     } finally {
       if (mounted) setState(() => readingRelayQr = false);
     }
+  }
+
+  Widget _turnSettings() {
+    final settings = widget.turnSettings;
+    return settings == null
+        ? const SizedBox.shrink()
+        : TurnSettingsTile(settings: settings);
   }
 
   Widget _relaySettings() {
@@ -4036,7 +4102,7 @@ class ConnectionPageState extends State<ConnectionPage> {
     appBar: AppBar(title: const Text('Connect')),
     body: ListView(
       padding: _connectPadding,
-      children: [_relaySettings(), _courierSettings()],
+      children: [_relaySettings(), _turnSettings(), _courierSettings()],
     ),
   );
 
@@ -4056,6 +4122,7 @@ class ConnectionPageState extends State<ConnectionPage> {
         padding: _connectPadding,
         children: [
           _relaySettings(),
+          _turnSettings(),
           _courierSettings(),
           const SizedBox(height: 12),
           Card(
@@ -4271,6 +4338,7 @@ class ConnectionPageState extends State<ConnectionPage> {
             padding: _connectPadding,
             children: [
               _relaySettings(),
+              _turnSettings(),
               const SizedBox(height: 12),
               if (relayNetwork?.enabled == true)
                 const Card(

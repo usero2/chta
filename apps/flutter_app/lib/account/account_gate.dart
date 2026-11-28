@@ -1,3 +1,5 @@
+import 'share_links.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -6,6 +8,7 @@ import 'package:flutter/services.dart';
 
 import '../chat/chat_controller.dart';
 import '../chat/chat_models.dart';
+import '../chat/conversation_read_state.dart';
 import '../chat/chat_shell.dart';
 import '../chat/peer_history.dart';
 import '../chat/messaging_service.dart';
@@ -44,6 +47,9 @@ import '../profile/profile_page.dart';
 import '../profile/profile_store.dart';
 import '../routing/app_router.dart';
 import '../runtime/app_runtime.dart';
+import '../p2p/direct_peer_factory.dart';
+import '../p2p/turn_settings.dart';
+import '../chat/link_preview_service.dart';
 import 'account_controller.dart';
 import 'account_models.dart';
 import 'android_session_bridge.dart';
@@ -560,6 +566,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   Future<void>? switchingIdentity;
   final connectionPageKey = GlobalKey<ConnectionPageState>();
   late final PeerHistory peerHistory;
+  late final ConversationReadState conversationReads;
   late final IncomingNotifications notifications;
   PeerHistoryNotifications? historyNotifications;
   List<ContactView> chatContacts = const [];
@@ -582,6 +589,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   RelayContactRequestTransport? _contactRequestRoutes;
   MessagingService? messaging;
   late final CachePolicy cachePolicy;
+  late final TurnSettings turnSettings;
+  late final LinkPreviewService linkPreviews;
 
   @override
   void initState() {
@@ -592,6 +601,14 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     _readRoute();
     unawaited(widget.accountController.rememberRoute(widget.router.path));
     widget.chatController.initialize();
+    linkPreviews = LinkPreviewService();
+    turnSettings = TurnSettings(
+      ownerId: widget.accountController.identity!.id,
+      store: widget.bridge is GroupBlobBridge
+          ? widget.bridge as GroupBlobBridge
+          : null,
+    );
+    unawaited(turnSettings.initialize());
     notifications = IncomingNotifications(
       identityId: widget.accountController.identity!.id,
       settings: widget.bridge is GroupBlobBridge
@@ -621,6 +638,12 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
                 ? widget.bridge as GroupBlobBridge
                 : null,
           ),
+    );
+    conversationReads = ConversationReadState(
+      ownerId: widget.accountController.identity!.id,
+      store: widget.bridge is GroupBlobBridge
+          ? widget.bridge as GroupBlobBridge
+          : null,
     );
     peerHistory.addListener(_historyChanged);
     runtimeOwner =
@@ -664,6 +687,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         ),
         displayName: () => widget.profileController.name,
         notifications: notifications,
+        linkPreviews: linkPreviews,
       );
       groups = controller;
       controller.addListener(_groupsChanged);
@@ -683,7 +707,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   }
 
   void _groupsChanged() {
-    if (mounted) setState(() {});
+    if (mounted) setState(_markVisibleChatRead);
   }
 
   void _requestsChanged() {
@@ -760,6 +784,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       crypto: bridge as GroupCryptoBridge,
       network: network,
       signaling: SeedGroupSignaling(seed),
+      peerFactory: createDirectPeerFactory(turnServers: turnSettings.iceServers),
     );
     groupTransport = transport;
     _updateBackgroundNetworking();
@@ -796,12 +821,15 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   Future<void> _groupDetails(String id) async {
     final controller = groups, group = groups?.group(id);
     if (controller == null || group == null) return;
+    await _loadChatContacts();
+    if (!mounted) return;
     await showGroupDetails(
       context,
       group: group,
       ownId: controller.ownerId,
       contacts: chatContacts,
       onInvite: (peer) => controller.invite(id, peer),
+      onShareInvite: (peer) => controller.shareInvitation(id, peer),
       onRemove: (peer) => controller.removeMember(id, peer),
       onLeave: () => controller.leaveGroup(id),
     );
@@ -900,6 +928,37 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     await peerHistory.clearConversation(id);
   }
 
+  Future<void> _openGroupInviteLink(GroupInviteLink link) async {
+    final controller = groups;
+    if (controller?.ready != true) {
+      throw const FormatException('Group invitations are still loading.');
+    }
+    if (link.recipientId != controller!.ownerId) {
+      throw const FormatException(
+        'This invitation is for a different account.',
+      );
+    }
+    await _loadChatContacts();
+    if (!mounted) return;
+    final owner = chatContacts
+        .where(
+          (contact) => contact.identityId == link.ownerId && contact.verified,
+        )
+        .firstOrNull;
+    if (owner == null) {
+      throw const FormatException(
+        'Add the group owner as a verified friend first.',
+      );
+    }
+    final open = await showSharedGroupInvitation(
+      context,
+      controller: controller,
+      link: link,
+      ownerName: owner.displayName,
+    );
+    if (open && mounted) widget.router.go(conversationRoute(link.groupId));
+  }
+
   Future<void> _reviewGroupInvitations() async {
     final controller = groups;
     if (controller == null) return;
@@ -927,11 +986,15 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         id: contact.identityId,
         title: contact.displayName,
         avatarBase64: contact.avatarBase64,
+        online: onlinePeers.contains(contact.identityId),
+        unreadCount: _peerUnreadCount(contact.identityId),
         preview:
             peerHistory.conversationPreview(contact.identityId) ??
             friendRequests?.labelFor(contact.identityId) ??
             (onlinePeers.contains(contact.identityId)
                 ? 'Connected securely'
+                : messaging?.isReconnecting(contact.identityId) == true
+                ? 'Reconnecting…'
                 : friendRequests == null
                 ? 'Offline'
                 : 'Not connected'),
@@ -943,8 +1006,43 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
             0,
         messages: const [],
       ),
-    ...?groups?.conversations,
+    ..._groupConversations(),
   ];
+  int _peerUnreadCount(String id) =>
+      conversationReads.unreadCount(id, peerHistory.incomingForRead(id));
+
+  List<ConversationView> _groupConversations() {
+    final controller = groups;
+    if (controller == null) return const [];
+    return [
+      for (final room in controller.conversations)
+        room.withUnreadCount(
+          conversationReads.unreadCount(
+            room.id,
+            controller.incomingForRead(room.id),
+          ),
+        ),
+    ];
+  }
+
+  void _markVisibleChatRead() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (!historyReady ||
+        index != 0 ||
+        (state != null && state != AppLifecycleState.resumed)) {
+      return;
+    }
+    if (targetGroupId case final group?) {
+      final controller = groups;
+      if (controller?.ready == true) {
+        conversationReads.markRead(group, controller!.incomingForRead(group));
+      }
+    } else if (showingPeerChat && (targetContactId != null)) {
+      final peer = targetContactId!;
+      conversationReads.markRead(peer, peerHistory.incomingForRead(peer));
+    }
+  }
+
   Widget _groupChat(String id, {bool showSidebar = true}) {
     final controller = groups, group = groups?.group(id);
     if (controller == null || !controller.ready || group == null) {
@@ -974,6 +1072,11 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       builder: (context, constraints) {
         final wide = showSidebar && constraints.maxWidth > 720;
         final room = GroupRoom(
+          key: ValueKey(id),
+          contacts: {
+            for (final contact in chatContacts)
+              contact.identityId: peerHistory.withCachedAvatar(contact),
+          },
           deliveryLabel: messaging?.courier?.groupLabelFor,
           group: group,
           ownId: controller.ownerId,
@@ -1024,6 +1127,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
 
   Future<void> _loadHistory() async {
     try {
+      await conversationReads.initialize();
+      if (!mounted) return;
       await peerHistory.load(widget.accountController.identity!.id);
       try {
         await cachePolicy.reconcile(peerHistory.cacheReferences);
@@ -1084,6 +1189,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
           seed: seed,
           cache: managedCache,
           courier: courier,
+          linkPreviews: linkPreviews,
+          peerFactory: createDirectPeerFactory(turnServers: turnSettings.iceServers),
           ownCard: () => bridge is RoutedContactBridge
               ? (bridge as RoutedContactBridge).contactCardWithRelays(
                   displayName: widget.profileController.name,
@@ -1120,7 +1227,12 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
         history: peerHistory,
         notifications: notifications,
       );
-      if (mounted) setState(() => historyReady = true);
+      if (mounted) {
+        setState(() {
+          historyReady = true;
+          _markVisibleChatRead();
+        });
+      }
       if (mounted) await _loadChatContacts();
     } catch (caught) {
       if (mounted) setState(() => historyError = caught);
@@ -1128,7 +1240,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
   }
 
   void _historyChanged() {
-    if (mounted) setState(() {});
+    if (mounted) setState(_markVisibleChatRead);
   }
 
   void _messagingChanged() {
@@ -1161,6 +1273,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     unawaited(messaging?.close());
     peerHistory.dispose();
     cachePolicy.dispose();
+    turnSettings.dispose();
+    linkPreviews.dispose();
     groups?.removeListener(_groupsChanged);
     unawaited(groups?.close());
     friendRequests?.removeListener(_requestsChanged);
@@ -1174,6 +1288,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     if (!mounted) return;
     _updateBackgroundNetworking();
     if (state == AppLifecycleState.resumed) {
+      setState(_markVisibleChatRead);
       unawaited(messaging?.resumeNetwork());
     }
   }
@@ -1235,6 +1350,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     _loadChatContacts();
     setState(() {
       _readRoute();
+      _markVisibleChatRead();
       if (index == 1) contactsRefreshToken++;
     });
   }
@@ -1292,6 +1408,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     await friendRequests?.flush();
     await groups?.flush();
     await peerHistory.flush();
+    await conversationReads.flush();
     try {
       await cachePolicy.flush();
     } on CachePolicyException {
@@ -1410,6 +1527,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
     final connectionPage = ConnectionPage(
       key: connectionPageKey,
       messaging: messaging,
+      turnSettings: turnSettings,
       onRelayNetworkReady: (network) {
         if (mounted && !identical(network, relayNetwork)) {
           setState(() => relayNetwork = network);
@@ -1444,7 +1562,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
       onCreateGroup: groups?.ready == true
           ? () => unawaited(_createGroup())
           : null,
-      extraConversations: groups?.conversations ?? const [],
+      extraConversations: _groupConversations(),
+      unreadCountFor: _peerUnreadCount,
       onConversationAction: _conversationAction,
       onOnlinePeersChanged: (peers) {
         if (mounted && !setEquals(peers, onlinePeers)) {
@@ -1516,6 +1635,10 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome>
                         : null,
                   ),
                 ContactsPage(
+                  onGroupInvite: _openGroupInviteLink,
+                  canOpenGroupLinks:
+                      groups?.ready == true || groupsError != null,
+                  onOpenSharedLink: () => widget.router.go('/contacts'),
                   requests: friendRequests,
                   relayNetwork: relayNetwork,
                   bridge: widget.bridge,

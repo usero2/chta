@@ -12,6 +12,7 @@ import 'package:cht/groups/swarm/swarm.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as image;
 
 import 'swarm_test.dart' show Blobs, Attachments;
 
@@ -151,7 +152,7 @@ class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 
-  void event(String peer, String source, int sequence) {
+  void event(String peer, String source, int sequence, {String? fileCover}) {
     final id = sequence.toRadixString(16).padLeft(32, '0');
     _frames.add(
       GroupPeerFrame(
@@ -160,7 +161,13 @@ class IncomingGroupFrames extends ChangeNotifier implements GroupTransport {
           'id': id,
           'i': 0,
           'n': 1,
-          'data': base64UrlEncode(utf8.encode(jsonEncode({'v': 1, 'jobId': id, 'type': 'event', 'source': source}))),
+          'data': base64UrlEncode(utf8.encode(jsonEncode({
+            'v': 1,
+            'jobId': id,
+            'type': 'event',
+            'source': source,
+            if (fileCover != null) 'fileCover': fileCover,
+          }))),
         })}',
       ),
     );
@@ -210,6 +217,91 @@ class FailOnceReceiptBlobs extends Blobs {
 }
 
 void main() {
+  test('group media covers survive an older member and a receiver restart', () async {
+    final senderStore = Blobs(), receiverStore = Blobs();
+    final senderCrypto = ModelCrypto()..includeFriend = true;
+    final receiverCrypto = ModelCrypto(accountId: friend)
+      ..groups[gid] = senderCrypto.view();
+    final sender = GroupController(
+      ownerId: owner,
+      crypto: senderCrypto,
+      blobs: senderStore,
+      attachments: Attachments(),
+      displayName: () => 'Alice',
+    );
+    GroupController receiver() => GroupController(
+      ownerId: friend,
+      crypto: receiverCrypto,
+      blobs: receiverStore,
+      attachments: Attachments(),
+      displayName: () => 'Bob',
+    );
+    final incoming = receiver();
+    addTearDown(sender.close);
+    addTearDown(incoming.close);
+    await sender.initialize();
+    await sender.createGroup('Team', []);
+    await incoming.initialize();
+    final transport = IncomingGroupFrames();
+    await incoming.attachTransport(transport);
+
+    expect(sender.supportsFileOffers(friend), isFalse);
+    expect(
+      await sender.sendBatch(gid, 'Photo', [
+        ChatAttachment(
+          name: 'group.png',
+          mimeType: 'image/png',
+          bytes: image.encodePng(image.Image(width: 12, height: 12)),
+        ),
+      ]),
+      isTrue,
+    );
+    final outgoing = sender.messagesFor(gid).single;
+    final job = jsonDecode(
+      senderStore.m.values.singleWhere((value) => value.contains('"fileCover"')),
+    ) as Map;
+    final cover = job['body']['fileCover'] as String;
+    expect(outgoing.manifest!.cover, isNull);
+    expect(outgoing.toJson()['previewCover'], cover);
+
+    transport.event(owner, outgoing.event, 100, fileCover: cover);
+    await incoming.flush();
+    final received = incoming.messagesFor(gid).single;
+    expect(received.manifest!.identityHash, outgoing.manifest!.identityHash);
+    expect(received.toJson()['previewCover'], cover);
+    expect(incoming.fileChoiceFor(received.manifest!), GroupFileChoice.pending);
+    await incoming.close();
+
+    final restored = receiver();
+    addTearDown(restored.close);
+    await restored.initialize();
+    expect(restored.messagesFor(gid).single.toJson()['previewCover'], cover);
+  });
+
+  test(
+    'sharing an existing group reserves a durable recipient-bound invitation',
+    () async {
+      final c = GroupController(
+        ownerId: owner,
+        crypto: ModelCrypto(),
+        blobs: Blobs(),
+        attachments: Attachments(),
+        displayName: () => 'Alice',
+      );
+      addTearDown(c.close);
+      await c.initialize();
+      await c.createGroup('Team', []);
+      final link = await c.shareInvitation(gid, friend);
+      final repeated = await c.shareInvitation(gid, friend);
+      expect(link.toUri().toString(), repeated.toUri().toString());
+      expect(link.recipientId, friend);
+      expect(link.ownerId, owner);
+      expect(link.groupId, gid);
+      expect(link.toUri().toString().length, lessThan(512));
+      expect(c.pendingJobCount, 1);
+    },
+  );
+
   test(
     'group actions persist, preserve signed originals and ignore foreign edits',
     () async {

@@ -21,6 +21,7 @@ class RelayChat {
     this.ownsNetwork = true,
     this.boundPeer,
     this.onEvents,
+    this.onConnectionChanged,
     bool automaticTicks = true,
     int Function()? clock,
   }) : _clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch) {
@@ -34,8 +35,12 @@ class RelayChat {
     }
   }
   final void Function()? onEvents;
+  final void Function()? onConnectionChanged;
   void _event(PeerEvent event) {
     events.add(event);
+    if (event.type == 'connection' || event.type == 'authenticated') {
+      onConnectionChanged?.call();
+    }
     onEvents?.call();
   }
 
@@ -61,7 +66,11 @@ class RelayChat {
 
   void _networkChanged() {
     if (_closed) return;
-    if (_route != null && !network.online.contains(_route)) _reset();
+    if (_route != null && !network.online.contains(_route)) {
+      _blocked.remove(_route);
+      _lastAttempt = 0;
+      _reset();
+    }
     unawaited(tick());
   }
 
@@ -76,6 +85,10 @@ class RelayChat {
   int _routeCursor = 0;
   final events = <PeerEvent>[];
   final _pending = <String, _Pending>{};
+  // A slow file receiver can hold at most four 8 KiB parts per transfer.
+  // Credit is returned by the existing encrypted per-packet receipt.
+  static const _fileWindow = 4;
+  final _fileWindowWaiters = <String, Completer<void>>{};
   final _seenPackets = <String>{};
   final _retired = <String>{};
   final _blocked = <String, int>{};
@@ -134,6 +147,7 @@ class RelayChat {
 
   void _reset() {
     _generation++;
+    _releaseFileWindows();
     _dropCandidate();
     if (_session != null) {
       _retired.add(_session!);
@@ -262,7 +276,7 @@ class RelayChat {
             if (_pending[pending.id] != pending) continue;
             if (now - pending.lastSent < 5000) continue;
             if (pending.attempts >= 8) {
-              _pending.remove(pending.id);
+              _removePending(pending.id);
               _event(
                 PeerEvent(
                   type: 'failed',
@@ -585,7 +599,7 @@ class RelayChat {
               }
             case 'ack':
               final id = content['messageId'] as String;
-              _pending.remove(id);
+              _removePending(id);
               // Direct text can retry on this authenticated fallback. Its ACK
               // still belongs to history even without a relay-local pending ID.
               _event(
@@ -611,6 +625,7 @@ class RelayChat {
     final previousV2 = _v2;
     _candidate = null;
     _generation++;
+    _releaseFileWindows();
     if (previous != null) {
       _retired.add(previous);
       if (_retired.length > 128) _retired.remove(_retired.first);
@@ -683,7 +698,7 @@ class RelayChat {
     bool current() {
       if (pending.isCurrent?.call() == false || isCurrent?.call() == false) {
         if (identical(_pending[pending.id], pending)) {
-          _pending.remove(pending.id);
+          _removePending(pending.id);
         }
         return false;
       }
@@ -761,11 +776,51 @@ class RelayChat {
   }) async {
     if (!authenticated) throw StateError('The connection is not authenticated');
     final bulk = AttachmentTransfer.isBulkPacket(id, text);
+    // Resumable IDs end in a packet sequence. The preceding transfer ID is
+    // stable for this receiver, even for batches with multiple files.
+    final fileStream = bulk && !AttachmentTransfer.isPacketId(id)
+        ? id.substring(0, id.lastIndexOf('_'))
+        : null;
+    if (fileStream != null) {
+      final generation = _generation;
+      while (!_pending.containsKey(id) &&
+          _pending.values
+                  .where((packet) => packet.fileStream == fileStream)
+                  .length >=
+              _fileWindow) {
+        if (_fileWindowWaiters.containsKey(fileStream)) {
+          throw StateError('A file part is already waiting for relay credit');
+        }
+        final waiter = _fileWindowWaiters[fileStream] = Completer<void>();
+        try {
+          await waiter.future.timeout(const Duration(seconds: 45));
+        } finally {
+          if (identical(_fileWindowWaiters[fileStream], waiter)) {
+            _fileWindowWaiters.remove(fileStream);
+          }
+        }
+        if (_closed ||
+            generation != _generation ||
+            isCurrent?.call() == false) {
+          throw StateError(
+            'File transfer changed while waiting for relay credit',
+          );
+        }
+      }
+    }
     if ((_pending.length >= (bulk ? 96 : 100) && !_pending.containsKey(id)) ||
         !messageFits(text)) {
       throw StateError('Message queue is full or message is too long');
     }
-    final pending = _Pending(id, text, sentAt, peerId!, isCurrent, bulk: bulk);
+    final pending = _Pending(
+      id,
+      text,
+      sentAt,
+      peerId!,
+      isCurrent,
+      bulk: bulk,
+      fileStream: fileStream,
+    );
     _pending[id] = pending;
     final done = _sendCompletion();
     _enqueue(() async {
@@ -781,7 +836,22 @@ class RelayChat {
   }
 
   void cancelPendingWhere(bool Function(String id) matches) {
-    _pending.removeWhere((id, _) => matches(id));
+    for (final id in _pending.keys.where(matches).toList()) {
+      _removePending(id);
+    }
+  }
+
+  void _removePending(String id) {
+    final stream = _pending.remove(id)?.fileStream;
+    final waiter = _fileWindowWaiters[stream];
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+  }
+
+  void _releaseFileWindows() {
+    for (final waiter in _fileWindowWaiters.values) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
+    _fileWindowWaiters.clear();
   }
 
   Future<void> sendControl(String id, String text) async {
@@ -843,6 +913,7 @@ class RelayChat {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _releaseFileWindows();
     authenticated = false;
     state = 'closed';
     final tick = _tickCompletion;
@@ -880,6 +951,7 @@ class _Pending {
     this.peer,
     this.isCurrent, {
     required this.bulk,
+    required this.fileStream,
   });
   final bool Function()? isCurrent;
   final String peer;
@@ -887,6 +959,7 @@ class _Pending {
   final String text;
   final int sentAt;
   final bool bulk;
+  final String? fileStream;
   bool retryQueued = false;
   int lastSent = 0;
   int attempts = 0;

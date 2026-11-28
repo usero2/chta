@@ -21,6 +21,7 @@ export default {
     if(path==='/chat'){url.pathname='/chat/';return reply(null,308,{location:url.href});}
     if(request.headers.has('upgrade'))return reply('Not found',404);
     const assetUrl=new URL(request.url);if(path==='/')assetUrl.pathname='/index.html';
+    if(path==='/share'||path==='/share/')assetUrl.pathname='/share/index.html';
     let asset=await env.ASSETS.fetch(new Request(assetUrl,request));
     const appRoute=/^\/chat\/(?:$|(?:chats|contacts|profile|connect|identity)(?:\/[^.]*)?$)/.test(path);
     if((asset.status===404||path==='/chat/')&&appRoute){url.pathname='/chat/index.html';url.search='';asset=await env.ASSETS.fetch(new Request(url,request));}

@@ -123,6 +123,111 @@ class _ResumeRelay extends RelayNetwork {
 }
 
 void main() {
+  test('short relay outage reconnects and drains only undelivered messages', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final services = <MessagingService>[];
+    final histories = <PeerHistory>[];
+    try {
+      for (final (id, friend) in [('alice', 'bob'), ('bob', 'alice')]) {
+        final history = PeerHistory(store: Store());
+        histories.add(history);
+        await history.load(id);
+        final network = RelayNetwork(f.Crypto(id), connector: hub.connect);
+        await network.addSeed(f.a);
+        final service = MessagingService(
+          ownerId: id,
+          account: Account(id, [friend]),
+          network: network,
+          history: history,
+          ownCard: () async => id,
+          observeNetwork: false,
+        );
+        services.add(service);
+        await service.start();
+      }
+      final alice = services[0];
+      final bob = services[1];
+      await f.until(() => alice.isOnline('bob') && bob.isOnline('alice'));
+      await alice.queueText('bob', 'Before outage', id: 'before-outage');
+      await f.until(
+        () => histories[0].messagesFor('bob').single.status ==
+            DeliveryStatus.delivered,
+      );
+
+      await hub.stop();
+      await f.until(() => !alice.isOnline('bob') && !bob.isOnline('alice'));
+      expect(alice.isReconnecting('bob'), isTrue);
+      expect(alice.onlinePeers, isEmpty);
+      await alice.queueText('bob', 'During outage', id: 'during-outage');
+      expect(histories[0].queuedMessages.single.value.id, 'during-outage');
+
+      hub.offline = false;
+      await f.until(
+        () => histories[0].messagesFor('bob').last.status ==
+            DeliveryStatus.delivered,
+      ).timeout(const Duration(seconds: 3));
+      expect(alice.isOnline('bob'), isTrue);
+      expect(alice.isReconnecting('bob'), isFalse);
+      expect(histories[0].queuedMessages, isEmpty);
+      expect(
+        histories[1].messagesFor('alice').map((row) => row.text),
+        ['Before outage', 'During outage'],
+      );
+    } finally {
+      for (final service in services) {
+        await service.close();
+      }
+      for (final history in histories) {
+        history.dispose();
+      }
+    }
+  });
+
+  test('a prolonged relay outage expires the reconnecting indication', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final history = PeerHistory(store: Store());
+    await history.load('alice');
+    final network = RelayNetwork(f.Crypto('alice'), connector: hub.connect);
+    await network.addSeed(f.a);
+    final service = MessagingService(
+      ownerId: 'alice',
+      account: Account('alice', ['bob']),
+      network: network,
+      history: history,
+      ownCard: () async => 'alice',
+      observeNetwork: false,
+      reconnectGrace: const Duration(milliseconds: 500),
+    );
+    final remoteNetwork = RelayNetwork(f.Crypto('bob'), connector: hub.connect);
+    final remoteHistory = PeerHistory(store: Store());
+    await remoteHistory.load('bob');
+    await remoteNetwork.addSeed(f.a);
+    final remote = MessagingService(
+      ownerId: 'bob',
+      account: Account('bob', ['alice']),
+      network: remoteNetwork,
+      history: remoteHistory,
+      ownCard: () async => 'bob',
+      observeNetwork: false,
+    );
+    try {
+      await service.start();
+      await remote.start();
+      await f.until(() => service.isOnline('bob'));
+      final notifications = <bool>[];
+      service.addListener(() => notifications.add(service.isReconnecting('bob')));
+      await hub.stop();
+      await f.until(() => notifications.contains(true));
+      await f.until(() => notifications.last == false);
+      expect(service.isOnline('bob'), isFalse);
+    } finally {
+      await service.close();
+      await remote.close();
+      history.dispose();
+      remoteHistory.dispose();
+    }
+  });
+
   test(
     'resuming the same network keeps the relay and recovers a real handover',
     () async {
@@ -421,6 +526,24 @@ void main() {
         text: 'Wait for a compatible session',
       );
       final reply = history.visibleMessagesFor('bob').last;
+      await alice.queueText('bob', 'Old outgoing', id: 'edit-target');
+      await alice.queueText('bob', 'Remove this', id: 'delete-target');
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.edit,
+        'edit-target',
+        text: 'Updated locally',
+      );
+      await alice.queueMessageAction(
+        'bob',
+        PeerMessageActionKind.delete,
+        'delete-target',
+      );
+      expect(
+        history.presentationFor('bob', 'edit-target')?.text,
+        'Updated locally',
+      );
+      expect(history.presentationFor('bob', 'delete-target')?.deleted, isTrue);
       await alice.queueText('bob', 'Ordinary text', id: 'ordinary');
       await f.until(
         () =>
@@ -430,6 +553,8 @@ void main() {
       expect(reply.status, DeliveryStatus.pending);
       expect(reply.queuedForDelivery, isTrue);
       expect(histories['bob']!.visibleMessagesFor('alice').map((m) => m.body), [
+        'Old outgoing',
+        'Remove this',
         'Ordinary text',
       ]);
     } finally {

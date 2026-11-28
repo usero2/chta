@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../account/account_models.dart';
+import '../account/contact_qr_files.dart';
+import '../account/share_links.dart';
 import '../profile/profile_avatar.dart';
+import 'group_controller.dart';
 import 'group_models.dart';
 
 Future<(String, List<String>)?> showCreateGroupDialog(
@@ -146,6 +149,7 @@ Future<void> showGroupDetails(
   required String ownId,
   required List<ContactView> contacts,
   required Future<void> Function(String) onInvite,
+  Future<GroupInviteLink> Function(String)? onShareInvite,
   required Future<void> Function(String) onRemove,
   required Future<void> Function() onLeave,
 }) => showModalBottomSheet<void>(
@@ -157,6 +161,7 @@ Future<void> showGroupDetails(
     ownId: ownId,
     contacts: contacts,
     onInvite: onInvite,
+    onShareInvite: onShareInvite,
     onRemove: onRemove,
     onLeave: onLeave,
   ),
@@ -168,6 +173,7 @@ class _GroupDetailsSheet extends StatefulWidget {
     required this.ownId,
     required this.contacts,
     required this.onInvite,
+    this.onShareInvite,
     required this.onRemove,
     required this.onLeave,
   });
@@ -176,6 +182,7 @@ class _GroupDetailsSheet extends StatefulWidget {
   final String ownId;
   final List<ContactView> contacts;
   final Future<void> Function(String) onInvite, onRemove;
+  final Future<GroupInviteLink> Function(String)? onShareInvite;
   final Future<void> Function() onLeave;
 
   @override
@@ -252,7 +259,8 @@ class _GroupDetailsSheetState extends State<_GroupDetailsSheet> {
             (contact) =>
                 contact.verified &&
                 !group.contains(contact.identityId) &&
-                !_invited.contains(contact.identityId),
+                (!_invited.contains(contact.identityId) ||
+                    widget.onShareInvite != null),
           )
         : const <ContactView>[];
     return ConstrainedBox(
@@ -322,22 +330,52 @@ class _GroupDetailsSheetState extends State<_GroupDetailsSheet> {
                   title: Text(
                     contact.alias.isEmpty ? contact.displayName : contact.alias,
                   ),
-                  trailing: TextButton(
-                    key: Key('group-invite:${contact.identityId}'),
-                    onPressed: _busy.contains('invite:${contact.identityId}')
-                        ? null
-                        : () => _run(
-                            'invite:${contact.identityId}',
-                            () => widget.onInvite(contact.identityId),
-                            onSuccess: () => setState(
-                              () => _invited.add(contact.identityId),
-                            ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.onShareInvite != null)
+                        IconButton(
+                          tooltip: 'Share invitation',
+                          icon: const Icon(Icons.qr_code_2),
+                          onPressed:
+                              _busy.contains('share:${contact.identityId}')
+                              ? null
+                              : () => _run(
+                                  'share:${contact.identityId}',
+                                  () async {
+                                    final link = await widget.onShareInvite!(
+                                      contact.identityId,
+                                    );
+                                    if (context.mounted) {
+                                      await _showInviteToShare(
+                                        context,
+                                        contact.displayName,
+                                        link,
+                                      );
+                                    }
+                                  },
+                                ),
+                        ),
+                      if (!_invited.contains(contact.identityId))
+                        TextButton(
+                          key: Key('group-invite:${contact.identityId}'),
+                          onPressed:
+                              _busy.contains('invite:${contact.identityId}')
+                              ? null
+                              : () => _run(
+                                  'invite:${contact.identityId}',
+                                  () => widget.onInvite(contact.identityId),
+                                  onSuccess: () => setState(
+                                    () => _invited.add(contact.identityId),
+                                  ),
+                                ),
+                          child: Text(
+                            _busy.contains('invite:${contact.identityId}')
+                                ? 'Inviting…'
+                                : 'Invite',
                           ),
-                    child: Text(
-                      _busy.contains('invite:${contact.identityId}')
-                          ? 'Inviting…'
-                          : 'Invite',
-                    ),
+                        ),
+                    ],
                   ),
                 ),
             ],
@@ -436,6 +474,121 @@ Future<bool> confirmDeleteGroupChat(BuildContext context) async =>
           ),
         ],
       ),
+    ) ??
+    false;
+
+Future<void> _showInviteToShare(
+  BuildContext context,
+  String friend,
+  GroupInviteLink invite,
+) async {
+  final magnet = invite.toUri().toString();
+  final link = shareWebLink(magnet);
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Invite $friend'),
+      scrollable: true,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ContactQrView(card: magnet, size: 224),
+          const SizedBox(height: 12),
+          Text('Only $friend can use this invitation.'),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Done'),
+        ),
+        FilledButton.icon(
+          icon: const Icon(Icons.copy_outlined),
+          label: const Text('Copy link'),
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: link));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Invitation link copied.')),
+              );
+            }
+          },
+        ),
+      ],
+    ),
+  );
+}
+
+Future<bool> showSharedGroupInvitation(
+  BuildContext context, {
+  required GroupController controller,
+  required GroupInviteLink link,
+  required String ownerName,
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        var joining = false;
+        String? error;
+        return StatefulBuilder(
+          builder: (context, setDialogState) => ListenableBuilder(
+            listenable: controller,
+            builder: (context, _) {
+              final invite = controller.invitationForLink(link);
+              final joined = controller.canSend(link.groupId);
+              return AlertDialog(
+                title: Text(invite?.name ?? 'Group invitation'),
+                content: Text(
+                  error ??
+                      (joined
+                          ? 'You are already a member of this group.'
+                          : invite == null
+                          ? 'Waiting for $ownerName to come online and send the invitation.'
+                          : 'Invited by $ownerName'),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: joining
+                        ? null
+                        : () => Navigator.pop(context, false),
+                    child: const Text('Close'),
+                  ),
+                  if (invite != null || joined)
+                    FilledButton(
+                      onPressed: joining
+                          ? null
+                          : () async {
+                              if (joined) {
+                                Navigator.pop(context, true);
+                                return;
+                              }
+                              setDialogState(() {
+                                joining = true;
+                                error = null;
+                              });
+                              try {
+                                await controller.acceptInvitation(invite!.id);
+                                if (context.mounted) {
+                                  Navigator.pop(context, true);
+                                }
+                              } catch (_) {
+                                if (context.mounted) {
+                                  setDialogState(() {
+                                    joining = false;
+                                    error =
+                                        'Could not join the group. Try again.';
+                                  });
+                                }
+                              }
+                            },
+                      child: Text(joined ? 'Open group' : 'Join group'),
+                    ),
+                ],
+              );
+            },
+          ),
+        );
+      },
     ) ??
     false;
 

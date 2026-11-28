@@ -1,8 +1,48 @@
+import 'dart:convert';
+
 import 'package:cht/chat/widgets/file_offer_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as image;
 
 void main() {
+  testWidgets('video cover keeps its image provider through progress updates', (
+    tester,
+  ) async {
+    String makeCover(int red) {
+      final thumbnail = image.Image(width: 2, height: 2);
+      image.fill(thumbnail, color: image.ColorRgb8(red, 40, 100));
+      return base64Encode(image.encodeJpg(thumbnail));
+    }
+
+    Widget offer(String status, String cover) => _frame(
+      FileOfferCard(
+        key: const ValueKey('video-offer'),
+        fileName: 'clip.mp4',
+        mimeType: 'video/mp4',
+        sizeBytes: 2048,
+        cover: cover,
+        status: status,
+      ),
+    );
+
+    final cover = makeCover(120);
+    await tester.pumpWidget(offer('Receiving 5%', cover));
+    final finder = find.byType(Image);
+    final original = tester.widget<Image>(finder).image;
+    for (final progress in ['Receiving 15%', 'Receiving 70%']) {
+      await tester.pumpWidget(offer(progress, cover));
+      expect(find.text(progress), findsOneWidget);
+      expect(tester.widget<Image>(finder).image, same(original));
+    }
+
+    await tester.pumpWidget(offer('Receiving 75%', makeCover(10)));
+    expect(tester.widget<Image>(finder).image, isNot(original));
+    await tester.pumpWidget(offer('Receiving 90%', 'invalid cover'));
+    expect(finder, findsNothing);
+    expect(find.byIcon(Icons.movie_outlined), findsOneWidget);
+  });
+
   testWidgets('an open offer shows its metadata and reports both decisions', (
     tester,
   ) async {

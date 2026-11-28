@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Add a TURN server to chta with an invite link or host your own with coturn.">
+  <title>TURN setup guide | chta</title>
+  <link rel="icon" href="/brand.png" type="image/png">
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="/" aria-label="chta home"><img src="/brand.png" alt="" width="40" height="40"><span>chta<span class="brand-period">.</span></span></a>
+    <nav aria-label="Main navigation"><a class="nav-app" href="/chat/connect">Open Connect</a></nav>
+  </header>
+  <main id="main" class="wrap wiki-guide">
+    <h1>TURN setup guide</h1>
+    <p class="hero-lead">TURN helps chta connect when your network blocks a direct connection. Use a private invitation from someone you trust or host your own server.</p>
+
+    <section aria-labelledby="add-turn">
+      <h2 id="add-turn">Add a TURN server to chta</h2>
+      <ol>
+        <li>Open <strong>Connect → TURN fallback</strong> in chta.</li>
+        <li>Paste the invite link or scan its QR code, then choose <strong>Save</strong>. Share the same invitation privately with the people you want to connect with.</li>
+        <li>Open the conversation. New WebRTC connections try direct paths and can use TURN when needed. The chat header shows <strong>TURN</strong> when chta confirms that route.</li>
+      </ol>
+      <p>Saving or removing a server applies to new connections. Restart chta if you need to replace an active connection right away.</p>
+      <p>Chats and files stay end-to-end encrypted. Your TURN operator can see network addresses and traffic volume. Files up to 25 MiB can use TURN. Larger files wait for a direct route.</p>
+    </section>
+
+    <section aria-labelledby="host-turn">
+      <h2 id="host-turn">Host your own TURN server</h2>
+      <p>Use a Linux host with Docker Compose, a public IPv4 address, and a DNS A record such as <code>turn.example.org</code>. If your provider maps a public IP to a private interface, set both addresses below. Set the DNS record to DNS-only if you use a DNS proxy service.</p>
+      <ol>
+        <li>
+          Allow inbound TCP <code>80</code> and <code>443</code> for HTTPS, TCP and UDP <code>3478</code> for TURN, and UDP <code>49160–49200</code> for relayed traffic. Use the same port numbers on both sides of any NAT.
+        </li>
+        <li>
+          Download the server files on your host.
+          <pre><code>mkdir -p chta-turn
+cd chta-turn
+curl --fail --location --remote-name-all \
+  https://chta.app/wiki/turn-server/compose.yaml \
+  https://chta.app/wiki/turn-server/Caddyfile \
+  https://chta.app/wiki/turn-server/issuer.mjs \
+  https://chta.app/wiki/turn-server/turn.env.example
+umask 077
+cp turn.env.example .env
+printf '\nTURN_ACCESS_TOKEN=%s\nTURN_SHARED_SECRET=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" &gt;&gt; .env</code></pre>
+        </li>
+        <li>
+          Edit <code>.env</code>. Set <code>TURN_HOST</code> to your DNS name, <code>TURN_PUBLIC_IP</code> to the public IP, and <code>TURN_LISTEN_IP</code> to the IPv4 address on your Linux interface. Often both IPs are the same. Then start the server.
+          <pre><code>docker compose up -d
+curl --fail https://turn.example.org/healthz</code></pre>
+        </li>
+        <li>
+          Generate the link in a private terminal. Replace the example domain with your DNS name.
+          <pre><code>token=$(sed -n 's/^TURN_ACCESS_TOKEN=//p' .env)
+printf 'https://turn.example.org/ice#%s\n' "$token"</code></pre>
+          <p>Send only the invite link to your contacts. To make a QR code locally, pipe the <code>printf</code> command above into <code>qrencode -o turn-invite.png</code>. Keep <code>.env</code> on your server.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="check-turn">
+      <h2 id="check-turn">Check the connection</h2>
+      <p>A successful Save confirms that chta reached the credential service. To check TURN itself, try a chat from two separate networks where a direct path has previously failed. If the chat keeps reconnecting, check the TURN port and UDP port range in your cloud firewall and on the host.</p>
+      <p>coturn is open source. Your server and bandwidth can still cost money. The example sets connection and bandwidth limits that you can tune in <code>compose.yaml</code>.</p>
+      <p>To replace a shared invitation, generate a new <code>TURN_ACCESS_TOKEN</code> and run <code>docker compose up -d</code>. Existing temporary credentials can remain valid for up to an hour. Rotate <code>TURN_SHARED_SECRET</code> as well if you need to invalidate those credentials sooner.</p>
+    </section>
+  </main>
+  <footer class="site-footer wrap"><a class="brand footer-brand" href="/">chta<span class="brand-period">.</span></a><a href="https://github.com/coturn/coturn">coturn documentation</a></footer>
+</body>
+</html>

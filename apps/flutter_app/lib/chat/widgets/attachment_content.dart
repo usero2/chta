@@ -9,6 +9,7 @@ import '../chat_attachment.dart';
 import '../media_item.dart';
 import '../media_thumbnail.dart';
 import 'media_album.dart';
+import 'file_offer_card.dart';
 import 'media_viewer.dart';
 export 'media_viewer.dart' show AttachmentMediaControls;
 import '../peer_history.dart';
@@ -21,10 +22,12 @@ class CachedAttachmentContent extends StatefulWidget {
     required this.history,
     required this.message,
     this.transfer,
+    this.offeredCover,
   });
   final PeerHistory history;
   final PeerMessage message;
   final Widget? transfer;
+  final String? offeredCover;
   @override
   State<CachedAttachmentContent> createState() =>
       _CachedAttachmentContentState();
@@ -77,7 +80,13 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.insert_drive_file_outlined),
+              if (widget.offeredCover case final cover?)
+                FileOfferPreview(
+                  mimeType: widget.message.attachmentRef!.mimeType,
+                  cover: cover,
+                )
+              else
+                const Icon(Icons.insert_drive_file_outlined),
               const SizedBox(width: 8),
               Flexible(child: Text(widget.message.attachmentRef!.name)),
             ],
@@ -91,6 +100,7 @@ class _CachedAttachmentContentState extends State<CachedAttachmentContent> {
                 attachment: snapshot.data!,
                 incoming: widget.message.incoming,
                 transfer: widget.transfer,
+                offeredCover: widget.offeredCover,
                 loadThumbnail: () => widget.history.thumbnailFor(
                   widget.message,
                   generate: createMediaThumbnail,
@@ -124,11 +134,13 @@ class AttachmentContent extends StatelessWidget {
     required this.incoming,
     this.loadThumbnail,
     this.transfer,
+    this.offeredCover,
   });
   final ChatAttachment attachment;
   final bool incoming;
   final Future<Uint8List?> Function()? loadThumbnail;
   final Widget? transfer;
+  final String? offeredCover;
 
   Future<String> _readMarkdown() async {
     if (!attachment.isStreamed) {
@@ -245,17 +257,23 @@ class AttachmentContent extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                attachment.kind == 'audio'
-                    ? Icons.audio_file
-                    : attachment.kind == 'video'
-                    ? Icons.play_circle
-                    : canReadMarkdown
-                    ? Icons.article_outlined
-                    : Icons.insert_drive_file,
-                size: 20,
-                color: color,
-              ),
+              if (visualMedia && offeredCover != null)
+                FileOfferPreview(
+                  mimeType: attachment.mimeType,
+                  cover: offeredCover,
+                )
+              else
+                Icon(
+                  attachment.kind == 'audio'
+                      ? Icons.audio_file
+                      : attachment.kind == 'video'
+                      ? Icons.play_circle
+                      : canReadMarkdown
+                      ? Icons.article_outlined
+                      : Icons.insert_drive_file,
+                  size: 20,
+                  color: color,
+                ),
               const SizedBox(width: 4),
               Expanded(
                 child: Column(

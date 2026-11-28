@@ -50,9 +50,36 @@ class MainActivity : FlutterActivity() {
     private var attachmentOutput: OutputStream? = null
     private var attachmentExportUri: Uri? = null
 
+    private var shareChannel: MethodChannel? = null
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW && intent.data?.scheme == "chta") {
+            setIntent(intent)
+            shareChannel?.invokeMethod("available", null)
+        }
+    }
+
+    private fun takeShare(): String? {
+        val incoming = intent ?: return null
+        val link = incoming.data ?: return null
+        if (incoming.action != Intent.ACTION_VIEW ||
+            link.scheme != "chta" || link.authority != "share" || link.path != "/open" ||
+            link.encodedQuery.orEmpty().length > 32008
+        ) return null
+        val token = link.getQueryParameter("payload")
+        incoming.data = null
+        return token
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ChatRuntime.engine = flutterEngine
+        shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.cht/share").apply {
+            setMethodCallHandler { call, result ->
+                if (call.method == "take") result.success(takeShare()) else result.notImplemented()
+            }
+        }
         val appContext = applicationContext
         val networkMonitor = ChatRuntime.networkMonitor ?: ChatNetworkMonitor(appContext).also {
             ChatRuntime.networkMonitor = it

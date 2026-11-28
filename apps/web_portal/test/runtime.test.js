@@ -71,6 +71,14 @@ test('actual workerd authenticates, routes signed SDP, rejects replay/content/bi
   for(const envelope of burst)ca.ws.send(JSON.stringify({type:'signal',envelope}));
   assert.equal((await cb.next()).envelope.id,burst[0].id);
   assert.equal((await cb.next()).envelope.id,burst[1].id);
+  const turnSession='0123456789abcdef0123456789abcdef';
+  const turn=signal(a,`did:cht:${b.id}`,{
+    id:`cht-control-direct-v1-${turnSession}-ice-4`,kind:'ice',
+    payload:JSON.stringify({v:1,t:'ice',s:turnSession,c:'candidate:a 1 udp 1 93.184.216.34 49160 typ relay',m:null,l:0}),
+    issuedAt:Date.now(),expiresAt:Date.now()+60000,
+  });
+  ca.ws.send(JSON.stringify({type:'signal',envelope:turn}));
+  assert.deepEqual(await cb.next(),{type:'signal',envelope:turn});
   const v=signal(a,`did:cht:${b.id}`,{issuedAt:Date.now(),expiresAt:Date.now()+60000});
   ca.ws.send(JSON.stringify({type:'signal',envelope:v}));assert.deepEqual(await cb.next(),{type:'signal',envelope:v});
   const closed=new Promise(r=>ca.ws.addEventListener('close',r,{once:true}));ca.ws.send(JSON.stringify({type:'signal',envelope:v}));assert.equal((await closed).code,1008);

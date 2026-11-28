@@ -9,6 +9,56 @@ import 'package:cht/chat/chunked_attachment_bridge.dart';
 import 'package:cht/chat/resumable_attachment_transfer.dart';
 
 void main() {
+  test('a slow file cache write does not hold another file on the relay', () async {
+    final cache = _GatedCache(gateByte: 1);
+    final replies = <Map<String, dynamic>>[];
+    final transfer = ResumableAttachmentTransfer(
+      ownerId: 'owner',
+      peerId: 'peer',
+      bridge: cache,
+      isDirect: () => false,
+      sendPacket: (_, text) async { replies.add(jsonDecode(text) as Map<String, dynamic>); },
+      onOffer: (_, _, _) async {},
+      onCompleted: (_, _) async => 42,
+    );
+    Future<void> receive(String id, Map<String, Object?> body) => transfer.receive(
+      'chtfile2_${id}_0',
+      jsonEncode({'v': 2, 'id': id, ...body}),
+      direct: false,
+    );
+    Future<void> offer(String id, int byte) => receive(id, {
+      'type': 'offer',
+      'name': 'sample.bin',
+      'mimeType': 'application/octet-stream',
+      'size': 1,
+      'chunkSize': 1,
+      'digest': sha256.convert([byte]).toString(),
+    });
+    Future<void> part(String id, int byte) => receive(id, {
+      'type': 'part',
+      'block': 0,
+      'part': 0,
+      'parts': 1,
+      'blockDigest': sha256.convert([byte]).toString(),
+      'data': base64Encode([byte]),
+    });
+    const slow = 'slow-file-fixture', other = 'other-file-fixture';
+    await offer(slow, 1);
+    final blocked = part(slow, 1);
+    await cache.entered.future;
+    try {
+      await offer(other, 2).timeout(const Duration(seconds: 1));
+      await part(other, 2);
+      await receive(other, {'type': 'finish'});
+      expect(replies.last['type'], 'complete');
+      expect(replies.last['id'], other);
+      expect(replies.where((r) => r['type'] == 'ack' && r['id'] == slow), isEmpty);
+    } finally {
+      cache.gate.complete();
+      await blocked;
+      transfer.dispose();
+    }
+  });
   test('recipient pause during a durable chunk write withholds ACK and resumes verified bytes', () async {
     final cache = _GatedCache(), responses = <Map<String, dynamic>>[];
     var paused = false, completed = 0;
@@ -346,6 +396,8 @@ void main() {
 }
 
 class _GatedCache extends _Cache {
+  _GatedCache({this.gateByte});
+  final int? gateByte;
   final gate = Completer<void>(), entered = Completer<void>();
   @override
   Future<void> writeChunkedAttachment(
@@ -354,8 +406,10 @@ class _GatedCache extends _Cache {
     int index,
     Uint8List bytes,
   ) async {
-    if (!entered.isCompleted) entered.complete();
-    await gate.future;
+    if (gateByte == null || bytes.first == gateByte) {
+      if (!entered.isCompleted) entered.complete();
+      await gate.future;
+    }
     await super.writeChunkedAttachment(owner, id, index, bytes);
   }
 }

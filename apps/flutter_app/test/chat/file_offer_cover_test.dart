@@ -78,16 +78,24 @@ void main() {
   test(
     'a video MIME type cannot turn a remote playlist into a preview',
     () async {
+      final playlist = Uint8List.fromList(utf8.encode(
+        '#EXTM3U\n#EXTINF:1,\nhttps://example.test/video.ts\n',
+      ));
       final cover = await buildFileOfferCover(
         ChatAttachment(
           name: 'movie.mp4',
           mimeType: 'video/mp4',
-          bytes: utf8.encode(
-            '#EXTM3U\n#EXTINF:1,\nhttps://example.test/video.ts\n',
-          ),
+          bytes: playlist,
         ),
       );
       expect(cover, isNull);
+      final cached = _PreviewSource(playlist.length, playlist);
+      expect(await buildFileOfferCover(ChatAttachment.fromSource(
+        name: 'cached.mp4',
+        mimeType: 'video/mp4',
+        source: cached,
+      )), isNull);
+      expect(cached.opened, isTrue);
     },
   );
 

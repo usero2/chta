@@ -31,6 +31,12 @@ use tokio_tungstenite::{
     },
 };
 
+mod health;
+mod probe;
+pub use probe::probe_endpoint;
+
+const COURIER_CAPABILITIES: [&str; 2] = ["courier-directory-v1", "courier-self-v1"];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WebSocketConfig {
@@ -262,6 +268,9 @@ mod traffic_tests {
 
 #[allow(clippy::result_large_err)] // tungstenite fixes the handshake callback error type.
 pub async fn serve_connection(hub: Arc<Hub>, stream: TcpStream) -> RelayResult<()> {
+    let Some(stream) = health::route(stream).await? else {
+        return Ok(());
+    };
     let callback = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
         if request.uri().path() != "/cht" || request.uri().query().is_some() {
             return Err(tokio_tungstenite::tungstenite::http::Response::builder()
@@ -280,7 +289,7 @@ pub async fn serve_connection(hub: Arc<Hub>, stream: TcpStream) -> RelayResult<(
     getrandom::fill(&mut random)?;
     let nonce = B64.encode(random);
     let record = hub.record();
-    timeout(Duration::from_secs(5), socket.send(Message::text(json!({"type":"challenge", "nonce":nonce, "relay":record, "relays":hub.catalog()["relays"],"capabilities":["courier-directory-v1","courier-self-v1"]}).to_string()))).await??;
+    timeout(Duration::from_secs(5), socket.send(Message::text(json!({"type":"challenge", "nonce":nonce, "relay":record, "relays":hub.catalog()["relays"],"capabilities":COURIER_CAPABILITIES}).to_string()))).await??;
     let (tx, mut rx) = mpsc::channel::<String>(64);
     let mut registration: Option<Registration> = None;
     let mut directory_only = false;
@@ -446,7 +455,9 @@ pub async fn connect_endpoint(
         Duration::from_secs(5),
         lookup_host((host, url.port_or_known_default().ok_or("Missing port")?)),
     )
-    .await??
+    .await
+    .map_err(|_| "Relay DNS lookup timed out")?
+    .map_err(|error| format!("Relay DNS lookup failed: {error}"))?
     .collect();
     if addresses.is_empty() {
         return Err("Relay host has no addresses".into());
@@ -460,12 +471,22 @@ pub async fn connect_endpoint(
             validate_endpoint(&formatted, false)?;
         }
     }
-    let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addresses[..])).await??;
+    let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addresses[..]))
+        .await
+        .map_err(|_| "Relay TCP connection timed out")?
+        .map_err(|error| format!("Relay TCP connection failed: {error}"))?;
     let (socket, _) = timeout(
         Duration::from_secs(10),
         client_async_tls_with_config(endpoint, stream, Some(socket_config()), None),
     )
-    .await??;
+    .await
+    .map_err(|_| "Relay TLS or WebSocket handshake timed out")?
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            format!("Relay WebSocket upgrade returned HTTP {}", response.status().as_u16())
+        }
+        error => format!("Relay TLS or WebSocket handshake failed: {error}"),
+    })?;
     Ok(socket)
 }
 

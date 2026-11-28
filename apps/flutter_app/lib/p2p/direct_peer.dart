@@ -1,5 +1,12 @@
+import 'ice_route.dart';
+
 abstract class DirectPeerFactory {
   Future<DirectPeer> create();
+}
+
+abstract interface class IceRoutePeer {
+  bool get configuredTurn;
+  Future<IceRoute> selectedRoute();
 }
 
 /// Data-only WebRTC peer. Callbacks belong to exactly one coordinator generation.

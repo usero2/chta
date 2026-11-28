@@ -51,6 +51,8 @@ class ConversationView {
     required this.updatedAtMilliseconds,
     required List<MessageView> messages,
     this.avatarBase64 = '',
+    this.online = false,
+    this.unreadCount = 0,
   }) : messages = List.unmodifiable(messages);
 
   factory ConversationView.fromJson(Map<String, Object?> json) =>
@@ -71,6 +73,22 @@ class ConversationView {
   final int updatedAtMilliseconds;
   final List<MessageView> messages;
   final String avatarBase64;
+  final bool online;
+  final int unreadCount;
+
+  bool get isGroup => id.startsWith('group:');
+  bool get isDirect => id.startsWith('did:cht:');
+
+  ConversationView withUnreadCount(int count) => ConversationView(
+    id: id,
+    title: title,
+    preview: preview,
+    updatedAtMilliseconds: updatedAtMilliseconds,
+    messages: messages,
+    avatarBase64: avatarBase64,
+    online: online,
+    unreadCount: count,
+  );
 }
 
 String _localPreview(String text) {

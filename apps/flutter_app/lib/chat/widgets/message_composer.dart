@@ -10,12 +10,20 @@ import 'message_bubble.dart';
 import 'pending_attachment_tray.dart';
 import 'attachment_picker_sheet.dart';
 
+typedef ComposerEdit = ({
+  String id,
+  String original,
+  Future<bool> Function(String) save,
+});
+
 class MessageComposer extends StatefulWidget {
   const MessageComposer({
     required this.onSend,
     this.onSendAttachment,
     this.onSendBatch,
     this.controller,
+    this.edit,
+    this.onCancelEdit,
     this.inputKey = const Key('message-input'),
     this.sendKey = const Key('send-message'),
     this.pickAttachments,
@@ -26,6 +34,8 @@ class MessageComposer extends StatefulWidget {
   final Future<bool> Function(ChatAttachment)? onSendAttachment;
   final Future<bool> Function(String, List<ChatAttachment>)? onSendBatch;
   final TextEditingController? controller;
+  final ComposerEdit? edit;
+  final VoidCallback? onCancelEdit;
   final Key inputKey;
   final Key sendKey;
   final Future<List<ChatAttachment>> Function(AttachmentPickKind)?
@@ -36,7 +46,37 @@ class MessageComposer extends StatefulWidget {
 }
 
 class _MessageComposerState extends State<MessageComposer> {
-  late final _textController = widget.controller ?? TextEditingController();
+  late final _draftController = widget.controller ?? TextEditingController();
+  final _editController = TextEditingController();
+  final _focus = FocusNode();
+  bool get _editing => widget.edit != null;
+  TextEditingController get _textController =>
+      _editing ? _editController : _draftController;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadEdit();
+  }
+
+  @override
+  void didUpdateWidget(covariant MessageComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.edit?.id != widget.edit?.id) _loadEdit();
+  }
+
+  void _loadEdit() {
+    final edit = widget.edit;
+    if (edit == null) return;
+    _editController.value = TextEditingValue(
+      text: edit.original,
+      selection: TextSelection.collapsed(offset: edit.original.length),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.edit?.id == edit.id) _focus.requestFocus();
+    });
+  }
+
   late final _keepDraftWhileSending = TextInputFormatter.withFunction(
     (previous, next) => _sending ? previous : next,
   );
@@ -82,7 +122,9 @@ class _MessageComposerState extends State<MessageComposer> {
 
   @override
   void dispose() {
-    if (widget.controller == null) _textController.dispose();
+    _focus.dispose();
+    _editController.dispose();
+    if (widget.controller == null) _draftController.dispose();
     super.dispose();
   }
 
@@ -132,25 +174,34 @@ class _MessageComposerState extends State<MessageComposer> {
 
   Future<void> _submit() async {
     if (_sending || _picking) return;
-    if (_textController.text.trim().isEmpty && _attachments.isEmpty) return;
+    final edit = widget.edit;
+    final text = _textController.text.trim();
+    if (text.isEmpty && (edit != null || _attachments.isEmpty)) return;
     setState(() => _sending = true);
     try {
+      if (edit != null) {
+        final saved = text == edit.original.trim() || await edit.save(text);
+        if (saved && mounted && widget.edit?.id == edit.id) {
+          widget.onCancelEdit?.call();
+        }
+        return;
+      }
       if (_attachments.isNotEmpty && widget.onSendBatch != null) {
         final queued = await widget.onSendBatch!(
-          _textController.text,
+          _draftController.text,
           List.of(_attachments),
         );
         if (!mounted) return;
         if (queued) {
-          _textController.clear();
+          _draftController.clear();
           setState(() => _attachments.clear());
         }
         return;
       }
-      if (_textController.text.trim().isNotEmpty) {
-        if (!await widget.onSend(_textController.text)) return;
+      if (_draftController.text.trim().isNotEmpty) {
+        if (!await widget.onSend(_draftController.text)) return;
         if (!mounted) return;
-        _textController.clear();
+        _draftController.clear();
       }
       for (final attachment in List<ChatAttachment>.of(_attachments)) {
         final sent = await widget.onSendAttachment?.call(attachment) ?? false;
@@ -191,7 +242,25 @@ class _MessageComposerState extends State<MessageComposer> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (_attachments.isNotEmpty)
+          if (widget.edit case final edit?)
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsetsDirectional.only(start: 8),
+              visualDensity: VisualDensity.compact,
+              leading: const Icon(Icons.edit_outlined, size: 20),
+              title: const Text('Editing message'),
+              subtitle: Text(
+                edit.original,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                tooltip: 'Cancel edit',
+                onPressed: _sending ? null : widget.onCancelEdit,
+                icon: const Icon(Icons.close),
+              ),
+            ),
+          if (!_editing && _attachments.isNotEmpty)
             PendingAttachmentTray(
               files: _attachments,
               onRemove: _sending
@@ -251,7 +320,9 @@ class _MessageComposerState extends State<MessageComposer> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              if (widget.onSendAttachment != null || widget.onSendBatch != null)
+              if (!_editing &&
+                  (widget.onSendAttachment != null ||
+                      widget.onSendBatch != null))
                 IconButton(
                   key: const Key('attach-message'),
                   tooltip: 'Attach',
@@ -278,6 +349,7 @@ class _MessageComposerState extends State<MessageComposer> {
                   child: TextField(
                     key: widget.inputKey,
                     controller: _textController,
+                    focusNode: _focus,
                     minLines: 1,
                     maxLines: 5,
                     keyboardType: TextInputType.multiline,
@@ -301,7 +373,9 @@ class _MessageComposerState extends State<MessageComposer> {
                 child: IconButton.filled(
                   key: widget.sendKey,
                   onPressed: _sending || _picking ? null : _submit,
-                  tooltip: _isNativeDesktop
+                  tooltip: _editing
+                      ? 'Save edit'
+                      : _isNativeDesktop
                       ? 'Send (Enter)'
                       : 'Send (Ctrl+Enter)',
                   style: IconButton.styleFrom(
@@ -314,7 +388,9 @@ class _MessageComposerState extends State<MessageComposer> {
                           dimension: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.arrow_upward_rounded),
+                      : Icon(
+                          _editing ? Icons.check : Icons.arrow_upward_rounded,
+                        ),
                 ),
               ),
             ],

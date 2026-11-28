@@ -5,6 +5,8 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../message_timestamp.dart';
+import '../link_preview.dart';
+import 'link_preview_card.dart';
 import 'message_action_menu.dart';
 
 class ChatMarkdown extends StatelessWidget {
@@ -95,11 +97,13 @@ class MessageBubble extends StatelessWidget {
     this.content,
     this.bubbleKey,
     this.showTime = true,
+    this.bottomSpacing = 10,
     this.deliveryIndicator,
     this.deliveryDetail,
     this.media = false,
     this.actions,
     this.quote,
+    this.linkPreview,
   });
 
   final String text;
@@ -109,8 +113,10 @@ class MessageBubble extends StatelessWidget {
   final VoidCallback? onRetry;
   final Widget? content;
   final Widget? quote;
+  final LinkPreview? linkPreview;
   final Key? bubbleKey;
   final bool showTime;
+  final double bottomSpacing;
   final MessageDeliveryIndicator? deliveryIndicator;
   final String? deliveryDetail;
   final bool media;
@@ -146,6 +152,18 @@ class MessageBubble extends StatelessWidget {
       ?deliveryDetail,
     ];
     final details = detailsRows.isEmpty ? null : detailsRows.join('\n');
+    final body =
+        content ??
+        (linkPreview == null
+            ? _textContent()
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _textContent(),
+                  LinkPreviewCard(preview: linkPreview!),
+                ],
+              ));
 
     final container = Container(
       key: bubbleKey,
@@ -164,7 +182,7 @@ class MessageBubble extends StatelessWidget {
               borderRadius: BorderRadius.circular(18),
             ),
       child: quote == null
-          ? content ?? _textContent()
+          ? body
           : Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -173,7 +191,7 @@ class MessageBubble extends StatelessWidget {
                 const SizedBox(height: 4),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 3),
-                  child: content ?? _textContent(),
+                  child: body,
                 ),
               ],
             ),
@@ -270,7 +288,7 @@ class MessageBubble extends StatelessWidget {
       ],
     );
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: EdgeInsets.only(bottom: bottomSpacing),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final metadata = ConstrainedBox(

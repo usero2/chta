@@ -23,6 +23,12 @@ struct Args {
     /// Windows Desktop: generate/unlock a DPAPI-protected service credential.
     #[arg(long)]
     windows_credential: bool,
+    /// Test a public wss://HOST/cht endpoint without reading local credentials.
+    #[arg(long, conflicts_with_all = ["check_config", "print_peer_id", "windows_credential"])]
+    probe_websocket: Option<String>,
+    /// Permit loopback URLs when probing a locally running test relay.
+    #[arg(long, requires = "probe_websocket")]
+    allow_loopback_probe: bool,
 }
 
 async fn shutdown() -> RelayResult<()> {
@@ -46,6 +52,14 @@ async fn main() {
 }
 
 async fn run(args: Args) -> RelayResult<()> {
+    if let Some(endpoint) = args.probe_websocket {
+        let relay = cht_relay::websocket::probe_endpoint(&endpoint, args.allow_loopback_probe).await?;
+        println!(
+            "{}",
+            json!({"event":"websocket_probe_ok", "endpoint":relay.endpoint, "relayId":relay.relay_id})
+        );
+        return Ok(());
+    }
     let config = Config::read(&args.config)?;
     if args.check_config {
         println!(

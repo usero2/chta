@@ -88,6 +88,7 @@ class GroupMessage {
     required this.recipients,
     this.receivedAt,
     this.manifest,
+    this.previewCover,
     Map<String, int>? receipts,
     this.deliveryEnvelope,
     this.repaired = false,
@@ -102,6 +103,8 @@ class GroupMessage {
   final int? receivedAt;
   final List<String> recipients;
   final SwarmManifest? manifest;
+  String? previewCover;
+  String? get fileCover => manifest?.cover ?? previewCover;
   final Map<String, int> receipts;
   String get key => '$senderId:$id';
   late final PeerMessageAction? action = manifest == null
@@ -138,6 +141,7 @@ class GroupMessage {
     if (courierJobs.isNotEmpty) 'courierJobs': courierJobs,
     if (repaired) 'repaired': true,
     if (manifest != null) 'manifest': manifest!.toJson(),
+    if (previewCover != null) 'previewCover': previewCover,
   };
   factory GroupMessage.fromJson(Map<String, dynamic> v) => GroupMessage(
     id: v['id'] as String,
@@ -149,6 +153,7 @@ class GroupMessage {
     sentAt: v['sentAt'] as int,
     receivedAt: v['receivedAt'] as int?,
     repaired: v['repaired'] == true,
+    previewCover: v['previewCover'] as String?,
     recipients: (v['recipients'] as List).cast<String>(),
     receipts: Map<String, dynamic>.from(v['receipts'] as Map)
         .cast<String, int>(),

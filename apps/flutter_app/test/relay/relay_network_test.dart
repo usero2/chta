@@ -60,6 +60,7 @@ class Socket implements RelaySocket {
   String? identity;
   bool closed = false;
   bool subscribed = false;
+  bool muteKeepalive = false;
   final sent = <Map<String, dynamic>>[];
   @override
   Stream<String> get frames => controller.stream;
@@ -77,7 +78,9 @@ class Socket implements RelaySocket {
       identity = (frame['proof'] as Map)['identityId'] as String;
       receive({'type': 'registered'});
     }
-    if (frame['type'] == 'keepalive') receive({'type': 'alive'});
+    if (frame['type'] == 'keepalive' && !muteKeepalive) {
+      receive({'type': 'alive'});
+    }
     if (frame['type'] == 'directory') {
       subscribed = frame['subscribeCatalog'] != false;
     }
@@ -298,6 +301,37 @@ class SessionAccount extends Account implements GroupCryptoBridge {
 }
 
 void main() {
+  test('handover replaces a retained relay that stopped responding', () async {
+    final active = Hub(a, 'relay-a'), warm = Hub(b, 'relay-b');
+    final network = RelayNetwork(
+      Crypto('alice'),
+      connector: (endpoint) => (endpoint == a ? active : warm).connect(endpoint),
+      handoverProbeTimeout: const Duration(milliseconds: 150),
+    );
+    try {
+      await network.addSeed(a);
+      await network.addSeed(b);
+      await until(() => network.online.length == 2);
+      network.activeEndpoint = a;
+      final oldActive = active.sockets.single..muteKeepalive = true;
+      await network.recoverNetwork();
+      expect(oldActive.closed, isFalse, reason: 'probe before replacing');
+      await until(() => oldActive.closed).timeout(const Duration(seconds: 1));
+      await until(() => network.online.length == 2);
+      expect(active.sockets.length, 2);
+      expect(warm.sockets.length, 2);
+
+      final live = active.sockets.last;
+      await network.recoverNetwork();
+      await until(() => warm.sockets.length == 3 && network.online.length == 2);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(live.closed, isFalse);
+      expect(active.sockets.length, 2);
+    } finally {
+      await network.close();
+    }
+  });
+
   test('non-forced recovery keeps a healthy idle relay', () async {
     final hub = Hub(a, 'relay-a');
     var now = DateTime.now().millisecondsSinceEpoch;

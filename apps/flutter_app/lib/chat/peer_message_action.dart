@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'link_preview.dart';
+
 enum PeerMessageActionKind { reply, edit, delete }
 
 /// An authenticated text event, so the same action survives every route,
@@ -44,6 +46,7 @@ class PeerMessageAction {
 
 typedef MessagePresentation = ({
   String text,
+  LinkPreview? preview,
   bool edited,
   bool deleted,
   bool pending,
@@ -101,19 +104,22 @@ MessagePresentation _present(
   MessageActionEntry? change,
 ) {
   final action = change?.action;
-  return switch (action?.kind) {
-    PeerMessageActionKind.edit => (
-      text: action!.text!,
-      edited: true,
-      deleted: false,
-      pending: change!.pending,
-    ),
-    PeerMessageActionKind.delete => (
+  if (action?.kind == PeerMessageActionKind.delete) {
+    return (
       text: 'Message deleted',
+      preview: null,
       edited: false,
       deleted: true,
       pending: change!.pending,
-    ),
-    _ => (text: original.text, edited: false, deleted: false, pending: false),
-  };
+    );
+  }
+  final isEdit = action?.kind == PeerMessageActionKind.edit;
+  final link = readLinkPreview(isEdit ? action!.text! : original.text);
+  return (
+    text: link.text,
+    preview: link.preview,
+    edited: isEdit,
+    deleted: false,
+    pending: change?.pending ?? false,
+  );
 }

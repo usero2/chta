@@ -1,6 +1,11 @@
+import 'dart:typed_data';
+
+import '../account/account_models.dart';
+
 import 'package:flutter/material.dart';
 
 import '../chat/chat_attachment.dart';
+import '../chat/file_offer_cover.dart';
 import '../chat/peer_message_action.dart';
 import '../chat/message_timestamp.dart';
 import '../chat/media_item.dart';
@@ -13,12 +18,12 @@ import '../chat/widgets/message_bubble.dart';
 import '../chat/widgets/message_day_divider.dart';
 import '../chat/widgets/message_reply_quote.dart';
 import '../chat/widgets/message_composer.dart';
+import '../chat/widgets/message_sender_avatar.dart';
 import '../chat/widgets/reply_message_list.dart';
-import '../profile/profile_avatar.dart';
 import 'group_models.dart';
 import 'swarm/swarm.dart';
 
-class GroupRoom extends StatelessWidget {
+class GroupRoom extends StatefulWidget {
   const GroupRoom({
     required this.group,
     required this.ownId,
@@ -38,10 +43,12 @@ class GroupRoom extends StatelessWidget {
     this.onMessageAction,
     this.fileChoiceFor,
     this.onFileChoice,
+    this.contacts = const {},
     super.key,
   });
 
   final GroupView group;
+  final Map<String, ContactView> contacts;
   final String ownId;
   final List<GroupMessage> messages;
   final bool enabled;
@@ -61,8 +68,21 @@ class GroupRoom extends StatelessWidget {
   onMessageAction;
 
   @override
+  State<GroupRoom> createState() => _GroupRoomState();
+}
+
+class _GroupRoomState extends State<GroupRoom> {
+  ComposerEdit? _edit;
+
+  @override
+  void didUpdateWidget(covariant GroupRoom oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.group.groupId != widget.group.groupId) _edit = null;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final visible = messages.where((m) => m.isVisible).toList();
+    final visible = widget.messages.where((m) => m.isVisible).toList();
     final originals = {for (final message in visible) message.key: message};
     final timeline = messageTimeline(
       visible,
@@ -71,7 +91,7 @@ class GroupRoom extends StatelessWidget {
       authorOf: (message) => message.senderId,
     );
     final presentations = projectMessageActions(
-      messages.map((m) => m.actionEntry),
+      widget.messages.map((m) => m.actionEntry),
     );
     return ColoredBox(
       color: const Color(0xFF1A1A1A),
@@ -82,9 +102,9 @@ class GroupRoom extends StatelessWidget {
               height: 68,
               child: Row(
                 children: [
-                  if (onBack != null)
+                  if (widget.onBack != null)
                     IconButton(
-                      onPressed: onBack,
+                      onPressed: widget.onBack,
                       tooltip: 'Back to chats',
                       icon: const Icon(Icons.arrow_back),
                     ),
@@ -100,7 +120,7 @@ class GroupRoom extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          group.name,
+                          widget.group.name,
                           key: const Key('group-room-title'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -110,17 +130,17 @@ class GroupRoom extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          !enabled
-                              ? disabledReason ??
-                                    (group.closed
+                          !widget.enabled
+                              ? widget.disabledReason ??
+                                    (widget.group.closed
                                         ? 'Group closed'
                                         : 'Waiting for group owner')
-                              : '${group.members.length} members · $onlineCount online',
+                              : '${widget.group.members.length} members · ${widget.onlineCount} online',
                           key: const Key('group-room-status'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            color: enabled
+                            color: widget.enabled
                                 ? const Color(0xFF8E8E93)
                                 : const Color(0xFFE4B75B),
                             fontSize: 12,
@@ -133,8 +153,8 @@ class GroupRoom extends StatelessWidget {
                     key: const Key('group-actions-menu'),
                     tooltip: 'Group actions',
                     onSelected: (action) {
-                      if (action == 'details') onDetails();
-                      if (action == 'delete') onDelete();
+                      if (action == 'details') widget.onDetails();
+                      if (action == 'delete') widget.onDelete();
                     },
                     itemBuilder: (context) => const [
                       PopupMenuItem(
@@ -154,8 +174,8 @@ class GroupRoom extends StatelessWidget {
             const Divider(height: 1),
             Expanded(
               child: ReplyMessageList(
-                key: ValueKey(group.groupId),
-                storageId: 'group-history-${group.groupId}',
+                key: ValueKey(widget.group.groupId),
+                storageId: 'group-history-${widget.group.groupId}',
                 rows: [
                   for (final message in visible) [message.key],
                 ],
@@ -167,19 +187,30 @@ class GroupRoom extends StatelessWidget {
                   final message = visible[index];
                   final target = message.action?.target;
                   final original = originals[target];
+                  final time = timeline[index];
+                  final startsSenderRun =
+                      index == 0 ||
+                      time.dayLabel != null ||
+                      visible[index - 1].senderId != message.senderId;
                   return _message(
                     context,
                     message,
                     presentations[message.key]!,
-                    timeline[index],
-                    target == null
+                    time,
+                    showSender: startsSenderRun,
+                    gapBefore: index == 0 || time.dayLabel != null
+                        ? 0
+                        : startsSenderRun
+                        ? 12
+                        : 4,
+                    quote: target == null
                         ? null
                         : _quote(
                             original,
                             presentations[target]?.text ??
                                 'Original message unavailable',
                             deleted: presentations[target]?.deleted == true,
-                            outgoing: message.senderId == ownId,
+                            outgoing: message.senderId == widget.ownId,
                             onJump: original == null
                                 ? null
                                 : () => jumpTo(target),
@@ -188,27 +219,29 @@ class GroupRoom extends StatelessWidget {
                 },
               ),
             ),
-            if (error != null)
+            if (widget.error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
                   vertical: 6,
                 ),
                 child: Text(
-                  error!,
+                  widget.error!,
                   style: const TextStyle(color: Colors.redAccent),
                 ),
               ),
             IgnorePointer(
-              ignoring: !enabled,
+              ignoring: !widget.enabled,
               child: Opacity(
-                opacity: enabled ? 1 : .5,
+                opacity: widget.enabled ? 1 : .5,
                 child: MessageComposer(
                   key: const Key('group-message-composer'),
                   inputKey: const Key('group-message-input'),
                   sendKey: const Key('group-send-message'),
-                  onSend: onSend,
-                  onSendBatch: onSendBatch,
+                  onSend: widget.onSend,
+                  onSendBatch: widget.onSendBatch,
+                  edit: _edit,
+                  onCancelEdit: () => setState(() => _edit = null),
                 ),
               ),
             ),
@@ -222,10 +255,12 @@ class GroupRoom extends StatelessWidget {
     BuildContext context,
     GroupMessage message,
     MessagePresentation presentation,
-    MessageTimelineMarker time,
+    MessageTimelineMarker time, {
+    required bool showSender,
+    required double gapBefore,
     Widget? quote,
-  ) {
-    final incoming = message.senderId != ownId;
+  }) {
+    final incoming = message.senderId != widget.ownId;
     final deleted = presentation.deleted;
     final manifest = deleted ? null : message.manifest;
     final content = manifest == null ? null : _fileContent(message, manifest);
@@ -245,88 +280,103 @@ class GroupRoom extends StatelessWidget {
         ? receipts.reduce((latest, next) => latest > next ? latest : next)
         : null;
     final deliveryDetail = sentToGroup
-        ? deliveryLabel?.call(message) ??
+        ? widget.deliveryLabel?.call(message) ??
               '${receipts.length}/$recipientCount delivered'
         : null;
+    final sender = _sender(message);
+    final body = Column(
+      crossAxisAlignment: incoming
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.end,
+      children: [
+        if (incoming && showSender)
+          Text(
+            sender.displayName,
+            key: Key('group-sender-${message.key}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+        MessageBubble(
+          bottomSpacing: 0,
+          quote: deleted ? null : quote,
+          media:
+              manifest?.mimeType.toLowerCase().startsWith('image/') == true ||
+              manifest?.mimeType.toLowerCase().startsWith('video/') == true,
+          bubbleKey: Key('group-message-${message.key}'),
+          actions: deleted
+              ? null
+              : MessageActionMenu(
+                  buttonKey: ValueKey('group-message-actions-${message.key}'),
+                  canEdit: !incoming && manifest == null,
+                  canDelete: !incoming,
+                  copyText: manifest == null ? presentation.text : null,
+                  onSelected: widget.enabled && widget.onMessageAction != null
+                      ? (action) => _selectAction(
+                          context,
+                          action,
+                          message,
+                          presentation.text,
+                        )
+                      : null,
+                  unavailableReason: !widget.enabled
+                      ? 'Message actions are unavailable in this group.'
+                      : widget.onMessageAction == null
+                      ? 'All members need to support message actions.'
+                      : null,
+                ),
+          text: content is _GroupFileOffer ? '' : presentation.text,
+          linkPreview: presentation.preview,
+          incoming: incoming,
+          sentAtMilliseconds: message.sentAt,
+          receivedAtMilliseconds: receiveTime,
+          showTime: time.showTime,
+          deliveryIndicator: delivered
+              ? MessageDeliveryIndicator.delivered
+              : sentToGroup
+              ? MessageDeliveryIndicator.pending
+              : null,
+          deliveryDetail: deliveryDetail,
+          content: content,
+        ),
+        if (presentation.pending || presentation.edited)
+          Text(
+            presentation.pending
+                ? (deleted ? 'Delete pending' : 'Edit pending')
+                : 'Edited',
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
+      ],
+    );
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: EdgeInsets.only(top: gapBefore),
       child: Column(
-        crossAxisAlignment: incoming
-            ? CrossAxisAlignment.start
-            : CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (time.dayLabel case final label?) MessageDayDivider(label),
           if (incoming)
-            Padding(
-              padding: const EdgeInsets.only(left: 2, bottom: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ProfileAvatar(name: message.senderName, radius: 14),
-                  const SizedBox(width: 7),
-                  Text(
-                    message.senderName,
-                    key: Key('group-sender-${message.key}'),
-                    style: const TextStyle(
-                      color: Color(0xFFB6B6BA),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          MessageBubble(
-            quote: deleted ? null : quote,
-            media:
-                manifest?.mimeType.toLowerCase().startsWith('image/') == true ||
-                manifest?.mimeType.toLowerCase().startsWith('video/') == true,
-            bubbleKey: Key('group-message-${message.key}'),
-            actions: deleted
-                ? null
-                : MessageActionMenu(
-                    buttonKey: ValueKey('group-message-actions-${message.key}'),
-                    canEdit: !incoming && manifest == null,
-                    canDelete: !incoming,
-                    copyText: manifest == null ? presentation.text : null,
-                    onSelected: enabled && onMessageAction != null
-                        ? (action) => _selectAction(
-                            context,
-                            action,
-                            message,
-                            presentation.text,
-                          )
-                        : null,
-                    unavailableReason: !enabled
-                        ? 'Message actions are unavailable in this group.'
-                        : onMessageAction == null
-                        ? 'All members need to support message actions.'
-                        : null,
-                  ),
-            text: content is _GroupFileOffer ? '' : presentation.text,
-            incoming: incoming,
-            sentAtMilliseconds: message.sentAt,
-            receivedAtMilliseconds: receiveTime,
-            showTime: time.showTime,
-            deliveryIndicator: delivered
-                ? MessageDeliveryIndicator.delivered
-                : sentToGroup
-                ? MessageDeliveryIndicator.pending
-                : null,
-            deliveryDetail: deliveryDetail,
-            content: content,
-          ),
-          if (presentation.pending || presentation.edited)
-            Text(
-              presentation.pending
-                  ? (deleted ? 'Delete pending' : 'Edit pending')
-                  : 'Edited',
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                MessageSenderAvatar(sender: sender, show: showSender),
+                Expanded(child: body),
+              ],
+            )
+          else
+            body,
         ],
       ),
     );
   }
+
+  ContactView _sender(GroupMessage message) =>
+      widget.contacts[message.senderId] ??
+      ContactView(
+        identityId: message.senderId,
+        displayName: message.senderName,
+        fingerprint: '',
+        verified: false,
+      );
 
   Widget _quote(
     GroupMessage? original,
@@ -339,18 +389,18 @@ class GroupRoom extends StatelessWidget {
     final image =
         file != null &&
         file.mimeType.toLowerCase().startsWith('image/') &&
-        progressFor(file.fileId)?.complete == true;
+        widget.progressFor(file.fileId)?.complete == true;
     return MessageReplyQuote(
       key: ValueKey(original?.key),
       text: text.trim().isNotEmpty ? text : file?.name ?? 'Message',
       author: original == null
           ? null
-          : original.senderId == ownId
+          : original.senderId == widget.ownId
           ? 'You'
-          : original.senderName,
+          : _sender(original).displayName,
       onJump: onJump,
       outgoing: outgoing,
-      loadImage: image ? () => openFile(file) : null,
+      loadImage: image ? () => widget.openFile(file) : null,
     );
   }
 
@@ -360,6 +410,18 @@ class GroupRoom extends StatelessWidget {
     GroupMessage message,
     String text,
   ) async {
+    if (action == PeerMessageActionKind.edit) {
+      setState(() {
+        _edit = (
+          id: message.key,
+          original: text,
+          save: (value) async =>
+              await widget.onMessageAction?.call(action, message, value) ??
+              false,
+        );
+      });
+      return;
+    }
     if (action == PeerMessageActionKind.delete) {
       final confirmed = await showDialog<bool>(
         context: context,
@@ -378,21 +440,21 @@ class GroupRoom extends StatelessWidget {
         ),
       );
       if (confirmed == true && context.mounted) {
-        await onMessageAction?.call(action, message, null);
+        await widget.onMessageAction?.call(action, message, null);
       }
       return;
     }
-    final reply = action == PeerMessageActionKind.reply;
-    var input = reply ? '' : text;
+    var input = '';
     final value = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(reply ? 'Reply' : 'Edit message'),
+        title: const Text('Reply'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (reply) ...[_quote(message, text), const SizedBox(height: 8)],
+            _quote(message, text),
+            const SizedBox(height: 8),
             TextFormField(
               autofocus: true,
               initialValue: input,
@@ -409,80 +471,54 @@ class GroupRoom extends StatelessWidget {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, input.trim()),
-            child: Text(reply ? 'Send' : 'Save'),
+            child: const Text('Send'),
           ),
         ],
       ),
     );
-    if (value != null &&
-        value.isNotEmpty &&
-        (reply || value != text) &&
-        context.mounted) {
-      await onMessageAction?.call(action, message, value);
+    if (value != null && value.isNotEmpty && context.mounted) {
+      await widget.onMessageAction?.call(action, message, value);
     }
   }
 
   Widget _fileContent(GroupMessage message, SwarmManifest manifest) {
-    final choice = fileChoiceFor?.call(manifest);
-    if (message.senderId != ownId &&
+    final choice = widget.fileChoiceFor?.call(manifest);
+    final needsChoice = message.senderId != widget.ownId &&
         (choice == GroupFileChoice.pending ||
-            choice == GroupFileChoice.rejected)) {
+            choice == GroupFileChoice.rejected);
+    final progress = widget.progressFor(manifest.fileId);
+    if (needsChoice || progress?.complete != true) {
+      final choose = widget.onFileChoice;
       return _GroupFileOffer(
         key: ValueKey(manifest.fileId),
         manifest: manifest,
-        status: choice == GroupFileChoice.rejected
+        cover: message.fileCover,
+        status: !needsChoice
+            ? null
+            : choice == GroupFileChoice.rejected
             ? 'Rejected'
-            : !enabled || onFileChoice == null
+            : !widget.enabled || choose == null
             ? 'File unavailable'
             : null,
-        onChoice: (choice) => onFileChoice!(manifest, choice),
-      );
-    }
-    final progress = progressFor(manifest.fileId);
-    if (progress?.complete != true) {
-      final value = progress;
-      final ratio = value == null || value.totalBytes == 0
-          ? 0.0
-          : (value.verifiedBytes / value.totalBytes).clamp(0.0, 1.0);
-      return SizedBox(
-        width: 240,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.insert_drive_file_outlined, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    manifest.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+        progress: needsChoice
+            ? null
+            : progress ??
+                  SwarmProgress(
+                    verifiedBytes: 0,
+                    totalBytes: manifest.size,
+                    sourceCount: 0,
+                    complete: false,
+                    waitingForDirect: false,
                   ),
-                ),
-                Text('${(ratio * 100).round()}%'),
-              ],
-            ),
-            const SizedBox(height: 6),
-            LinearProgressIndicator(value: ratio),
-            const SizedBox(height: 4),
-            Text(
-              value?.waitingForDirect == true
-                  ? 'Waiting for Direct'
-                  : '${value?.sourceCount ?? 0} sources',
-              key: Key('group-file-progress-${manifest.fileId}'),
-              style: const TextStyle(fontSize: 11, color: Color(0xFF8E8E93)),
-            ),
-          ],
-        ),
+        onChoice: choose == null ? null : (choice) => choose(manifest, choice),
       );
     }
     return _CompletedGroupFile(
       key: ValueKey(manifest.fileId),
       manifest: manifest,
-      incoming: message.senderId != ownId,
-      openFile: openFile,
+      cover: message.fileCover,
+      incoming: message.senderId != widget.ownId,
+      openFile: widget.openFile,
     );
   }
 }
@@ -491,13 +527,16 @@ class _GroupFileOffer extends StatefulWidget {
   const _GroupFileOffer({
     super.key,
     required this.manifest,
+    required this.cover,
     required this.status,
+    required this.progress,
     required this.onChoice,
   });
 
   final SwarmManifest manifest;
-  final String? status;
-  final Future<bool> Function(GroupFileChoice) onChoice;
+  final String? cover, status;
+  final SwarmProgress? progress;
+  final Future<bool> Function(GroupFileChoice)? onChoice;
 
   @override
   State<_GroupFileOffer> createState() => _GroupFileOfferState();
@@ -508,12 +547,13 @@ class _GroupFileOfferState extends State<_GroupFileOffer> {
   String? _error;
 
   Future<void> _choose(GroupFileChoice choice) async {
-    if (_busy) return;
+    final onChoice = widget.onChoice;
+    if (_busy || onChoice == null) return;
     setState(() {
       _busy = true;
       _error = null;
     });
-    final saved = await widget.onChoice(choice);
+    final saved = await onChoice(choice);
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -522,29 +562,60 @@ class _GroupFileOfferState extends State<_GroupFileOffer> {
   }
 
   @override
-  Widget build(BuildContext context) => FileOfferCard(
-    fileName: widget.manifest.name,
-    mimeType: widget.manifest.mimeType,
-    sizeBytes: widget.manifest.size,
-    caption: widget.manifest.caption,
-    cover: widget.manifest.cover,
-    status: widget.status,
-    error: _error,
-    busy: _busy,
-    onAccept: () => _choose(GroupFileChoice.accepted),
-    onReject: () => _choose(GroupFileChoice.rejected),
-  );
+  Widget build(BuildContext context) {
+    final progress = widget.progress;
+    final ratio = progress == null || progress.totalBytes == 0
+        ? 0.0
+        : (progress.verifiedBytes / progress.totalBytes).clamp(0.0, 1.0);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FileOfferCard(
+            fileName: widget.manifest.name,
+            mimeType: widget.manifest.mimeType,
+            sizeBytes: widget.manifest.size,
+            caption: widget.manifest.caption,
+            cover: widget.cover,
+            status: progress == null
+                ? widget.status
+                : progress.waitingForDirect
+                ? 'Waiting for Direct'
+                : '${(ratio * 100).round()}%',
+            error: _error,
+            busy: _busy,
+            onAccept: () => _choose(GroupFileChoice.accepted),
+            onReject: () => _choose(GroupFileChoice.rejected),
+          ),
+          if (progress != null) ...[
+            const SizedBox(height: 6),
+            LinearProgressIndicator(value: ratio),
+            const SizedBox(height: 4),
+            Text(
+              '${progress.sourceCount} sources',
+              key: Key('group-file-progress-${widget.manifest.fileId}'),
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _CompletedGroupFile extends StatefulWidget {
   const _CompletedGroupFile({
     super.key,
     required this.manifest,
+    required this.cover,
     required this.incoming,
     required this.openFile,
   });
 
   final SwarmManifest manifest;
+  final String? cover;
   final bool incoming;
   final Future<ChatAttachment> Function(SwarmManifest) openFile;
 
@@ -554,11 +625,13 @@ class _CompletedGroupFile extends StatefulWidget {
 
 class _CompletedGroupFileState extends State<_CompletedGroupFile> {
   late Future<ChatAttachment> _file;
+  Uint8List? _cover;
 
   @override
   void initState() {
     super.initState();
     _file = widget.openFile(widget.manifest);
+    _cover = decodeFileOfferCover(widget.cover);
   }
 
   @override
@@ -568,6 +641,9 @@ class _CompletedGroupFileState extends State<_CompletedGroupFile> {
         oldWidget.manifest.groupId != widget.manifest.groupId ||
         oldWidget.manifest.epoch != widget.manifest.epoch) {
       _file = widget.openFile(widget.manifest);
+    }
+    if (oldWidget.cover != widget.cover) {
+      _cover = decodeFileOfferCover(widget.cover);
     }
   }
 
@@ -590,12 +666,16 @@ class _CompletedGroupFileState extends State<_CompletedGroupFile> {
           incoming: widget.incoming,
           caption: file.caption,
           loadFile: () async => file,
-          loadThumbnail: () => createMediaThumbnail(file),
+          loadThumbnail: () async =>
+              _cover ?? decodeFileOfferCover(await buildFileOfferCover(file)),
         );
         return LayoutBuilder(
           builder: (context, constraints) => SizedBox(
             width: constraints.maxWidth.clamp(0, 340).toDouble(),
-            child: MediaAlbum(items: [item]),
+            child: MediaAlbum(
+              key: ValueKey((widget.manifest.fileId, widget.cover)),
+              items: [item],
+            ),
           ),
         );
       }

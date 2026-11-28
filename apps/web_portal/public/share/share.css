@@ -1,0 +1,8 @@
+.share-page {
+  max-width: 42rem;
+  padding-block: clamp(3rem, 12vh, 10rem);
+}
+.share-page h1 { margin-block: 2rem .75rem; font-size: clamp(2.25rem, 7vw, 4rem); }
+.share-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; margin-block-start: 1.5rem; }
+.share-actions [hidden] { display: none; }
+.share-primary { display: inline-block; padding: .7rem 1rem; border: 1px solid currentColor; border-radius: 8px; }

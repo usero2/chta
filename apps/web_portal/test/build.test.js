@@ -19,4 +19,7 @@ test('portal packaging copies actual Flutter files only after validating its /ch
   assert.equal(await readFile(join(outDir,'chat/main.dart.js'),'utf8'),'real-build-marker');
   const home=await readFile(join(outDir,'index.html'),'utf8');assert.match(home,/lang="en"/);assert.match(home,/href="\/chat\/"/);
   assert.ok((await readFile(join(outDir,'brand.png'))).length>1000);
+  assert.match(await readFile(join(outDir,'wiki/turn.html'),'utf8'),/TURN setup guide/);
+  assert.match(await readFile(join(outDir,'wiki/turn-server/compose.yaml'),'utf8'),/TURN_SHARED_SECRET/);
+  assert.doesNotMatch(await readFile(join(outDir,'wiki/turn-server/turn.env.example'),'utf8'),/[a-f0-9]{64}/);
 });

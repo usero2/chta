@@ -134,7 +134,9 @@ class _AlbumTile extends StatefulWidget {
 class _AlbumTileState extends State<_AlbumTile> {
   late final Future<Uint8List?> _preview = widget.item.kind == 'image'
       ? widget.item.loadFile().then(
-          (file) => file.isStreamed ? null : file.bytes,
+          (file) => file.isStreamed
+              ? widget.item.loadThumbnail?.call()
+              : file.bytes,
         )
       : widget.item.loadThumbnail?.call() ?? Future.value();
   Future<void> _save() async {

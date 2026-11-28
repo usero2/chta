@@ -3,24 +3,32 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
 import 'direct_peer.dart';
+import 'ice_route.dart';
 
-/// WebRTC has no media tracks here. Only STUN is configured; TURN is absent.
 class WebRtcDirectPeerFactory implements DirectPeerFactory {
+  WebRtcDirectPeerFactory({this.turnServers});
+
+  final Future<List<Map<String, Object>>> Function()? turnServers;
+
   @override
   Future<DirectPeer> create() async {
+    final turn =
+        await (turnServers?.call() ??
+            Future.value(const <Map<String, Object>>[]));
     final connection = await rtc.createPeerConnection({
       'iceServers': [
         {'urls': 'stun:stun.l.google.com:19302'},
+        ...turn,
       ],
       'iceTransportPolicy': 'all',
       'sdpSemantics': 'unified-plan',
     });
-    return WebRtcDirectPeer(connection);
+    return WebRtcDirectPeer(connection, configuredTurn: turn.isNotEmpty);
   }
 }
 
-class WebRtcDirectPeer implements DirectPeer {
-  WebRtcDirectPeer(this._connection) {
+class WebRtcDirectPeer implements DirectPeer, IceRoutePeer {
+  WebRtcDirectPeer(this._connection, {this.configuredTurn = false}) {
     _connection.onIceCandidate = (candidate) {
       final value = candidate.candidate;
       if (value != null && value.isNotEmpty) {
@@ -29,6 +37,10 @@ class WebRtcDirectPeer implements DirectPeer {
     };
     _connection.onDataChannel = _attachChannel;
     _connection.onConnectionState = (state) {
+      if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
+          _channel?.state == rtc.RTCDataChannelState.RTCDataChannelOpen) {
+        onReadyChanged?.call(true);
+      }
       if (state ==
               rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
           state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
@@ -40,6 +52,18 @@ class WebRtcDirectPeer implements DirectPeer {
 
   static const maxBufferedBytes = 256 * 1024;
   final rtc.RTCPeerConnection _connection;
+  @override
+  final bool configuredTurn;
+
+  @override
+  Future<IceRoute> selectedRoute() async {
+    final reports = await _connection.getStats();
+    return selectedIceRoute({
+      for (final report in reports)
+        report.id: {...report.values, 'type': report.type},
+    });
+  }
+
   rtc.RTCDataChannel? _channel;
   bool _closed = false;
   Future<void> _sendTail = Future<void>.value();

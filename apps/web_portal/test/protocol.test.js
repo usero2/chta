@@ -78,10 +78,12 @@ test('valid signed offer and strict timestamp, schema, endpoint, identity and si
 test('only original bounded SDP/ICE payloads are accepted, never chat or file carriers', async () => {
   const base = signal(alice,did), session = base.session;
   for(const d of [sdp('offer')+'a=fingerprint:sha-256 invalid\r\n',sdp('offer')+'\0',sdp('offer')+'a=candidate:invalid\r\n'])await assert.rejects(verifySignal(signal(alice,did,{payload:JSON.stringify({v:1,t:'offer',s:session,d})}),base.from,now));
-  for (const p of [{v:1,t:'offer',s:session,d:sdp('offer'),body:'message'},{v:1,t:'offer',s:session,d:'x'.repeat(11001)},{v:1,t:'offer',s:session,d:sdp('answer')},{v:1,t:'offer',s:session,d:sdp('offer')+'a=candidate:x 1 udp 1 1.2.3.4 123 typ relay\r\n'},{v:1,t:'offer',s:session,d:sdp('offer').replace('sha-256','sha-1')},{v:1,t:'message',s:session,d:'secret'},{v:1,t:'offer',s:'b'.repeat(32),d:sdp('offer')}]) await assert.rejects(verifySignal(signal(alice,did,{payload:JSON.stringify(p)}),base.from,now));
+  for (const p of [{v:1,t:'offer',s:session,d:sdp('offer'),body:'message'},{v:1,t:'offer',s:session,d:'x'.repeat(11001)},{v:1,t:'offer',s:session,d:sdp('answer')},{v:1,t:'offer',s:session,d:sdp('offer')+'a=candidate:x 1 udp 1 10.0.0.4 123 typ relay\r\n'},{v:1,t:'offer',s:session,d:sdp('offer').replace('sha-256','sha-1')},{v:1,t:'message',s:session,d:'secret'},{v:1,t:'offer',s:'b'.repeat(32),d:sdp('offer')}]) await assert.rejects(verifySignal(signal(alice,did,{payload:JSON.stringify(p)}),base.from,now));
   const ice = {v:1,t:'ice',s:session,c:'candidate:a 1 udp 2122260223 203.0.113.1 50000 typ host',m:null,l:0};
   const changes = {kind:'ice',id:`cht-control-direct-v1-${session}-ice-2`};
   assert.ok(await verifySignal(signal(alice,did,{...changes,payload:JSON.stringify(ice)}),base.from,now));
+  const turn = {...ice,c:'candidate:a 1 udp 1 93.184.216.34 49160 typ relay raddr 0.0.0.0 rport 0'};
+  assert.ok(await verifySignal(signal(alice,did,{...changes,payload:JSON.stringify(turn)}),base.from,now));
   for(const p of [{...ice,c:ice.c.replace('typ host','typ relay')},{...ice,l:-1},{...ice,l:65536},{...ice,m:'x'.repeat(65)},{...ice,c:'opaque-encrypted-blob'},{...ice,filename:'secret'},{...ice,c:'candidate:a 1 udp 1 x 0 typ host'}]) await assert.rejects(verifySignal(signal(alice,did,{...changes,payload:JSON.stringify(p)}),base.from,now));
   await assert.rejects(verifySignal(signal(alice,did,{payload:' '.repeat(11265)}),base.from,now));
 });
@@ -110,7 +112,7 @@ test('group v2 accepts SDP and ICE only with exact schema and signature', async 
   const ice = {v:1,t:'ice',s:session,c:'candidate:a 1 udp 2122260223 203.0.113.1 50000 typ host',m:null,l:0};
   const good = groupSignal(alice,did,{kind:'ice',id:`cht-control-groups-v1-${session}-ice-2`,payload:JSON.stringify(ice)});
   assert.deepEqual(await verifySignal(good,good.from,now),good);
-  for (const change of [{payload:JSON.stringify({...ice,filename:'secret'})},{payload:JSON.stringify({...ice,c:'candidate:a 1 udp 1 1.2.3.4 123 typ relay'})},{payload:JSON.stringify({v:1,t:'message',s:session,text:'secret'})},{kind:'message'},{extra:1},{signature:base.signature.slice(1)}]) {
+  for (const change of [{payload:JSON.stringify({...ice,filename:'secret'})},{payload:JSON.stringify({...ice,c:'candidate:a 1 udp 1 10.0.0.4 123 typ relay'})},{payload:JSON.stringify({v:1,t:'message',s:session,text:'secret'})},{kind:'message'},{extra:1},{signature:base.signature.slice(1)}]) {
     const candidate = 'signature' in change ? {...base,...change} : groupSignal(alice,did,change);
     await assert.rejects(verifySignal(candidate,base.from,now),JSON.stringify(change));
   }

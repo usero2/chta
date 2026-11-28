@@ -167,6 +167,8 @@ fn seed_expired_future_unsafe_and_invalid_payload_metadata_are_rejected() {
         a.sign_seed_signal(&id(&b), &message("offer"), &wrong_role, NOW)
             .is_err()
     );
+    let turn = payload("ice").replace("192.0.2.1", "93.184.216.34").replace("typ host", "typ relay");
+    assert!(a.sign_seed_signal(&id(&b), &message("ice"), &turn, NOW).is_ok());
     for candidate in [
         "candidate:1 1 UDP 1 192.0.2.1 12 typ relay",
         "file bytes",

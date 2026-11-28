@@ -13,6 +13,11 @@ export async function build({flutterDir=resolve(portal,'../flutter_app/build/web
   // Atomic staging would require a platform-specific rename; validate first, then replace only this output.
   await rm(destination,{recursive:true,force:true});await mkdir(destination,{recursive:true});
   await cp(resolve(portal,'public'),destination,{recursive:true});
+  const turnFiles=resolve(destination,'wiki/turn-server');
+  await mkdir(turnFiles,{recursive:true});
+  for (const file of ['compose.yaml','Caddyfile','issuer.mjs','.env.example']){
+    await cp(resolve(portal,'../turn_node',file),resolve(turnFiles,file==='.env.example'?'turn.env.example':file));
+  }
   await cp(source,resolve(destination,'chat'),{recursive:true});
   console.log('Portal packaged with mounted Flutter app: '+destination);
 }

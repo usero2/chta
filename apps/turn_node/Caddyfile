@@ -1,0 +1,5 @@
+{$TURN_HOST} {
+    @api path /ice /healthz
+    reverse_proxy @api issuer:8080
+    respond 404
+}

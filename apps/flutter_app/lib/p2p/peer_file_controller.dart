@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../account/account_models.dart';
 import '../chat/attachment_transfer.dart';
 import '../chat/attachment_ref.dart';
+import '../chat/chat_attachment.dart';
 import '../chat/file_offer.dart';
 import '../chat/chunked_attachment_bridge.dart';
 import '../chat/file_transfer_progress.dart';
@@ -99,6 +100,8 @@ class PeerFileController {
       link.ready &&
       link.peerId == _peer;
   bool get supportsLargeFiles => _capable;
+  bool get unmetered => ready && link.unmetered;
+  String get routeLabel => link.routeLabel;
   String? get peerId => _peer;
   bool _current(int generation, String peer) =>
       !_closed && generation == _generation && peer == _peer;
@@ -230,7 +233,9 @@ class PeerFileController {
       ownerId: ownerId,
       peerId: peer,
       bridge: cache,
-      isDirect: () => ready,
+      isDirect: () => unmetered,
+      verifyDirect: () async => ready && await link.verifyUnmetered() && ready,
+      transportLabel: () => ready ? routeLabel : 'Relay',
       validateOffer: validateFileOffer,
       checkIncoming: (id) {
         final message = history
@@ -406,7 +411,7 @@ class PeerFileController {
         (direct ? !ready : !_fallbackAuthenticated)) {
       return;
     }
-    await _transfer!.receive(id, text, direct: direct);
+    await _transfer!.receive(id, text, direct: direct && unmetered);
   }
 
   Future<void> sendDirectPacket(String id, String text, int? sentAt) async {
@@ -528,7 +533,13 @@ class PeerFileController {
           }
           final text = value['text'] as String;
           if (ResumableAttachmentTransfer.isPacketId(id)) {
-            await receiveFilePacket(id, text, direct: true);
+            unawaited(
+              receiveFilePacket(
+                id,
+                text,
+                direct: true,
+              ).catchError((Object _) {}),
+            );
           } else {
             await onPacket(
               id,
@@ -678,7 +689,7 @@ class PeerFileController {
         continue;
       }
       final size = message.attachmentRef!.size;
-      if (!ready && size > 25 * 1024 * 1024) {
+      if (!unmetered && size > ChatAttachment.relayMaxBytes) {
         progress[message.id] = TransferProgressSnapshot(
           confirmedBytes: (progress[message.id]?.confirmedBytes ?? 0).clamp(
             0,

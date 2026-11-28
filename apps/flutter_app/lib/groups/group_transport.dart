@@ -80,7 +80,12 @@ class GroupTransport extends ChangeNotifier {
   bool isDirect(String peer) =>
       connected(peer) &&
       _peers[peer]?.route == '@direct' &&
-      _peers[peer]!.link.ready;
+      _peers[peer]!.link.unmetered;
+  Future<bool> verifyDirect(String peer) async {
+    final link = _peers[peer]?.link;
+    if (link == null || _peers[peer]?.route != '@direct') return false;
+    return await link.verifyUnmetered() && isDirect(peer);
+  }
   Set<String> get onlinePeers =>
       _peers.values.where((p) => p.ready).map((p) => p.id).toSet();
 

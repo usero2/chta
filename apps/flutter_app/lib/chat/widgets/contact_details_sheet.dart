@@ -34,6 +34,10 @@ Future<void> showContactDetailsSheet(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
+                      'Signed name',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                    Text(
                       contact.signedName,
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
@@ -46,8 +50,10 @@ Future<void> showContactDetailsSheet(
             ],
           ),
           const SizedBox(height: 20),
-          _CopyDetail(label: 'Fingerprint', value: contact.fingerprint),
-          const SizedBox(height: 12),
+          if (contact.fingerprint.isNotEmpty) ...[
+            _CopyDetail(label: 'Fingerprint', value: contact.fingerprint),
+            const SizedBox(height: 12),
+          ],
           _CopyDetail(label: 'DID', value: contact.identityId),
         ],
       ),

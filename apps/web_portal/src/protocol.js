@@ -60,7 +60,6 @@ function payload(v) {
     requireThat(fps.length>0&&fps.every(fp=>/^(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}$/.test(fp)));
     const roles = [...p.d.matchAll(/(?:^|\n)a=setup:([^\r\n]+)/g)].map(m => m[1]);
     requireThat(roles.length > 0 && roles.every(role => v.kind === 'offer' ? role === 'actpass' : role === 'active' || role === 'passive'));
-    requireThat(!/\btyp\s+relay\b/i.test(p.d));
     for(const line of lines)if(line.startsWith('a=candidate:'))candidate(line.slice(2));
   } else {
     candidate(p.c);
@@ -71,8 +70,13 @@ function payload(v) {
 function candidate(value){
   requireThat(typeof value === 'string' && bytes(value) <= 2048 && !/[\r\n\0]/.test(value));
   const parts = value.trim().split(/\s+/);
-  requireThat(parts.length >= 8 && /^candidate:[A-Za-z0-9+/]{1,32}$/.test(parts[0]) && /^(udp|tcp)$/i.test(parts[2]) && parts[6] === 'typ' && /^(host|srflx|prflx)$/.test(parts[7]));
-  requireThat(/^\d+$/.test(parts[1]) && +parts[1] >= 1 && +parts[1] <= 256 && /^\d+$/.test(parts[3]) && +parts[3] <= 4294967295 && parts[4].length <= 253 && /^\d+$/.test(parts[5]) && +parts[5] >= 1 && +parts[5] <= 65535 && !/\btyp\s+relay\b/i.test(value));
+  requireThat(parts.length >= 8 && /^candidate:[A-Za-z0-9+/]{1,32}$/.test(parts[0]) && /^(udp|tcp)$/i.test(parts[2]) && parts[6] === 'typ' && /^(host|srflx|prflx|relay)$/.test(parts[7]));
+  requireThat(/^\d+$/.test(parts[1]) && +parts[1] >= 1 && +parts[1] <= 256 && /^\d+$/.test(parts[3]) && +parts[3] <= 4294967295 && parts[4].length <= 253 && /^\d+$/.test(parts[5]) && +parts[5] >= 1 && +parts[5] <= 65535);
+  requireThat(!parts.slice(8).some(part => part.toLowerCase() === 'typ'));
+  if(parts[7]==='relay'){
+    requireThat(/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(parts[4]) && parts[4].split('.').every(part => Number(part)<=255));
+    publicEndpoint('wss://'+parts[4]+'/cht');
+  }
 }
 export async function verifySignal(v, sender, now) {
   if(v?.version === 2 && v.topic === 'contacts')return verifyContactSignal(v,sender,now);

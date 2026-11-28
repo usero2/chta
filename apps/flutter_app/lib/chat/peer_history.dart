@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../account/account_models.dart';
 import 'chat_attachment.dart';
+import 'conversation_read_state.dart';
 import 'attachment_source.dart';
 import 'attachment_ref.dart';
 import 'attachment_store.dart';
@@ -142,6 +143,8 @@ class PeerHistory extends ChangeNotifier {
   final _deletedBefore = <String, int>{};
   final _names = <String, String>{};
   final _avatars = <String, String>{};
+  int _avatarRevision = 0;
+  int get avatarRevision => _avatarRevision;
   final _dirtyRooms = <String, int>{};
   int _saveRevision = 0;
   Future<void> _writes = Future.value();
@@ -195,6 +198,24 @@ class PeerHistory extends ChangeNotifier {
               !receivedFiles.contains(message.fileOffer?.fileId),
         )
         .toList();
+  }
+
+  Iterable<IncomingChatMarker> incomingForRead(String peerId) sync* {
+    final room = _rooms[peerId] ?? const <PeerMessage>[];
+    // An offer is replaced by the file once accepted. Retain one activity at
+    // the moment the offer appeared, even when the transfer finishes later.
+    final offers = {
+      for (final row in room)
+        if (row.incoming && row.fileOffer != null) row.fileOffer!.fileId,
+    };
+    for (final row in room) {
+      final at = row.receivedAtMilliseconds;
+      if (!row.incoming || row.repaired || at == null || !row.isVisible) {
+        continue;
+      }
+      if (row.hasAttachment && offers.contains(row.id)) continue;
+      yield (id: row.fileOffer?.fileId ?? row.id, at: at);
+    }
   }
 
   PeerMessage? messageById(String? peer, String id) =>
@@ -293,6 +314,7 @@ class PeerHistory extends ChangeNotifier {
     _deletedBefore.clear();
     _names.clear();
     _avatars.clear();
+    _avatarRevision++;
     _thumbnailJobs.clear();
     _dirtyRooms.clear();
     await _writes;
@@ -311,6 +333,7 @@ class PeerHistory extends ChangeNotifier {
       _names.addAll(
         (value['names'] as Map<String, dynamic>? ?? {}).cast<String, String>(),
       );
+      _avatarRevision++;
       _avatars.addAll(
         (value['avatars'] as Map<String, dynamic>? ?? {})
             .cast<String, String>(),
@@ -626,6 +649,7 @@ class PeerHistory extends ChangeNotifier {
           _avatars[contact.identityId] != contact.avatarBase64) {
         _names[contact.identityId] = contact.displayName;
         _avatars[contact.identityId] = contact.avatarBase64;
+        _avatarRevision++;
         updated = true;
       }
     }

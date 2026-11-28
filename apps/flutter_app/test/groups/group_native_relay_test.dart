@@ -4,9 +4,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cht/account/share_links.dart';
 import 'package:cht/groups/group_blob_bridge.dart';
 import 'package:cht/groups/group_controller.dart';
 import 'package:cht/groups/group_crypto_bridge.dart';
+import 'package:cht/groups/group_models.dart';
 import 'package:cht/groups/group_transport.dart';
 import 'package:cht/relay/relay_crypto_bridge.dart';
 import 'package:cht/relay/relay_network.dart';
@@ -212,12 +214,13 @@ void main() {
             ),
           );
         }
-        final gid = await controllers[0].createGroup('Synthetic group', [
-          identities[1],
-        ]);
-        await until(() => controllers[1].invitations.isNotEmpty);
+        final gid = await controllers[0].createGroup('Synthetic group', []);
+        final invite = await controllers[0].shareInvitation(gid, identities[1]);
+        final scanned = GroupInviteLink.parse(invite.toUri().toString());
+        expect(controllers[0].invitationForLink(scanned), isNull);
+        await until(() => controllers[1].invitationForLink(scanned) != null);
         await controllers[1].acceptInvitation(
-          controllers[1].invitations.single.id,
+          controllers[1].invitationForLink(scanned)!.id,
         );
         await until(
           () => controllers.every((c) => c.group(gid)?.members.length == 2),
@@ -248,13 +251,25 @@ void main() {
             .singleWhere((m) => m.manifest != null)
             .manifest!;
         await until(
-          () => controllers[1].progressFor(source.fileId)?.complete == true,
-          describe: () => 'Long Markdown was not reconstructed via relay',
+          () => controllers[1]
+              .messagesFor(gid)
+              .any((m) => m.manifest?.fileId == source.fileId),
+          describe: () => 'Long Markdown offer was not received via relay',
         );
         final received = controllers[1]
             .messagesFor(gid)
-            .singleWhere((m) => m.manifest?.fileId == source.fileId);
-        final document = await controllers[1].openFile(received.manifest!);
+            .singleWhere((m) => m.manifest?.fileId == source.fileId)
+            .manifest!;
+        expect(controllers[1].fileChoiceFor(received), GroupFileChoice.pending);
+        expect(
+          await controllers[1].chooseFile(received, GroupFileChoice.accepted),
+          isTrue,
+        );
+        await until(
+          () => controllers[1].progressFor(source.fileId)?.complete == true,
+          describe: () => 'Accepted Markdown was not reconstructed via relay',
+        );
+        final document = await controllers[1].openFile(received);
         expect(
           await utf8.decoder.bind(document.openRead()).join(),
           longMarkdown,

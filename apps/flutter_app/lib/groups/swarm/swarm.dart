@@ -543,6 +543,7 @@ class SwarmTransfer extends ChangeNotifier {
     required this.authorize,
     required this.peers,
     required this.isDirect,
+    this.verifyDirect,
     required this.send,
     required this.onComplete,
     this.canTransfer,
@@ -552,6 +553,7 @@ class SwarmTransfer extends ChangeNotifier {
   final FutureOr<bool> Function(String, SwarmManifest) authorize;
   final List<String> Function(SwarmManifest) peers;
   final bool Function(String) isDirect;
+  final Future<bool> Function(String)? verifyDirect;
   final Future<void> Function(String, String) send;
   final void Function(SwarmManifest) onComplete;
   final bool Function(SwarmManifest)? canTransfer;
@@ -683,6 +685,10 @@ class SwarmTransfer extends ChangeNotifier {
         throw const FormatException('Invalid request frame');
       }
       // Authorization is checked again after disk awaits, immediately before each send.
+      if (m.size > swarmMaxRelayBytes &&
+          !(await (verifyDirect?.call(peer) ?? Future.value(isDirect(peer))))) {
+        return;
+      }
       final piece = await cache.readPiece(m, index);
       final parts = (piece.bytes.length + swarmPartSize - 1) ~/ swarmPartSize;
       if (parts < 1 || parts > 32) {
@@ -690,6 +696,7 @@ class SwarmTransfer extends ChangeNotifier {
       }
       for (var p = 0; p < parts; p++) {
         if (!await authorize(peer, m) || !_canTransfer(m)) return;
+        if (m.size > swarmMaxRelayBytes && !isDirect(peer)) return;
         final start = p * swarmPartSize;
         await _emit(peer, {
           ..._base(m, 'part'),
@@ -748,6 +755,15 @@ class SwarmTransfer extends ChangeNotifier {
     }
     final pending = _assemblies[m.fileId]?[index];
     if (pending == null || pending.peer != peer || pending.partCount != count) {
+      return;
+    }
+    if (m.size > swarmMaxRelayBytes &&
+        !(part == 0
+            ? await (verifyDirect?.call(peer) ?? Future.value(isDirect(peer)))
+            : isDirect(peer))) {
+      return;
+    }
+    if (!_canTransfer(m) || !identical(_assemblies[m.fileId]?[index], pending)) {
       return;
     }
     if (part == 0) {

@@ -84,8 +84,21 @@ pub(crate) fn candidate(value: &str) -> bool {
         && !parts[4].is_empty()
         && parts[5].parse::<u16>().is_ok_and(|n| n > 0)
         && parts[6] == "typ"
-        && ["host", "srflx", "prflx"].contains(&parts[7])
-        && !parts.windows(2).any(|p| p[0] == "typ" && p[1] == "relay")
+        && ["host", "srflx", "prflx", "relay"].contains(&parts[7])
+        && !parts[8..].iter().any(|part| part.eq_ignore_ascii_case("typ"))
+        && (parts[7] != "relay" || public_relay_candidate(parts[4]))
+}
+fn public_relay_candidate(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_private() || ip.is_loopback() || ip.is_link_local()
+        || ip.is_documentation() || a == 0 || a >= 224
+        || a == 100 && (64..=127).contains(&b)
+        || a == 192 && b == 0
+        || a == 198 && (b == 18 || b == 19 || b == 51 && c == 100)
+        || a == 203 && b == 0 && c == 113)
 }
 pub(crate) fn description(value: &str, offer: bool) -> bool {
     let lines: Vec<_> = value.lines().map(|s| s.trim_end_matches('\r')).collect();

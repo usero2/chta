@@ -41,6 +41,51 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('received 1:1 messages share an avatar per run and open contact details', (tester) async {
+    tester.view.physicalSize = const Size(360, 720);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const peer = 'did:cht:peer';
+    final account = _FakeAccountBridge()..savedContacts.add(const ContactView(
+      identityId: peer,
+      displayName: 'Local Bob',
+      signedName: 'Signed Bob',
+      alias: 'Local Bob',
+      fingerprint: 'AA11-BB22',
+      verified: true,
+    ));
+    final history = PeerHistory(store: Store());
+    await history.load('did:cht:local');
+    for (var i = 0; i < 4; i++) {
+      history.add(peer, PeerMessage(
+        id: 'avatar-$i',
+        text: 'Avatar test $i',
+        incoming: i != 2,
+        status: DeliveryStatus.delivered,
+        sentAtMilliseconds: 100000 + i,
+      ));
+    }
+    await tester.pumpWidget(MaterialApp(home: ConnectionPage(
+      accountBridge: account,
+      bridge: _FakeP2pBridge(authenticated: true),
+      targetContactId: peer,
+      chatMode: true,
+      peerHistory: history,
+    )));
+    await tester.pumpAndSettle();
+    final avatars = find.byTooltip('View profile for Local Bob');
+    expect(avatars, findsNWidgets(2));
+    expect(tester.getTopLeft(find.byKey(const Key('peer-message-avatar-0'))).dx,
+        tester.getTopLeft(find.byKey(const Key('peer-message-avatar-1'))).dx);
+    await tester.tap(avatars.first);
+    await tester.pumpAndSettle();
+    expect(find.text('Signed Bob'), findsOneWidget);
+    expect(find.text('Local alias: Local Bob'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    history.dispose();
+  });
+
   testWidgets('a photo reply previews and jumps to its offscreen album photo', (
     tester,
   ) async {
@@ -457,8 +502,11 @@ void main() {
         );
         expect(find.byTooltip('Cancel reply'), findsNothing);
         await select('Edit');
-        await tester.enterText(find.byType(TextFormField), 'Edited body');
-        await tester.tap(find.text('Save'));
+        await tester.enterText(
+          find.byKey(const Key('peer-message-input')),
+          'Edited body',
+        );
+        await tester.tap(find.byTooltip('Save edit'));
         await tester.pumpAndSettle();
         expect(history.presentationFor('bob', 'original')?.text, 'Edited body');
         await select('Delete');
@@ -478,7 +526,7 @@ void main() {
     }),
   );
 
-  testWidgets('offline contact allows repeated and nested replies', (
+  testWidgets('offline contact allows repeated replies, edit and delete', (
     tester,
   ) async {
     final history = _CountingPeerHistory();
@@ -519,11 +567,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Copy'), findsOneWidget);
       expect(find.text('Reply'), findsOneWidget);
-      expect(find.text('Edit and delete need an updated app.'), findsOneWidget);
+      expect(find.text('Edit and delete need an updated app.'), findsNothing);
       final edit = tester.widget<TextButton>(
         find.widgetWithText(TextButton, 'Edit'),
       );
-      expect(edit.onPressed, isNull);
+      expect(edit.onPressed, isNotNull);
+      expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, 'Delete'))
+            .onPressed,
+        isNotNull,
+      );
       Future<PeerMessage> replyTo(String target, String text) async {
         await tester.tap(find.widgetWithText(TextButton, 'Reply'));
         await tester.pumpAndSettle();
@@ -553,6 +607,32 @@ void main() {
       );
       await tester.pumpAndSettle();
       await replyTo(first.id, 'Nested reply');
+
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      final input = find.byKey(const Key('peer-message-input'));
+      await tester.enterText(input, 'New message draft');
+      await tester.tap(find.widgetWithText(TextButton, 'Edit'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.text('Editing message'), findsOneWidget);
+      expect(tester.widget<TextField>(input).controller!.text, 'Original text');
+      await tester.enterText(input, 'Edited offline');
+      await tester.tap(find.byKey(const Key('send-peer-message')));
+      await tester.pumpAndSettle();
+      expect(history.presentationFor('bob', 'legacy')?.text, 'Edited offline');
+      expect(
+        tester.widget<TextField>(input).controller!.text,
+        'New message draft',
+      );
+
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(history.presentationFor('bob', 'legacy')?.deleted, isTrue);
     } finally {
       await tester.pumpWidget(const SizedBox());
       await service.close();

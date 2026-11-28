@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../account/account_bridge.dart';
+import '../p2p/ice_route.dart';
 import '../relay/relay_crypto_bridge.dart';
 import '../relay/relay_network.dart';
 import '../relay/relay_socket.dart';
@@ -72,10 +73,6 @@ class GroupSeedClient extends ChangeNotifier {
     r'^a=fingerprint:sha-256 (?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}\r?$',
     multiLine: true,
   );
-  static final _relayCandidate = RegExp(
-    r'\btyp\s+relay\b',
-    caseSensitive: false,
-  );
   static bool _currentPayload(String id, String text) {
     try {
       final packet = jsonDecode(text);
@@ -121,7 +118,7 @@ class GroupSeedClient extends ChangeNotifier {
           !RegExp(r'^v=0\r?\n').hasMatch(d) ||
           d.contains('\x00') ||
           !_fingerprint.hasMatch(d) ||
-          _relayCandidate.hasMatch(d)) {
+          !validTurnDescription(d)) {
         return false;
       }
       final roles = RegExp(r'(?:^|\n)a=setup:([^\r\n]+)')
@@ -158,7 +155,7 @@ class GroupSeedClient extends ChangeNotifier {
         !RegExp(r'^candidate:[A-Za-z0-9+/]{1,32}$').hasMatch(p[0]) ||
         !['udp', 'tcp'].contains(p[2].toLowerCase()) ||
         p[6] != 'typ' ||
-        !['host', 'srflx', 'prflx'].contains(p[7])) {
+        !['host', 'srflx', 'prflx', 'relay'].contains(p[7])) {
       return false;
     }
     final component = int.tryParse(p[1]),
@@ -174,7 +171,7 @@ class GroupSeedClient extends ChangeNotifier {
         port != null &&
         port >= 1 &&
         port <= 65535 &&
-        !_relayCandidate.hasMatch(value);
+        (!relayIceType.hasMatch(value) || validTurnCandidate(value));
   }
 
   bool _current(int generation) =>

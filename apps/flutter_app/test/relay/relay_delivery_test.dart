@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cht/relay/relay_chat.dart';
 import 'package:cht/relay/relay_network.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -23,6 +25,56 @@ class _DeduplicatingAccount extends f.SessionAccount {
 }
 
 void main() {
+  test('one unacknowledged file stream does not hold other relay sends', () async {
+    final hub = f.Hub(f.a, 'relay-a');
+    final left = RelayNetwork(f.Crypto('alice'), connector: hub.connect);
+    final right = RelayNetwork(f.Crypto('bob'), connector: hub.connect);
+    final alice = RelayChat(
+      f.SessionAccount('alice', 'bob'), left, ownCard: () async => 'alice',
+    );
+    final bob = RelayChat(
+      f.SessionAccount('bob', 'alice'), right, ownCard: () async => 'bob',
+    );
+    const part = '{"v":2,"type":"part"}';
+    const blockedId = 'chtfile2_slow_file_4';
+    final observed = Completer<void>();
+    Future<void>? blocked;
+    try {
+      await left.addSeed(f.a);
+      await right.addSeed(f.a);
+      alice.select('bob');
+      bob.select('alice');
+      await f.until(() => alice.authenticated && bob.authenticated);
+      for (var i = 0; i < 4; i++) {
+        await alice.sendMessage('chtfile2_slow_file_$i', part, 1000);
+      }
+      blocked = alice.sendMessage(blockedId, part, 1000).whenComplete(() {
+        observed.complete();
+      });
+      unawaited(blocked.catchError((Object _) {}));
+      await alice.sendMessage('text-bypasses-file', 'chat', 1000);
+      await alice.sendMessage('chtfile2_other_file_0', part, 1000);
+      bool received(String id) => bob.events.any(
+        (e) => e.type == 'message' && e.messageId == id,
+      );
+      await f.until(() => received('chtfile2_other_file_0'));
+      expect(received('text-bypasses-file'), isTrue);
+      expect(received(blockedId), isFalse);
+      expect(observed.isCompleted, isFalse);
+      await bob.acknowledge('chtfile2_other_file_0', 2000);
+      await f.until(() => alice.events.any(
+        (event) => event.messageId == 'chtfile2_other_file_0' && event.type == 'delivered',
+      ));
+      expect(observed.isCompleted, isFalse);
+      await bob.acknowledge('chtfile2_slow_file_0', 2000);
+      await blocked.timeout(const Duration(seconds: 2));
+      await f.until(() => received(blockedId));
+    } finally {
+      await alice.close();
+      await bob.close();
+      await blocked?.catchError((Object _) {});
+    }
+  });
   test(
     'authenticated relay receipt reaches a message originally sent on Direct',
     () async {

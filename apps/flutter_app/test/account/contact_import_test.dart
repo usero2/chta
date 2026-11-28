@@ -2,6 +2,8 @@ import 'package:cht/account/account_bridge.dart';
 import 'package:cht/account/account_models.dart';
 import 'package:cht/account/contacts_page.dart';
 import 'package:cht/account/contact_qr_files.dart';
+import 'package:cht/account/share_links.dart';
+import 'package:cht/account/share_link_inbox.dart';
 import 'package:cht/profile/profile_controller.dart';
 import 'package:cht/profile/profile_store.dart';
 import 'package:flutter/material.dart';
@@ -77,6 +79,109 @@ class _Bridge implements AccountBridge {
 }
 
 void main() {
+  test(
+    'HTTPS wrappers preserve contact and recipient-bound group magnet payloads',
+    () {
+      const card = '{"displayName":"Mali","signature":"synthetic"}';
+      final link = Uri.parse(shareWebLink(contactMagnetLink(card)));
+      expect(link.host, 'chta.app');
+      expect(link.path, '/share/');
+      expect(link.hasQuery, isFalse);
+      expect(contactCardFromShare(link.toString()), card);
+      final group = GroupInviteLink(
+        invitationId: 'a' * 32,
+        groupId: 'group:${'b' * 64}',
+        ownerId: 'did:cht:${'c' * 64}',
+        recipientId: 'did:cht:${'d' * 64}',
+      );
+      final groupShare = shareWebLink(group.toUri().toString());
+      expect(isGroupMagnetLink(groupShare), isTrue);
+      expect(GroupInviteLink.parse(groupShare).recipientId, group.recipientId);
+      expect(magnetFromShareToken('invalid'), isNull);
+    },
+  );
+
+  testWidgets('a launch link opens signed-card review after Contacts mounts', (
+    tester,
+  ) async {
+    final profile = ProfileController(_Store());
+    await profile.load();
+    pendingShareLink.value = contactMagnetLink('{"remote":"from link"}');
+    addTearDown(() => pendingShareLink.value = null);
+    var routed = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ContactsPage(
+          bridge: _Bridge(),
+          identity: _identity,
+          profileController: profile,
+          onChat: (_) {},
+          onOpenSharedLink: () => routed = true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(routed, isTrue);
+    expect(find.text('Add Remote friend'), findsOneWidget);
+    expect(pendingShareLink.value, isNull);
+  });
+
+  testWidgets(
+    'phone contacts keep the share actions compact and build friends on demand',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _Bridge();
+      bridge.saved.addAll(
+        List.generate(
+          100,
+          (i) => ContactView(
+            identityId: 'did:cht:friend-$i',
+            displayName: 'Friend $i',
+            fingerprint: 'ABC-$i',
+            verified: true,
+          ),
+        ),
+      );
+      final profile = ProfileController(_Store());
+      await profile.load();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ContactsPage(
+            bridge: bridge,
+            identity: _identity,
+            onChat: (_) {},
+            profileController: profile,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final qr = find.byKey(const Key('my-contact-qr'));
+      final copy = find.byKey(const Key('copy-contact-link'));
+      expect(tester.getCenter(qr).dx, 180);
+      expect(
+        tester.getTopLeft(copy).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(qr).dy),
+      );
+      expect(
+        find.byKey(const Key('friend-avatar-did:cht:friend-0')),
+        findsOneWidget,
+      );
+      final last = find.byKey(const Key('friend-avatar-did:cht:friend-99'));
+      expect(last, findsNothing);
+      await tester.scrollUntilVisible(
+        last,
+        600,
+        scrollable: find.byType(Scrollable).first,
+        maxScrolls: 50,
+      );
+      expect(last, findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'contact and relay QR keep a thin opaque four-module white border',
     (tester) async {
@@ -314,7 +419,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byKey(const Key('friend-card-input')),
-        '{"remote":"card"}',
+        'magnet:?xt=urn%3Achta%3Acontact%3A1&x.chta-card=eyJyZW1vdGUiOiJjYXJkIn0',
       );
       await tester.tap(find.text('Check card'));
       await tester.pumpAndSettle();

@@ -1,5 +1,5 @@
 relay.example.com {
-    @relay path /cht
+    @relay path /cht /healthz
     reverse_proxy @relay relay:4002
     respond "Not found" 404
 }

@@ -5,10 +5,14 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
+import '../account/share_links.dart';
 import '../chat/attachment_store.dart';
 import '../chat/chat_attachment.dart';
 import '../chat/chat_models.dart';
+import '../chat/conversation_read_state.dart';
 import '../chat/file_offer_cover.dart';
+import '../chat/link_preview.dart';
+import '../chat/link_preview_service.dart';
 import '../chat/peer_message_action.dart';
 import '../delivery/gap_repair.dart';
 import '../delivery/peer_gap_repair.dart' show ProtectedGapCursor;
@@ -36,6 +40,7 @@ class GroupController extends ChangeNotifier {
     required this.attachments,
     required this.displayName,
     this.notifications,
+    this.linkPreviews,
   }) {
     cache = SparseSwarmCache(ownerId, blobs: blobs, attachments: attachments);
     swarm = SwarmTransfer(
@@ -44,6 +49,7 @@ class GroupController extends ChangeNotifier {
       authorize: _authorizeFile,
       peers: _filePeers,
       isDirect: (peer) => _transport?.isDirect(peer) == true,
+      verifyDirect: (peer) async => await _transport?.verifyDirect(peer) == true,
       send: (peer, text) => _transport!.send(peer, text),
       onComplete: _fileComplete,
       canTransfer: canFetchFile,
@@ -56,6 +62,7 @@ class GroupController extends ChangeNotifier {
   final AttachmentStore attachments;
   final String Function() displayName;
   final IncomingNotifications? notifications;
+  final LinkPreviewService? linkPreviews;
   late final SparseSwarmCache cache;
   late final SwarmTransfer swarm;
   GroupTransport? _transport;
@@ -189,6 +196,18 @@ class GroupController extends ChangeNotifier {
       return order == 0 ? a.compareTo(b) : order;
     });
     return List.unmodifiable([for (final index in indices) messages[index]]);
+  }
+
+  Iterable<IncomingChatMarker> incomingForRead(String groupId) sync* {
+    for (final message in _rooms[groupId] ?? const <GroupMessage>[]) {
+      final at = message.receivedAt;
+      if (at != null &&
+          message.senderId != ownerId &&
+          !message.repaired &&
+          message.isVisible) {
+        yield (id: message.key, at: at);
+      }
+    }
   }
 
   List<GroupMessage> deliveryPage(String id, int offset) => List.unmodifiable(
@@ -721,21 +740,50 @@ class GroupController extends ChangeNotifier {
   });
   String get _name =>
       displayName().trim().isEmpty ? 'Member' : displayName().trim();
-  Future<void> _invite(String gid, String peer) async {
+  Future<String> _invite(String gid, String peer) async {
     final result = await crypto.groupCall('invite', {
       'groupId': gid,
       'peerId': peer,
       'now': DateTime.now().millisecondsSinceEpoch,
     });
-    await _job(peer, {'type': 'invite', 'source': result['invite']});
+    final source = result['invite'] as String;
+    await _job(peer, {'type': 'invite', 'source': source});
+    return _invitationId(source);
   }
 
-  Future<void> invite(String gid, String peer) => _run(() async {
-    await _invite(gid, peer);
-    await _saveIndex();
-    _changed();
-    unawaited(_pulse());
-  });
+  String _invitationId(String source) =>
+      sha256.convert(utf8.encode(source)).toString().substring(0, 32);
+
+  Future<void> invite(String gid, String peer) async {
+    await shareInvitation(gid, peer);
+  }
+
+  Future<GroupInviteLink> shareInvitation(String gid, String peer) =>
+      _run(() async {
+        final id = await _invite(gid, peer);
+        await _saveIndex();
+        _changed();
+        unawaited(_pulse());
+        return GroupInviteLink(
+          invitationId: id,
+          groupId: gid,
+          ownerId: ownerId,
+          recipientId: peer,
+        );
+      });
+
+  GroupInvitation? invitationForLink(GroupInviteLink link) {
+    final invite = _invitations[link.invitationId];
+    if (link.recipientId != ownerId ||
+        invite == null ||
+        invite.groupId != link.groupId ||
+        invite.ownerId != link.ownerId ||
+        invite.expiresAt <= DateTime.now().millisecondsSinceEpoch) {
+      return null;
+    }
+    return invite;
+  }
+
   Future<void> acceptInvitation(String id) => _run(() async {
     final invite = _invitations[id];
     if (invite == null) return;
@@ -850,6 +898,9 @@ class GroupController extends ChangeNotifier {
           utf8.encode(jsonEncode(payload)).length > _maxGroupTextPayloadBytes) {
         return await sendBatch(gid, '', [ChatAttachment.longMessage(text)]);
       }
+      if (linkPreviews case final previews?) {
+        payload['text'] = await previews.prepare(trimmed, fits: _groupTextFits);
+      }
       return await _run(() async {
         await _post(gid, 'message', payload);
         return true;
@@ -872,6 +923,14 @@ class GroupController extends ChangeNotifier {
     String? text,
   }) async {
     try {
+      if (text != null && linkPreviews != null && canSend(gid)) {
+        text = await linkPreviews!.prepare(
+          text,
+          fits: (value) => _groupTextFits(
+            PeerMessageAction(kind, target.key, value).encode(),
+          ),
+        );
+      }
       return await _run(() async {
         final rows = _rooms[gid] ?? const <GroupMessage>[];
         if (!supportsMessageActions(gid) ||
@@ -920,6 +979,9 @@ class GroupController extends ChangeNotifier {
     }
   }
 
+  static bool _groupTextFits(String text) =>
+      utf8.encode(jsonEncode({'text': text})).length <= _maxGroupTextPayloadBytes;
+
   Future<bool> sendBatch(
     String gid,
     String caption,
@@ -937,10 +999,13 @@ class GroupController extends ChangeNotifier {
         final file = files[index].withPresentation(
           caption: index == 0 ? caption : files[index].caption,
         );
-        // Older clients reject unknown manifest fields. Send the optional
-        // cover once each current member has advertised support.
-        final cover = g.members.every((m) => supportsFileOffers(m.identityId))
-            ? await buildFileOfferCover(file)
+        final cover = await buildFileOfferCover(file);
+        // Older clients reject unknown manifest fields. Mixed-version rooms
+        // carry the thumbnail beside the signed event without changing its
+        // manifest hash, which every download piece depends on.
+        final embeddedCover =
+            g.members.every((m) => supportsFileOffers(m.identityId))
+            ? cover
             : null;
         final manifest = await cache.importFile(
           groupId: gid,
@@ -948,11 +1013,18 @@ class GroupController extends ChangeNotifier {
           uploaderId: ownerId,
           fileId: groupRandomId(),
           file: file,
-          cover: cover,
+          cover: embeddedCover,
         );
         _check(generation);
         if ((_roomGenerations[gid] ?? 0) != roomGeneration) return false;
-        await _run(() => _post(gid, 'file', manifest.toJson()));
+        await _run(
+          () => _post(
+            gid,
+            'file',
+            manifest.toJson(),
+            previewCover: embeddedCover == null ? cover : null,
+          ),
+        );
       }
       return true;
     } catch (_) {
@@ -970,6 +1042,7 @@ class GroupController extends ChangeNotifier {
     Map<String, Object?> payload, {
     String? messageId,
     int? sentAt,
+    String? previewCover,
   }) async {
     if (!canSend(gid)) throw StateError('Group unavailable');
     final g = _groups[gid]!,
@@ -1009,13 +1082,19 @@ class GroupController extends ChangeNotifier {
       sentAt: time,
       recipients: recipients,
       manifest: manifest,
+      previewCover: previewCover,
     );
+    final eventBody = <String, dynamic>{
+      'type': 'event',
+      'source': event,
+      'fileCover': ?previewCover,
+    };
     final estimate = recipients
         .map(
           (peer) => GroupControlJob(
             id: '0' * 32,
             peerId: peer,
-            body: {'type': 'event', 'source': event},
+            body: eventBody,
           ),
         )
         .toList();
@@ -1027,7 +1106,7 @@ class GroupController extends ChangeNotifier {
     final staged = <GroupControlJob>[];
     try {
       for (final peer in recipients) {
-        staged.add(await _makeJob(peer, {'type': 'event', 'source': event}));
+        staged.add(await _makeJob(peer, eventBody));
       }
       final room = [...?_rooms[gid], m],
           rooms = {..._rooms, gid: room},
@@ -1180,10 +1259,7 @@ class GroupController extends ChangeNotifier {
         if (info['ownerId'] != peer) {
           throw const FormatException('Wrong invitation owner');
         }
-        final id = sha256
-            .convert(utf8.encode(source))
-            .toString()
-            .substring(0, 32);
+        final id = _invitationId(source);
         if (_invitations.length >= 32 && !_invitations.containsKey(id)) {
           throw StateError('Too many group invitations');
         }
@@ -1239,7 +1315,12 @@ class GroupController extends ChangeNotifier {
         if (!canSend(gid)) _cancelGroupJobs(gid);
         await _finishLeftMemberships();
       case 'event':
-        await _event(peer, body['source'] as String);
+        final cover = body['fileCover'];
+        await _event(
+          peer,
+          body['source'] as String,
+          previewCover: cover is String ? cover : null,
+        );
       default:
         throw const FormatException('Unsupported group control');
     }
@@ -1251,6 +1332,7 @@ class GroupController extends ChangeNotifier {
     int? receivedAt,
     Map<String, Object?>? deliveryEnvelope,
     bool repair = false,
+    String? previewCover,
   }) async {
     final e = await crypto.groupCall('inspect', {'event': source});
     final gid = e['groupId'] as String,
@@ -1350,6 +1432,12 @@ class GroupController extends ChangeNotifier {
       }
       room.add(message);
     }
+    final mimeType = message.manifest?.mimeType.toLowerCase() ?? '';
+    if (message.fileCover == null &&
+        (mimeType.startsWith('image/') || mimeType.startsWith('video/')) &&
+        decodeFileOfferCover(previewCover) != null) {
+      message.previewCover = previewCover;
+    }
     message.deliveryEnvelope ??= deliveryEnvelope;
     _pendingHistory.add(message);
     if (repair) {
@@ -1374,7 +1462,7 @@ class GroupController extends ChangeNotifier {
         peerId: gid,
         displayName: '${g.name} · ${message.senderName}',
         messageId: key,
-        messageText: message.text,
+        messageText: readLinkPreview(message.body).text,
       );
     }
   }

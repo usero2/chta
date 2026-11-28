@@ -22,17 +22,25 @@ Future<String?> buildFileOfferCover(ChatAttachment attachment) async {
   try {
     switch (attachment.kind) {
       case 'image':
-        final bytes = await _imageBytes(attachment);
-        return bytes == null ? null : await _encodeCover(bytes);
+        final bytes = await _mediaBytes(attachment);
+        return bytes == null ? null : await encodePreviewJpeg(bytes);
       case 'video':
-        if (attachment.isStreamed || !_isVideoContainer(attachment.bytes)) {
-          return null;
-        }
+        final bytes = await _mediaBytes(attachment);
+        if (bytes == null || !_isVideoContainer(bytes)) return null;
+        // Group caches expose even small completed files as streams. Give the
+        // local-only decoder an owned copy only within the existing size cap.
+        final media = attachment.isStreamed
+            ? ChatAttachment.fromOwnedBytes(
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                bytes: bytes,
+              )
+            : attachment;
         final thumbnail = await createMediaThumbnail(
-          attachment,
+          media,
           localOnly: true,
         );
-        return thumbnail == null ? null : await _encodeCover(thumbnail);
+        return thumbnail == null ? null : await encodePreviewJpeg(thumbnail);
       default:
         return null;
     }
@@ -64,7 +72,7 @@ Uint8List? decodeFileOfferCover(String? cover) {
   }
 }
 
-Future<Uint8List?> _imageBytes(ChatAttachment attachment) async {
+Future<Uint8List?> _mediaBytes(ChatAttachment attachment) async {
   if (!attachment.isStreamed) return attachment.bytes;
   final size = attachment.size;
   final bytes = BytesBuilder();
@@ -86,7 +94,11 @@ bool _isVideoContainer(Uint8List bytes) {
           header.getUint32(8) == 0x41564920); // AVI
 }
 
-Future<String?> _encodeCover(Uint8List bytes) async {
+Future<String?> encodePreviewJpeg(
+  Uint8List bytes, {
+  int maxBytes = maxFileOfferCoverBytes,
+  int maxPixels = _maxInputPixels,
+}) async {
   ui.ImmutableBuffer? buffer;
   ui.ImageDescriptor? descriptor;
   ui.Codec? codec;
@@ -105,7 +117,7 @@ Future<String?> _encodeCover(Uint8List bytes) async {
       width = descriptor.width;
       height = descriptor.height;
     }
-    if (width <= 0 || height <= 0 || width * height > _maxInputPixels) {
+    if (width <= 0 || height <= 0 || width * height > maxPixels) {
       return null;
     }
     final scale = math.min(1.0, _maxCoverEdge / math.max(width, height));
@@ -135,7 +147,7 @@ Future<String?> _encodeCover(Uint8List bytes) async {
       final thumbnail = _resize(raster, edge);
       for (final quality in [70, 48, 30]) {
         final cover = image.encodeJpg(thumbnail, quality: quality);
-        if (cover.length <= maxFileOfferCoverBytes) return base64Encode(cover);
+        if (cover.length <= maxBytes) return base64Encode(cover);
       }
     }
     return null;

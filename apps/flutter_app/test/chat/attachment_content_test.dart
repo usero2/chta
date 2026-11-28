@@ -1,13 +1,61 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cht/chat/attachment_ref.dart';
 import 'package:cht/chat/chat_attachment.dart';
 import 'package:cht/chat/peer_history.dart';
 import 'package:cht/chat/widgets/attachment_content.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as image;
 
 void main() {
+  testWidgets(
+    'an accepted MP4 keeps its offered cover while receiving chunks',
+    (tester) async {
+      final history = PeerHistory();
+      addTearDown(history.dispose);
+      final thumbnail = image.Image(width: 2, height: 2);
+      image.fill(thumbnail, color: image.ColorRgb8(30, 50, 120));
+      final cover = base64Encode(image.encodeJpg(thumbnail));
+      final message = PeerMessage(
+        id: 'pending-video',
+        text: '',
+        incoming: true,
+        status: DeliveryStatus.pending,
+        attachmentRef: AttachmentRef(
+          name: 'pending.mp4',
+          mimeType: 'video/mp4',
+          size: 160000,
+          digest: 'a' * 64,
+          chunkedId: 'synthetic-video-cache',
+          chunkSize: 8192,
+        ),
+      );
+      Widget view(String progress) => MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 190,
+            child: CachedAttachmentContent(
+              history: history,
+              message: message,
+              offeredCover: cover,
+              transfer: Text(progress),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(view('Receiving 10%'));
+      final original = tester.widget<Image>(find.byType(Image)).image;
+      await tester.pumpWidget(view('Receiving 60%'));
+      expect(find.text('Receiving 60%'), findsOneWidget);
+      expect(find.text('pending.mp4'), findsOneWidget);
+      expect(tester.widget<Image>(find.byType(Image)).image, same(original));
+      expect(find.byTooltip('Save copy'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'legacy image uses an unframed media preview with its caption below',
     (tester) async {

@@ -43,6 +43,8 @@ class ResumableAttachmentTransfer {
     required this.bridge,
     required this.sendPacket,
     required this.isDirect,
+    this.transportLabel,
+    this.verifyDirect,
     required this.onOffer,
     required this.onCompleted,
     this.onProgress,
@@ -55,6 +57,8 @@ class ResumableAttachmentTransfer {
   final ChunkedAttachmentBridge bridge;
   final ResumablePacketSender sendPacket;
   final bool Function() isDirect;
+  final String Function()? transportLabel;
+  final Future<bool> Function()? verifyDirect;
   final IncomingFileOffer onOffer;
   final IncomingFileComplete onCompleted;
   final void Function(String id, TransferProgressSnapshot value, bool incoming)?
@@ -65,10 +69,12 @@ class ResumableAttachmentTransfer {
   final void Function(String id, int receivedAt)? onReceipt;
   static const prefix = 'chtfile2_';
   static const pieceSize = 8 * 1024;
+  static const _maxIncoming = 8;
+  static const _maxQueuedPerFile = 64;
   static bool isPacketId(String? id) => id?.startsWith(prefix) == true;
   final _outgoing = <String, _Outgoing>{};
   final _incoming = <String, _Incoming>{};
-  Future<void> _receiving = Future.value();
+  final _receiving = <String, _ReceiveLane>{};
   bool _closed = false;
   int _generation = 0, _sequence = 0;
   bool get active => _outgoing.isNotEmpty || _incoming.isNotEmpty;
@@ -116,7 +122,7 @@ class ResumableAttachmentTransfer {
           confirmedBytes: done,
           totalBytes: total,
           bytesPerSecond: rate,
-          transport: isDirect() ? 'Direct' : 'Relay',
+          transport: transportLabel?.call() ?? (isDirect() ? 'Direct' : 'Relay'),
           phase: phase,
         ),
         incoming,
@@ -139,9 +145,6 @@ class ResumableAttachmentTransfer {
     if (_outgoing.length >= 5) {
       throw const TransferInterrupted('Too many active transfers');
     }
-    if (ref.size > ChatAttachment.relayMaxBytes && !isDirect()) {
-      throw const TransferInterrupted('Waiting for a direct connection');
-    }
     final generation = _generation;
     final job = _Outgoing(ref);
     // Reserve synchronously: status can involve slow disk or IndexedDB reads.
@@ -149,6 +152,11 @@ class ResumableAttachmentTransfer {
     final clock = Stopwatch()..start();
     var baseline = 0;
     try {
+      _guardSend(generation, job);
+      if (ref.size > ChatAttachment.relayMaxBytes &&
+          !(await (verifyDirect?.call() ?? Future.value(isDirect())))) {
+        throw const TransferInterrupted('Waiting for a direct connection');
+      }
       _guardSend(generation, job);
       final ChunkedAttachmentState cached;
       try {
@@ -181,9 +189,11 @@ class ResumableAttachmentTransfer {
       final count = chunkCount(ref.size, ref.chunkSize!);
       while (next < count) {
         _guardSend(generation, job);
-        if (ref.size > ChatAttachment.relayMaxBytes && !isDirect()) {
+        if (ref.size > ChatAttachment.relayMaxBytes &&
+            !(await (verifyDirect?.call() ?? Future.value(isDirect())))) {
           throw const TransferInterrupted('Waiting for a direct connection');
         }
+        _guardSend(generation, job);
         final block = await bridge.readChunkedAttachment(
           ownerId,
           ref.chunkedId!,
@@ -294,14 +304,26 @@ class ResumableAttachmentTransfer {
       _control(value);
       return;
     }
+    final id = value['id'] as String;
+    final existing = _receiving[id];
+    if (existing == null && !_incoming.containsKey(id)) {
+      if (type != 'offer' ||
+          _incoming.length +
+                  _receiving.keys.where((key) => !_incoming.containsKey(key)).length >=
+              _maxIncoming) {
+        return;
+      }
+    }
+    final lane = existing ?? (_receiving[id] = _ReceiveLane());
+    if (lane.queued >= _maxQueuedPerFile) return;
+    lane.queued++;
     final generation = _generation;
-    final pending = _receiving.then((_) async {
+    final pending = lane.tail.then((_) async {
       if (_closed || generation != _generation) return;
       try {
         await _receive(value, direct, generation);
       } catch (error) {
         if (_closed || generation != _generation) return;
-        final id = value['id'] as String;
         final job = _incoming.remove(id);
         _progress(
           id,
@@ -324,8 +346,12 @@ class ResumableAttachmentTransfer {
         } catch (_) {}
       }
     });
-    _receiving = pending.catchError((Object _) {});
-    await pending;
+    lane.tail = pending.catchError((Object _) {});
+    try {
+      await pending;
+    } finally {
+      if (--lane.queued == 0) _receiving.remove(id);
+    }
   }
 
   void _control(Map<String, dynamic> value) {
@@ -400,7 +426,7 @@ class ResumableAttachmentTransfer {
             chunkCount(size, chunkSize) > 100000) {
           throw const TransferRejected('Invalid file block size');
         }
-        if (_incoming.length >= 8 && !_incoming.containsKey(id)) {
+        if (_incoming.length >= _maxIncoming && !_incoming.containsKey(id)) {
           throw const TransferRejected('Too many incoming files');
         }
         final localId = sha256.convert(utf8.encode('$peerId:$id')).toString();
@@ -477,9 +503,6 @@ class ResumableAttachmentTransfer {
       case 'part':
         final job = _incoming[id];
         if (job == null) return;
-        if (job.ref.size > ChatAttachment.relayMaxBytes && !direct) {
-          throw const TransferInterrupted();
-        }
         final block = value['block'],
             part = value['part'],
             parts = value['parts'],
@@ -493,6 +516,14 @@ class ResumableAttachmentTransfer {
             !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash) ||
             data.length > ((pieceSize + 2) ~/ 3) * 4) {
           throw const TransferRejected('Invalid file piece');
+        }
+        if (job.ref.size > ChatAttachment.relayMaxBytes) {
+          if (!direct ||
+              part == 0 &&
+                  !(await (verifyDirect?.call() ?? Future.value(isDirect())))) {
+            throw const TransferInterrupted();
+          }
+          _guardIncoming(id, job, generation);
         }
         if (block < job.next) {
           if (part == parts - 1) {
@@ -650,4 +681,9 @@ class _Incoming {
   List<Uint8List?>? pieces;
   String? blockDigest;
   final clock = Stopwatch()..start();
+}
+
+class _ReceiveLane {
+  Future<void> tail = Future.value();
+  int queued = 0;
 }

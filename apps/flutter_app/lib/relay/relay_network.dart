@@ -92,6 +92,7 @@ class RelayNetwork extends ChangeNotifier {
     RelayConnector? connector,
     int Function()? clock,
     this.bootstrapRelays = const {},
+    this.handoverProbeTimeout = const Duration(seconds: 3),
     RelayProviderPolicy? providerPolicy,
   }) : connector = connector ?? openRelaySocket,
        providerPolicy = providerPolicy ?? RelayProviderPolicy(),
@@ -100,6 +101,7 @@ class RelayNetwork extends ChangeNotifier {
   final Map<String, String> bootstrapRelays;
   final RelayProviderPolicy providerPolicy;
   final RelayConnector connector;
+  final Duration handoverProbeTimeout;
   final int Function() _clock;
   final _activity = <String, RelayActivity>{};
   final _userLockedRelays = <String>{};
@@ -230,6 +232,7 @@ class RelayNetwork extends ChangeNotifier {
   final _failures = <String, (int, int)>{};
   Timer? _timer;
   Timer? _heartbeatTimer;
+  Timer? _poolRefillTimer;
   Timer? _saveTimer;
   bool _closed = false;
   bool _ticking = false;
@@ -272,6 +275,7 @@ class RelayNetwork extends ChangeNotifier {
       if (_links.length <= connectionLimit) break;
       if (_inUse(entry.key)) continue;
       _links.remove(entry.key);
+      entry.value.handoverProbe?.cancel();
       unawaited(entry.value.subscription?.cancel());
       unawaited(entry.value.socket?.close());
     }
@@ -691,6 +695,7 @@ class RelayNetwork extends ChangeNotifier {
     _preferredRoutes.remove(endpoint);
     final link = _links.remove(endpoint);
     if (link != null) {
+      link.handoverProbe?.cancel();
       await link.subscription?.cancel();
       await link.socket?.close();
       onDisconnected?.call(endpoint);
@@ -767,6 +772,8 @@ class RelayNetwork extends ChangeNotifier {
   Future<void> _tick({required bool refresh}) async {
     if (_closed || _ticking) return;
     _ticking = true;
+    _poolRefillTimer?.cancel();
+    _poolRefillTimer = null;
     try {
       final catalogLinks = _links.values
           .where((link) => link.catalogSubscribed)
@@ -872,10 +879,26 @@ class RelayNetwork extends ChangeNotifier {
         _dial(preferred);
         started = true;
       }
+      _schedulePoolRefill(candidates);
       if (started && !_closed) notifyListeners();
     } finally {
       _ticking = false;
     }
+  }
+
+  void _schedulePoolRefill(Iterable<String> candidates) {
+    if (_links.length >= _poolTarget) return;
+    final time = now;
+    final deadlines = candidates
+        .where((endpoint) => !_links.containsKey(endpoint))
+        .map((endpoint) => _failures[endpoint]?.$2)
+        .whereType<int>()
+        .where((deadline) => deadline > time);
+    if (deadlines.isEmpty) return;
+    _poolRefillTimer = Timer(
+      Duration(milliseconds: deadlines.reduce(min) - time),
+      () => unawaited(_tick(refresh: false)),
+    );
   }
 
   String? _providerDomain(String url) =>
@@ -911,6 +934,7 @@ class RelayNetwork extends ChangeNotifier {
     for (final entry in _links.entries.toList()) {
       if (kept.contains(entry.key)) continue;
       _links.remove(entry.key);
+      entry.value.handoverProbe?.cancel();
       unawaited(entry.value.subscription?.cancel());
       unawaited(entry.value.socket?.close());
     }
@@ -922,12 +946,21 @@ class RelayNetwork extends ChangeNotifier {
   Future<void> recoverNetwork({bool force = true}) async {
     if (_closed) return;
     final handover = force
-        ? _links.keys.where((url) => !_inUse(url)).lastOrNull ??
-              _links.keys.lastOrNull
+        ? _links.keys.where((url) => !_inUse(url)).lastOrNull
         : null;
     for (final entry in _links.entries.toList()) {
-      if (entry.key == handover || _isStale(entry.value)) {
-        _disconnect(entry.key, entry.value);
+      final endpoint = entry.key, link = entry.value;
+      if (endpoint == handover || _isStale(link)) {
+        _disconnect(endpoint, link);
+      } else if (force && link.registered && link.handoverProbe == null) {
+        if (send(endpoint, {'type': 'keepalive'})) {
+          link.handoverProbe = Timer(handoverProbeTimeout, () {
+            link.handoverProbe = null;
+            if (_closed || _links[endpoint] != link) return;
+            _disconnect(endpoint, link);
+            _failures.remove(endpoint);
+          });
+        }
       }
     }
     _failures.clear();
@@ -953,6 +986,10 @@ class RelayNetwork extends ChangeNotifier {
                 }
                 link.lastReceived = now;
                 final frame = jsonDecode(text) as Map<String, dynamic>;
+                if (link.registered && frame['type'] == 'alive') {
+                  link.handoverProbe?.cancel();
+                  link.handoverProbe = null;
+                }
                 switch (frame['type']) {
                   case 'challenge':
                     if (link.challenged) {
@@ -1099,6 +1136,7 @@ class RelayNetwork extends ChangeNotifier {
   void _disconnect(String endpoint, _Link link) {
     if (_closed || _links[endpoint] != link) return;
     _links.remove(endpoint);
+    link.handoverProbe?.cancel();
     unawaited(link.subscription?.cancel());
     unawaited(link.socket?.close());
     final attempts = min((_failures[endpoint]?.$1 ?? 0) + 1, 7);
@@ -1119,12 +1157,14 @@ class RelayNetwork extends ChangeNotifier {
   Future<void> close() async {
     final pendingSave = _saveTimer?.isActive == true;
     _closed = true;
+    _poolRefillTimer?.cancel();
     _timer?.cancel();
     _heartbeatTimer?.cancel();
     _saveTimer?.cancel();
     _saveTimer = null;
     if (pendingSave) await _persist();
     for (final link in _links.values.toList()) {
+      link.handoverProbe?.cancel();
       await link.subscription?.cancel();
       await link.socket?.close();
     }
@@ -1137,6 +1177,7 @@ class _Link {
   _Link(this.lastReceived);
   RelaySocket? socket;
   StreamSubscription<String>? subscription;
+  Timer? handoverProbe;
   bool challenged = false;
   bool courierCapable = false;
   bool courierSelfCapable = false;

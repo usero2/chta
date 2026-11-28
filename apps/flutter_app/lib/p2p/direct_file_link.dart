@@ -5,6 +5,7 @@ import 'dart:math';
 import '../delivery/priority_send_queue.dart';
 import 'direct_peer.dart';
 import 'direct_peer_factory.dart';
+import 'ice_route.dart';
 
 export 'direct_peer.dart';
 
@@ -30,10 +31,6 @@ class DirectFileLink {
     r'^a=fingerprint:sha-256 (?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}\r?$',
     multiLine: true,
   );
-  static final _relayCandidate = RegExp(
-    r'\btyp\s+relay\b',
-    caseSensitive: false,
-  );
 
   final String ownIdentityId;
   final DirectSignalSender sendSignal;
@@ -49,10 +46,19 @@ class DirectFileLink {
   Stream<void> get changed => _changes.stream;
   String? get peerId => _peerId;
   bool get ready => _ready;
+  bool get unmetered =>
+      ready && (!_turnPossible || _iceRoute == IceRoute.direct);
+  String get routeLabel => _iceRoute == IceRoute.turn
+      ? 'TURN'
+      : unmetered
+      ? 'Direct'
+      : 'WebRTC';
 
   String? _peerId;
   String? _session;
   DirectPeer? _peer;
+  bool _turnPossible = false;
+  IceRoute _iceRoute = IceRoute.unknown;
   bool _ready = false;
   bool _offering = false;
   bool _signalingAvailable = false;
@@ -154,6 +160,9 @@ class DirectFileLink {
       return null;
     }
     _peer = peer;
+    final route = peer is IceRoutePeer ? peer as IceRoutePeer : null;
+    _turnPossible = route?.configuredTurn == true;
+    _iceRoute = IceRoute.unknown;
     peer.onFrame = (frame) {
       if (_current(generation, peerId, session) &&
           _ready &&
@@ -162,7 +171,9 @@ class DirectFileLink {
       }
     };
     peer.onReadyChanged = (isReady) {
-      if (!_current(generation, peerId, session)) return;
+      if (!_current(generation, peerId, session) || !identical(_peer, peer)) {
+        return;
+      }
       if (_ready != isReady) {
         _ready = isReady;
         if (isReady) {
@@ -170,11 +181,15 @@ class DirectFileLink {
           _negotiationTimer = null;
           _retryTimer?.cancel();
           _retryTimer = null;
+        } else {
+          _iceRoute = IceRoute.unknown;
         }
         _notify();
       }
       if (!isReady) {
         _scheduleRetry();
+      } else {
+        unawaited(_refreshIceRoute());
       }
     };
     peer.onIceCandidate = (candidate, mid, line) {
@@ -182,9 +197,10 @@ class DirectFileLink {
           !_signalingAvailable ||
           _candidateCount >= maxPendingCandidates ||
           candidate.length > 2048 ||
-          _relayCandidate.hasMatch(candidate)) {
+          relayIceType.hasMatch(candidate) && !validTurnCandidate(candidate)) {
         return;
       }
+      if (relayIceType.hasMatch(candidate)) _markTurnPossible();
       _candidateCount++;
       _localCandidates.add((candidate, mid, line));
       if (_descriptionSignaled) {
@@ -265,6 +281,7 @@ class DirectFileLink {
       try {
         final peer = await _makePeer(generation, peerId, session);
         if (peer == null) return;
+        if (relayIceType.hasMatch(description)) _markTurnPossible();
         await peer.setRemoteDescription('offer', description);
         if (!_current(generation, peerId, session)) return;
         _remoteDescriptionSet = true;
@@ -291,6 +308,7 @@ class DirectFileLink {
       if (description is! String || !_validDescription(description)) return;
       final peer = _peer;
       if (peer == null) return;
+      if (relayIceType.hasMatch(description)) _markTurnPossible();
       await peer.setRemoteDescription('answer', description);
       if (!_current(generation, peerId, session)) return;
       _remoteDescriptionSet = true;
@@ -302,17 +320,19 @@ class DirectFileLink {
       final line = packet['l'];
       if (candidate is! String ||
           candidate.length > 2048 ||
-          _relayCandidate.hasMatch(candidate) ||
+          relayIceType.hasMatch(candidate) && !validTurnCandidate(candidate) ||
           (mid != null && mid is! String) ||
           (line != null && (line is! int || line < 0 || line > 16)) ||
           _candidateCount >= maxPendingCandidates) {
         return;
       }
+      if (relayIceType.hasMatch(candidate)) _markTurnPossible();
       _candidateCount++;
       if (!_remoteDescriptionSet) {
         _pendingCandidates.add((candidate, mid as String?, line as int?));
       } else {
         await _peer?.addIceCandidate(candidate, mid as String?, line as int?);
+        if (relayIceType.hasMatch(candidate)) unawaited(_refreshIceRoute());
       }
     }
   }
@@ -423,11 +443,57 @@ class DirectFileLink {
   Future<void> _disposePeer() async {
     final peer = _peer;
     _peer = null;
+    _turnPossible = false;
+    _iceRoute = IceRoute.unknown;
+    _checkingRoute = null;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
     if (peer != null) {
       await peer.close();
     }
+  }
+
+  Future<bool> verifyUnmetered() async {
+    await _refreshIceRoute();
+    return unmetered;
+  }
+
+  Future<void>? _checkingRoute;
+
+  Future<void> _refreshIceRoute() async {
+    if (!_ready || !_turnPossible) return;
+    final peer = _peer;
+    if (peer is! IceRoutePeer) return;
+    final check = _checkingRoute ??= _readRoute(peer as IceRoutePeer);
+    try {
+      await check;
+    } finally {
+      if (identical(_checkingRoute, check)) _checkingRoute = null;
+    }
+  }
+
+  Future<void> _readRoute(IceRoutePeer peer) async {
+    final generation = _generation;
+    IceRoute selected;
+    try {
+      selected = await peer.selectedRoute().timeout(const Duration(seconds: 2));
+    } catch (_) {
+      selected = IceRoute.unknown;
+    }
+    if (!_closed &&
+        generation == _generation &&
+        identical(_peer, peer) &&
+        _ready &&
+        _iceRoute != selected) {
+      _iceRoute = selected;
+      _notify();
+    }
+  }
+
+  void _markTurnPossible() {
+    if (_turnPossible) return;
+    _turnPossible = true;
+    if (_ready) _notify();
   }
 
   void _scheduleRetry() {
@@ -488,7 +554,7 @@ class DirectFileLink {
   static bool _validDescription(String sdp) =>
       sdp.length <= 10000 &&
       _fingerprint.hasMatch(sdp) &&
-      !_relayCandidate.hasMatch(sdp);
+      validTurnDescription(sdp);
 
   static void _validateDescription(String sdp) {
     if (!_validDescription(sdp)) {

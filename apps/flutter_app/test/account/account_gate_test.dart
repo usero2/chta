@@ -14,6 +14,8 @@ import 'package:cht/chat/peer_history_store.dart';
 import 'package:cht/chat/attachment_store.dart';
 import 'package:cht/core/core_bridge.dart';
 import 'package:cht/groups/group_crypto_bridge.dart';
+import 'package:cht/groups/group_models.dart';
+import 'package:crypto/crypto.dart';
 import 'package:cht/groups/group_blob_bridge.dart';
 import 'package:cht/contact_requests/contact_request_bridge.dart';
 import 'package:cht/profile/profile_controller.dart';
@@ -28,6 +30,76 @@ import 'package:image/image.dart' as image;
 import '../runtime/app_runtime_test.dart' show FakeRuntime;
 
 void main() {
+  testWidgets('opening a room clears only its own unread count', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _UnreadAccountBridge();
+    final identity = await bridge.identity();
+    final router = AppRouter(initialPath: '/chats');
+    final store = _HistoryTestStore();
+    final history = PeerHistory(store: store);
+    await history.load(identity.id);
+    for (var i = 0; i < 2; i++) {
+      history.add(
+        'did:cht:alice',
+        PeerMessage(
+          id: 'new-$i',
+          text: 'New message $i',
+          incoming: true,
+          status: DeliveryStatus.delivered,
+          receivedAtMilliseconds: 1040 + i,
+        ),
+      );
+    }
+    await history.flush();
+    history.dispose();
+
+    Future<void> show() => tester.pumpWidget(
+      ChtApp(
+        controller: ChatController(coreBridge: bridge),
+        coreBridge: bridge,
+        accountController: AccountController(bridge),
+        profileController: ProfileController(_ProfileTestStore()),
+        peerHistoryStore: store,
+        router: router,
+      ),
+    );
+
+    Finder rowBadge(String id, String text) => find.descendant(
+      of: find.byKey(Key('conversation-$id')),
+      matching: find.text(text),
+    );
+
+    await show();
+    await tester.pumpAndSettle();
+    final id = _UnreadAccountBridge.groupId;
+    expect(rowBadge('did:cht:alice', '2'), findsOneWidget);
+    expect(rowBadge(id, '1'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('conversation-did:cht:alice')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back to chats'));
+    await tester.pumpAndSettle();
+    expect(rowBadge('did:cht:alice', '2'), findsNothing);
+    expect(rowBadge(id, '1'), findsOneWidget);
+
+    await tester.tap(find.byKey(Key('conversation-$id')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back to chats'));
+    await tester.pumpAndSettle();
+    expect(rowBadge(id, '1'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    await show();
+    await tester.pumpAndSettle();
+    expect(rowBadge('did:cht:alice', '2'), findsNothing);
+    expect(rowBadge(id, '1'), findsNothing);
+  });
+
   testWidgets('notification lock dismisses the open Markdown reader', (
     tester,
   ) async {
@@ -755,6 +827,47 @@ class _TwoRoomAccountBridge extends _GroupAccountBridge {
       ),
     ],
   );
+}
+
+class _UnreadAccountBridge extends _GroupAccountBridge {
+  static final groupId = 'group:${'a' * 64}';
+  final blobs = <String, String>{
+    'conversation-read-state-v1': '{"baseline":1000,"rooms":{}}',
+    'groups-index-v1': jsonEncode({
+      'version': 1,
+      'core': '{}',
+      'rooms': {groupId: 1},
+    }),
+    'g-room-${sha256.convert(utf8.encode(groupId))}-0': jsonEncode({
+      'messages': [
+        GroupMessage(
+          id: 'received',
+          groupId: groupId,
+          senderId: 'did:cht:alice',
+          senderName: 'Alice',
+          text: 'New group message',
+          event: 'message',
+          sentAt: 1020,
+          receivedAt: 1030,
+          recipients: const [],
+        ).toJson(),
+      ],
+    }),
+  };
+
+  @override
+  Future<Map<String, Object?>> groupCall(
+    String op,
+    Map<String, Object?> args,
+  ) => op == 'import' ? Future.value({}) : super.groupCall(op, args);
+
+  @override
+  Future<String?> loadGroupBlob(String owner, String key) async => blobs[key];
+
+  @override
+  Future<void> saveGroupBlob(String owner, String key, String value) async {
+    blobs[key] = value;
+  }
 }
 
 class _GroupAccountBridge extends _AccountTestBridge

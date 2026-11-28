@@ -47,7 +47,7 @@ class FileOfferCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  _preview(colors),
+                  FileOfferPreview(mimeType: mimeType, cover: cover),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -124,8 +124,17 @@ class FileOfferCard extends StatelessWidget {
       ),
     );
   }
+}
 
-  Widget _preview(ColorScheme colors) {
+class FileOfferPreview extends StatelessWidget {
+  const FileOfferPreview({required this.mimeType, this.cover, super.key});
+
+  final String mimeType;
+  final String? cover;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final type = mimeType.toLowerCase().split('/').first;
     final fileIcon = switch (type) {
       'image' => Icons.image_outlined,
@@ -137,18 +146,52 @@ class FileOfferCard extends StatelessWidget {
       color: colors.surfaceContainerHighest,
       child: Icon(fileIcon, color: colors.onSurfaceVariant),
     );
-    final bytes = type == 'image' || type == 'video'
-        ? decodeFileOfferCover(cover)
-        : null;
+    return _OfferCover(
+      cover: type == 'image' || type == 'video' ? cover : null,
+      placeholder: placeholder,
+    );
+  }
+}
+
+class _OfferCover extends StatefulWidget {
+  const _OfferCover({required this.cover, required this.placeholder});
+
+  final String? cover;
+  final Widget placeholder;
+
+  @override
+  State<_OfferCover> createState() => _OfferCoverState();
+}
+
+class _OfferCoverState extends State<_OfferCover> {
+  // MemoryImage keys on the bytes' identity. Keep one provider while the
+  // transfer updates the rest of the card.
+  late MemoryImage? _image = _loadImage();
+
+  MemoryImage? _loadImage() {
+    final bytes = decodeFileOfferCover(widget.cover);
+    return bytes == null ? null : MemoryImage(bytes);
+  }
+
+  @override
+  void didUpdateWidget(covariant _OfferCover oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.cover != widget.cover) _image = _loadImage();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final image = _image;
+    final placeholder = widget.placeholder;
     return ExcludeSemantics(
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: SizedBox.square(
           dimension: 52,
-          child: bytes == null
+          child: image == null
               ? placeholder
-              : Image.memory(
-                  bytes,
+              : Image(
+                  image: image,
                   fit: BoxFit.cover,
                   errorBuilder: (_, _, _) => placeholder,
                 ),

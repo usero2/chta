@@ -180,6 +180,27 @@ async fn client(url: &str, key: &SigningKey) -> (Socket, String, String) {
     next(&mut ws, "registered").await;
     (ws, did, r.relay_id)
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_probe_checks_registration_with_an_ephemeral_identity() {
+    use tokio::task::spawn_blocking;
+    let local = node().await;
+    let endpoint = local.url.clone();
+    let result = spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_cht-relay"))
+            .args(["--probe-websocket", &endpoint, "--allow-loopback-probe"])
+            .env_remove("CHT_RELAY_KEY_PASSWORD_FILE")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let probe: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(probe["event"], "websocket_probe_ok");
+    assert_eq!(probe["endpoint"], local.url);
+    assert_eq!(probe["relayId"].as_str().unwrap().len(), 64);
+}
 #[tokio::test]
 async fn independent_relay_processes_preserve_authenticated_route_after_one_stops() {
     let first = node().await;

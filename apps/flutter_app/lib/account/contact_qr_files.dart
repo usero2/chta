@@ -18,24 +18,41 @@ Future<String?> readContactQrImage() => platform.readContactQrImage();
 double contactQrMargin(double size, int modules, {int quietModules = 4}) =>
     size * quietModules / (modules + 2 * quietModules);
 
-class ContactQrView extends StatelessWidget {
+class ContactQrView extends StatefulWidget {
   const ContactQrView({required this.card, this.size = 260, super.key});
   final String card;
   final double size;
   @override
-  Widget build(BuildContext context) {
-    final qr = QrCode.fromData(
-      data: card,
+  State<ContactQrView> createState() => _ContactQrViewState();
+}
+
+class _ContactQrViewState extends State<ContactQrView> {
+  late _ContactQrPainter _painter = _makePainter();
+
+  _ContactQrPainter _makePainter() => _ContactQrPainter(
+    widget.card,
+    QrCode.fromData(
+      data: widget.card,
       errorCorrectLevel: QrErrorCorrectLevel.L,
-    );
-    return Semantics(
-      label: 'qr code',
-      child: SizedBox.square(
-        dimension: size,
-        child: CustomPaint(painter: _ContactQrPainter(card, qr)),
-      ),
-    );
+    ),
+  );
+
+  @override
+  void didUpdateWidget(covariant ContactQrView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.card != widget.card) _painter = _makePainter();
   }
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'qr code',
+    child: SizedBox.square(
+      dimension: widget.size,
+      child: RepaintBoundary(
+        child: CustomPaint(painter: _painter, isComplex: true),
+      ),
+    ),
+  );
 }
 
 class _ContactQrPainter extends CustomPainter {
@@ -82,10 +99,7 @@ Future<Uint8List> encodeContactQrImage(String card) async {
   );
   final recorder = ui.PictureRecorder();
   final canvas = ui.Canvas(recorder);
-  _ContactQrPainter(
-    card,
-    qr,
-  ).paint(canvas, ui.Size.square(pixels.toDouble()));
+  _ContactQrPainter(card, qr).paint(canvas, ui.Size.square(pixels.toDouble()));
   final picture = recorder.endRecording();
   final image = await picture.toImage(pixels, pixels);
   try {

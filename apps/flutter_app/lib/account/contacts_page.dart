@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -6,6 +8,8 @@ import '../qr/qr_scanner_page.dart';
 import 'account_bridge.dart';
 import 'account_models.dart';
 import 'routed_contact_bridge.dart';
+import 'share_links.dart';
+import 'share_link_inbox.dart';
 import '../relay/relay_network.dart';
 import 'contact_qr_files.dart';
 import '../profile/profile_controller.dart';
@@ -25,6 +29,9 @@ class ContactsPage extends StatefulWidget {
     this.readQrImage,
     this.relayNetwork,
     this.requests,
+    this.onGroupInvite,
+    this.onOpenSharedLink,
+    this.canOpenGroupLinks = true,
     super.key,
   });
 
@@ -37,30 +44,62 @@ class ContactsPage extends StatefulWidget {
   final Future<String?> Function()? readQrImage;
   final RelayNetwork? relayNetwork;
   final ContactRequestController? requests;
+  final Future<void> Function(GroupInviteLink)? onGroupInvite;
+  final VoidCallback? onOpenSharedLink;
+  final bool canOpenGroupLinks;
 
   @override
   State<ContactsPage> createState() => _ContactsPageState();
 }
 
 class _ContactsPageState extends State<ContactsPage> {
-  late Future<(String, List<ContactView>)> data = _load();
-  String _sharedRoutes = '';
+  late Future<String> _card;
+  late Future<List<ContactView>> _friends;
+  late Future<(String, List<ContactView>)> data;
+  late String _sharedRoutes;
+  int? _avatarRevision;
+
+  String get _relaySnapshot =>
+      widget.relayNetwork?.contactRelayUrls.join('|') ?? '';
 
   @override
   void initState() {
     super.initState();
-    widget.profileController.addListener(_refresh);
+    _sharedRoutes = _relaySnapshot;
+    _avatarRevision = widget.peerHistory?.avatarRevision;
+    _card = _ownCard();
+    _friends = widget.bridge.contacts();
+    data = (_card, _friends).wait;
+    widget.profileController.addListener(_refreshCard);
     widget.peerHistory?.addListener(_historyChanged);
     widget.relayNetwork?.addListener(_relayChanged);
+    pendingShareLink.addListener(_openPendingShare);
+    _openPendingShare();
   }
 
   void _historyChanged() {
-    if (mounted) setState(() {});
+    final revision = widget.peerHistory?.avatarRevision;
+    if (!mounted || revision == _avatarRevision) return;
+    setState(() => _avatarRevision = revision);
+  }
+
+  void _openPendingShare() {
+    if (pendingShareLink.value == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || pendingShareLink.value == null) return;
+      final link = pendingShareLink.value!;
+      if (!widget.canOpenGroupLinks && isGroupMagnetLink(link)) return;
+      pendingShareLink.value = null;
+      widget.onOpenSharedLink?.call();
+      unawaited(_addContact(initialCard: link));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   @override
   void dispose() {
-    widget.profileController.removeListener(_refresh);
+    pendingShareLink.removeListener(_openPendingShare);
+    widget.profileController.removeListener(_refreshCard);
     widget.peerHistory?.removeListener(_historyChanged);
     widget.relayNetwork?.removeListener(_relayChanged);
     super.dispose();
@@ -69,16 +108,25 @@ class _ContactsPageState extends State<ContactsPage> {
   @override
   void didUpdateWidget(covariant ContactsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.canOpenGroupLinks && !oldWidget.canOpenGroupLinks) {
+      _openPendingShare();
+    }
     if (oldWidget.profileController != widget.profileController) {
-      oldWidget.profileController.removeListener(_refresh);
-      widget.profileController.addListener(_refresh);
-      _refresh();
+      oldWidget.profileController.removeListener(_refreshCard);
+      widget.profileController.addListener(_refreshCard);
+      _refreshCard();
     }
     if (oldWidget.peerHistory != widget.peerHistory) {
       oldWidget.peerHistory?.removeListener(_historyChanged);
       widget.peerHistory?.addListener(_historyChanged);
+      _avatarRevision = widget.peerHistory?.avatarRevision;
     }
-    if (oldWidget.refreshToken != widget.refreshToken) _refresh();
+    if (oldWidget.refreshToken != widget.refreshToken) _refreshFriends();
+    if (oldWidget.bridge != widget.bridge ||
+        oldWidget.identity.id != widget.identity.id) {
+      _refreshCard();
+      _refreshFriends();
+    }
     if (oldWidget.relayNetwork != widget.relayNetwork) {
       oldWidget.relayNetwork?.removeListener(_relayChanged);
       widget.relayNetwork?.addListener(_relayChanged);
@@ -87,10 +135,10 @@ class _ContactsPageState extends State<ContactsPage> {
   }
 
   void _relayChanged() {
-    final routes = widget.relayNetwork?.contactRelayUrls.join('|') ?? '';
+    final routes = _relaySnapshot;
     if (_sharedRoutes != routes) {
       _sharedRoutes = routes;
-      if (mounted) _refresh();
+      if (mounted) _refreshCard();
     }
   }
 
@@ -109,11 +157,14 @@ class _ContactsPageState extends State<ContactsPage> {
     );
   }
 
-  Future<(String, List<ContactView>)> _load() async =>
-      (await _ownCard(), await widget.bridge.contacts());
+  void _refreshCard() => setState(() {
+    _card = _ownCard();
+    data = (_card, _friends).wait;
+  });
 
-  void _refresh() => setState(() {
-    data = _load();
+  void _refreshFriends([List<ContactView>? saved]) => setState(() {
+    _friends = saved == null ? widget.bridge.contacts() : Future.value(saved);
+    data = (_card, _friends).wait;
   });
 
   // Navigator.pop resolves before the closing animation removes the fields.
@@ -182,12 +233,7 @@ class _ContactsPageState extends State<ContactsPage> {
         contact.identityId,
         alias,
       );
-      final card = await _ownCard();
-      if (mounted) {
-        setState(() {
-          data = Future.value((card, contacts));
-        });
-      }
+      if (mounted) _refreshFriends(contacts);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -204,7 +250,7 @@ class _ContactsPageState extends State<ContactsPage> {
       final accepted = await _dialog<bool>(
         (context) => AlertDialog(
           scrollable: true,
-          title: const Text('Paste card'),
+          title: const Text('Paste card or link'),
           content: SizedBox(
             width: 560,
             child: TextField(
@@ -212,7 +258,20 @@ class _ContactsPageState extends State<ContactsPage> {
               controller: card,
               minLines: 5,
               maxLines: 10,
-              decoration: const InputDecoration(labelText: 'Contact card'),
+              decoration: InputDecoration(
+                labelText: 'Contact card or link',
+                suffixIcon: IconButton(
+                  tooltip: 'Paste from clipboard',
+                  icon: const Icon(Icons.content_paste),
+                  onPressed: () async {
+                    final clipboard = await Clipboard.getData(
+                      Clipboard.kTextPlain,
+                    );
+                    final value = clipboard?.text;
+                    if (context.mounted && value != null) card.text = value;
+                  },
+                ),
+              ),
             ),
           ),
           actions: [
@@ -234,7 +293,17 @@ class _ContactsPageState extends State<ContactsPage> {
     }
 
     try {
-      final inspected = await widget.bridge.inspectContactCard(card.text);
+      final value = card.text.trim();
+      if (isGroupMagnetLink(value)) {
+        final open = widget.onGroupInvite;
+        if (open == null) {
+          throw const FormatException('Group invitations unavailable.');
+        }
+        await open(GroupInviteLink.parse(value));
+        return;
+      }
+      final signedCard = contactCardFromShare(value);
+      final inspected = await widget.bridge.inspectContactCard(signedCard);
       if (!mounted) return;
       alias = TextEditingController();
       var fingerprintChecked = false;
@@ -304,16 +373,18 @@ class _ContactsPageState extends State<ContactsPage> {
         ),
       );
       if (accepted == true) {
-        await widget.bridge.addContact(card.text, alias.text);
+        await widget.bridge.addContact(signedCard, alias.text);
         if (fingerprintChecked || widget.requests != null) {
           await widget.bridge.markContactVerified(inspected.identityId);
         }
         if (widget.requests != null) {
           await widget.requests!.request(inspected.identityId);
         }
-        if (mounted) _refresh();
-        if ((fingerprintChecked || widget.requests != null) && mounted) {
-          final saved = await widget.bridge.contacts();
+        if (!mounted) return;
+        final saved = await widget.bridge.contacts();
+        if (!mounted) return;
+        _refreshFriends(saved);
+        if (fingerprintChecked || widget.requests != null) {
           final friend = saved
               .where((c) => c.identityId == inspected.identityId)
               .firstOrNull;
@@ -322,9 +393,15 @@ class _ContactsPageState extends State<ContactsPage> {
       }
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Unable to add friend: $error')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              error is FormatException
+                  ? error.message
+                  : 'Unable to open card or link.',
+            ),
+          ),
+        );
       }
     } finally {
       alias?.dispose();
@@ -335,8 +412,8 @@ class _ContactsPageState extends State<ContactsPage> {
   Future<void> _scan() async {
     final value = await scanQr(
       context,
-      title: 'Scan contact QR',
-      fallbackText: 'Import a QR image or paste a friend card.',
+      title: 'Scan QR',
+      fallbackText: 'Import a QR image or paste a link.',
     );
     if (value != null && mounted) {
       await _addContact(initialCard: value);
@@ -368,12 +445,92 @@ class _ContactsPageState extends State<ContactsPage> {
     }
   }
 
-  Future<void> _copyContactCard(String card) async {
-    await Clipboard.setData(ClipboardData(text: card));
+  Future<void> _copyShare(String text, String confirmation) async {
+    await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Card copied.')));
+        .showSnackBar(SnackBar(content: Text(confirmation)));
   }
+
+  Widget _shareCard(String card) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          ProfileAvatar(
+            key: const Key('my-contact-avatar'),
+            name: widget.profileController.name,
+            bytes: widget.profileController.avatar,
+            radius: 22,
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              widget.profileController.name.isEmpty
+                  ? 'Your profile'
+                  : widget.profileController.name,
+              key: const Key('my-contact-name'),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 12),
+      Center(
+        child: ContactQrView(
+          key: const Key('my-contact-qr'),
+          card: card,
+          size: 260,
+        ),
+      ),
+      const SizedBox(height: 12),
+      Wrap(
+        spacing: 8,
+        runSpacing: 6,
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          FilledButton.icon(
+            key: const Key('copy-contact-link'),
+            onPressed: () => _copyShare(
+              shareWebLink(contactMagnetLink(card)),
+              'Contact link copied.',
+            ),
+            icon: const Icon(Icons.link),
+            label: const Text('Copy link'),
+          ),
+          if (supportsContactQrImageExport)
+            OutlinedButton.icon(
+              key: const Key('save-my-qr-image'),
+              onPressed: () => _saveQrImage(card),
+              icon: const Icon(Icons.download_outlined),
+              label: const Text('Save QR'),
+            ),
+          IconButton(
+            tooltip: 'Copy contact card',
+            onPressed: () => _copyShare(card, 'Card copied.'),
+            icon: const Icon(Icons.copy_outlined),
+          ),
+        ],
+      ),
+      ExpansionTile(
+        title: const Text('Contact details'),
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SelectableText(widget.identity.id),
+          ),
+          Text(_sharedRoutes.isEmpty ? 'No relay included' : 'Relay included'),
+        ],
+      ),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -381,13 +538,22 @@ class _ContactsPageState extends State<ContactsPage> {
       title: const Text('Contacts'),
       actions: [
         IconButton(
+          key: const Key('scan-friend-qr'),
           onPressed: _scan,
           tooltip: 'Scan QR',
           icon: const Icon(Icons.qr_code_scanner),
         ),
+        if (supportsContactQrImageImport || widget.readQrImage != null)
+          IconButton(
+            key: const Key('import-friend-qr-image'),
+            onPressed: _importQrImage,
+            tooltip: 'Import QR image',
+            icon: const Icon(Icons.image_search_outlined),
+          ),
         IconButton(
+          key: const Key('paste-friend-card'),
           onPressed: _addContact,
-          tooltip: 'Paste contact card',
+          tooltip: 'Paste card or link',
           icon: const Icon(Icons.person_add),
         ),
       ],
@@ -404,270 +570,163 @@ class _ContactsPageState extends State<ContactsPage> {
           return const Center(child: CircularProgressIndicator());
         }
         final (card, contacts) = snapshot.data!;
-        return ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            LayoutBuilder(
-              builder: (context, constraints) => Wrap(
-                spacing: 24,
-                runSpacing: 16,
-                alignment: constraints.maxWidth < 800
-                    ? WrapAlignment.center
-                    : WrapAlignment.start,
-                crossAxisAlignment: WrapCrossAlignment.center,
+        return ListView.builder(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          itemCount: contacts.length + 1,
+          itemBuilder: (context, index) {
+            if (index == 0) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SizedBox(
-                    width: 260,
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            ProfileAvatar(
-                              key: const Key('my-contact-avatar'),
-                              name: widget.profileController.name,
-                              bytes: widget.profileController.avatar,
-                              radius: 24,
-                            ),
-                            const SizedBox(width: 12),
-                            Flexible(
-                              child: Text(
-                                widget.profileController.name.isEmpty
-                                    ? 'Your profile'
-                                    : widget.profileController.name,
-                                key: const Key('my-contact-name'),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        ContactQrView(
-                          key: const Key('my-contact-qr'),
-                          card: card,
-                          size: 260,
-                        ),
-                      ],
+                  Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 480),
+                      child: _shareCard(card),
                     ),
                   ),
-                  SizedBox(
-                    width: 480,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SelectableText(widget.identity.id),
-                        const SizedBox(height: 8),
-                        Text(
-                          widget.relayNetwork?.contactRelayUrls.isNotEmpty ==
-                                  true
-                              ? 'Relay included'
-                              : 'No relay. Add one in Connect.',
-                        ),
-                        const Text('Never share your recovery phrase.'),
-                        const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            FilledButton.icon(
-                              key: const Key('scan-friend-qr'),
-                              onPressed: _scan,
-                              icon: const Icon(Icons.qr_code_scanner),
-                              label: const Text('Scan QR'),
-                            ),
-                            if (supportsContactQrImageImport ||
-                                widget.readQrImage != null)
-                              OutlinedButton.icon(
-                                key: const Key('import-friend-qr-image'),
-                                onPressed: _importQrImage,
-                                icon: const Icon(Icons.image_search_outlined),
-                                label: const Text('Import QR'),
-                              ),
-                            if (supportsContactQrImageExport)
-                              OutlinedButton.icon(
-                                key: const Key('save-my-qr-image'),
-                                onPressed: () => _saveQrImage(card),
-                                icon: const Icon(Icons.download_outlined),
-                                label: const Text('Save QR'),
-                              ),
-                            OutlinedButton.icon(
-                              key: const Key('paste-friend-card'),
-                              onPressed: _addContact,
-                              icon: const Icon(Icons.person_add_outlined),
-                              label: const Text('Paste card'),
-                            ),
-                            TextButton.icon(
-                              onPressed: () => _copyContactCard(card),
-                              icon: const Icon(Icons.copy_outlined),
-                              label: const Text('Copy card'),
-                            ),
-                          ],
-                        ),
-                      ],
+                  const Divider(height: 24),
+                  if (widget.requests case final requests?)
+                    FriendRequestsSection(
+                      controller: requests,
+                      onAccepted: widget.onChat,
                     ),
+                  Text(
+                    'Friends',
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
+                  if (contacts.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Text('No friends yet.'),
+                    ),
                 ],
+              );
+            }
+            return _friendCard(contacts[index - 1]);
+          },
+        );
+      },
+    ),
+  );
+
+  Widget _friendCard(ContactView contact) => Card(
+    key: ValueKey(contact.identityId),
+    child: Padding(
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            key: Key('friend-header-${contact.identityId}'),
+            children: [
+              ProfileAvatar(
+                key: Key('friend-avatar-${contact.identityId}'),
+                radius: 18,
+                name: contact.displayName,
+                avatarBase64:
+                    (widget.peerHistory?.withCachedAvatar(contact) ?? contact)
+                        .avatarBase64,
               ),
-            ),
-            const Divider(height: 40),
-            if (widget.requests != null)
-              FriendRequestsSection(
-                controller: widget.requests!,
-                onAccepted: widget.onChat,
-              ),
-            const Text(
-              'Friends',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            if (contacts.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Text('No friends yet.'),
-              ),
-            for (final contact in contacts)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        key: Key('friend-header-${contact.identityId}'),
-                        children: [
-                          ProfileAvatar(
-                            key: Key('friend-avatar-${contact.identityId}'),
-                            radius: 18,
-                            name: contact.displayName,
-                            avatarBase64:
-                                (widget.peerHistory?.withCachedAvatar(
-                                          contact,
-                                        ) ??
-                                        contact)
-                                    .avatarBase64,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Tooltip(
-                              message: contact.displayName,
-                              child: Text(
-                                contact.displayName,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                          IconButtonTheme(
-                            data: IconButtonThemeData(
-                              style: IconButton.styleFrom(
-                                minimumSize: const Size(44, 44),
-                                maximumSize: const Size(44, 44),
-                                padding: EdgeInsets.zero,
-                                iconSize: 20,
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  key: Key('edit-alias-${contact.identityId}'),
-                                  tooltip:
-                                      'Set alias for ${contact.signedName}',
-                                  onPressed: () => _editAlias(contact),
-                                  icon: const Icon(Icons.edit_outlined),
-                                ),
-                                IconButton(
-                                  key: Key(
-                                    'chat-contact-${contact.identityId}',
-                                  ),
-                                  tooltip: contact.verified
-                                      ? 'Chat with ${contact.displayName}'
-                                      : 'Verify fingerprint before chatting',
-                                  onPressed: contact.verified
-                                      ? () => widget.onChat(contact)
-                                      : null,
-                                  icon: const Icon(Icons.chat_bubble_outline),
-                                ),
-                                if (contact.verified)
-                                  IconButton(
-                                    tooltip: 'Remove',
-                                    onPressed: () async {
-                                      await widget.bridge.removeContact(
-                                        contact.identityId,
-                                      );
-                                      _refresh();
-                                    },
-                                    icon: const Icon(Icons.delete_outline),
-                                  )
-                                else
-                                  SizedBox.square(
-                                    dimension: 44,
-                                    child: PopupMenuButton<String>(
-                                      tooltip: 'More friend actions',
-                                      icon: const Icon(
-                                        Icons.more_vert,
-                                        size: 20,
-                                      ),
-                                      padding: EdgeInsets.zero,
-                                      onSelected: (action) async {
-                                        if (action == 'verify') {
-                                          await widget.bridge
-                                              .markContactVerified(
-                                                contact.identityId,
-                                              );
-                                        } else {
-                                          await widget.bridge.removeContact(
-                                            contact.identityId,
-                                          );
-                                        }
-                                        if (mounted) _refresh();
-                                      },
-                                      itemBuilder: (_) => const [
-                                        PopupMenuItem(
-                                          value: 'verify',
-                                          child: Text(
-                                            'Fingerprint checked in person',
-                                          ),
-                                        ),
-                                        PopupMenuItem(
-                                          value: 'remove',
-                                          child: Text('Remove friend'),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      SelectableText(
-                        'Signed name: ${contact.signedName}\n'
-                        '${contact.verified ? 'Identity verified' : 'Fingerprint not verified'}\n'
-                        '${contact.fingerprint}\n${contact.identityId}',
-                        key: Key('friend-details-${contact.identityId}'),
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.35,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+              const SizedBox(width: 8),
+              Expanded(
+                child: Tooltip(
+                  message: contact.displayName,
+                  child: Text(
+                    contact.displayName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
               ),
-          ],
-        );
-      },
+              IconButtonTheme(
+                data: IconButtonThemeData(
+                  style: IconButton.styleFrom(
+                    minimumSize: const Size(44, 44),
+                    maximumSize: const Size(44, 44),
+                    padding: EdgeInsets.zero,
+                    iconSize: 20,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: Key('edit-alias-${contact.identityId}'),
+                      tooltip: 'Set alias for ${contact.signedName}',
+                      onPressed: () => _editAlias(contact),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      key: Key('chat-contact-${contact.identityId}'),
+                      tooltip: contact.verified
+                          ? 'Chat with ${contact.displayName}'
+                          : 'Verify fingerprint before chatting',
+                      onPressed: contact.verified
+                          ? () => widget.onChat(contact)
+                          : null,
+                      icon: const Icon(Icons.chat_bubble_outline),
+                    ),
+                    if (contact.verified)
+                      IconButton(
+                        tooltip: 'Remove',
+                        onPressed: () async {
+                          await widget.bridge.removeContact(contact.identityId);
+                          _refreshFriends();
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                      )
+                    else
+                      SizedBox.square(
+                        dimension: 44,
+                        child: PopupMenuButton<String>(
+                          tooltip: 'More friend actions',
+                          icon: const Icon(Icons.more_vert, size: 20),
+                          padding: EdgeInsets.zero,
+                          onSelected: (action) async {
+                            if (action == 'verify') {
+                              await widget.bridge.markContactVerified(
+                                contact.identityId,
+                              );
+                            } else {
+                              await widget.bridge.removeContact(
+                                contact.identityId,
+                              );
+                            }
+                            if (mounted) _refreshFriends();
+                          },
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
+                              value: 'verify',
+                              child: Text('Fingerprint checked in person'),
+                            ),
+                            PopupMenuItem(
+                              value: 'remove',
+                              child: Text('Remove friend'),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          SelectableText(
+            'Signed name: ${contact.signedName}\n'
+            '${contact.verified ? 'Identity verified' : 'Fingerprint not verified'}\n'
+            '${contact.fingerprint}\n${contact.identityId}',
+            key: Key('friend-details-${contact.identityId}'),
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.35,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }
