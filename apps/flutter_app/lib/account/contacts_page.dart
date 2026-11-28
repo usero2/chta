@@ -7,6 +7,8 @@ import '../qr/qr_scanner_page.dart';
 
 import 'account_bridge.dart';
 import 'account_models.dart';
+import 'friend_list_backup.dart';
+import '../chat/widgets/contact_details_sheet.dart';
 import 'routed_contact_bridge.dart';
 import 'share_links.dart';
 import 'share_link_inbox.dart';
@@ -18,6 +20,10 @@ import '../chat/peer_history.dart';
 import '../contact_requests/contact_request_controller.dart';
 import '../contact_requests/contact_request_views.dart';
 
+enum _FriendListAction { import, export }
+
+enum _FriendAction { details, alias, verify, remove }
+
 class ContactsPage extends StatefulWidget {
   const ContactsPage({
     required this.bridge,
@@ -27,6 +33,8 @@ class ContactsPage extends StatefulWidget {
     this.refreshToken = 0,
     this.peerHistory,
     this.readQrImage,
+    this.readFriendList,
+    this.saveFriendList,
     this.relayNetwork,
     this.requests,
     this.onGroupInvite,
@@ -42,6 +50,8 @@ class ContactsPage extends StatefulWidget {
   final int refreshToken;
   final PeerHistory? peerHistory;
   final Future<String?> Function()? readQrImage;
+  final Future<Uint8List?> Function()? readFriendList;
+  final Future<bool> Function(Uint8List)? saveFriendList;
   final RelayNetwork? relayNetwork;
   final ContactRequestController? requests;
   final Future<void> Function(GroupInviteLink)? onGroupInvite;
@@ -58,6 +68,8 @@ class _ContactsPageState extends State<ContactsPage> {
   late Future<(String, List<ContactView>)> data;
   late String _sharedRoutes;
   int? _avatarRevision;
+  final _friendSearch = TextEditingController();
+  bool _transferringFriends = false;
 
   String get _relaySnapshot =>
       widget.relayNetwork?.contactRelayUrls.join('|') ?? '';
@@ -68,7 +80,7 @@ class _ContactsPageState extends State<ContactsPage> {
     _sharedRoutes = _relaySnapshot;
     _avatarRevision = widget.peerHistory?.avatarRevision;
     _card = _ownCard();
-    _friends = widget.bridge.contacts();
+    _friends = widget.bridge.contacts().then(_orderedFriends);
     data = (_card, _friends).wait;
     widget.profileController.addListener(_refreshCard);
     widget.peerHistory?.addListener(_historyChanged);
@@ -98,6 +110,7 @@ class _ContactsPageState extends State<ContactsPage> {
 
   @override
   void dispose() {
+    _friendSearch.dispose();
     pendingShareLink.removeListener(_openPendingShare);
     widget.profileController.removeListener(_refreshCard);
     widget.peerHistory?.removeListener(_historyChanged);
@@ -163,9 +176,19 @@ class _ContactsPageState extends State<ContactsPage> {
   });
 
   void _refreshFriends([List<ContactView>? saved]) => setState(() {
-    _friends = saved == null ? widget.bridge.contacts() : Future.value(saved);
+    _friends = saved == null
+        ? widget.bridge.contacts().then(_orderedFriends)
+        : Future.value(_orderedFriends(saved));
     data = (_card, _friends).wait;
   });
+
+  static List<ContactView> _orderedFriends(List<ContactView> contacts) =>
+      contacts.toList()..sort((a, b) {
+        final order = a.displayName.toLowerCase().compareTo(
+          b.displayName.toLowerCase(),
+        );
+        return order == 0 ? a.identityId.compareTo(b.identityId) : order;
+      });
 
   // Navigator.pop resolves before the closing animation removes the fields.
   // Keep their controllers alive until the route has left the overlay.
@@ -227,7 +250,7 @@ class _ContactsPageState extends State<ContactsPage> {
       ),
     );
     controller.dispose();
-    if (alias == null) return;
+    if (alias == null || !mounted) return;
     try {
       final contacts = await widget.bridge.setContactAlias(
         contact.identityId,
@@ -452,6 +475,157 @@ class _ContactsPageState extends State<ContactsPage> {
         .showSnackBar(SnackBar(content: Text(confirmation)));
   }
 
+  Future<void> _transferFriendList(_FriendListAction action) async {
+    if (_transferringFriends) return;
+    final bridge = widget.bridge;
+    final owner = widget.identity.id;
+    bool isCurrent() =>
+        mounted &&
+        widget.identity.id == owner &&
+        identical(widget.bridge, bridge);
+    setState(() => _transferringFriends = true);
+    try {
+      if (action == _FriendListAction.export) {
+        final contacts = await bridge.contacts();
+        if (!isCurrent()) return;
+        if (contacts.isEmpty) {
+          _showSnack('No friends to export.');
+          return;
+        }
+        final bytes = FriendListBackup.encode(contacts);
+        final saved =
+            await (widget.saveFriendList ?? FriendListBackup.saveFile)(bytes);
+        if (saved && isCurrent()) _showSnack('Friend list exported.');
+        return;
+      }
+
+      final bytes =
+          await (widget.readFriendList ?? FriendListBackup.pickFile)();
+      if (bytes == null || !isCurrent()) return;
+      final backup = FriendListBackup.decode(bytes);
+      if (backup.count == 0) {
+        _showSnack('The friend list is empty.');
+        return;
+      }
+      final confirmed = await _dialog<bool>(
+        (context) => AlertDialog(
+          title: const Text('Import friends'),
+          content: Text(
+            '${backup.count} contacts in this file. New friends need '
+            'fingerprint verification before you can chat.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Import'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !isCurrent()) return;
+      final result = await backup.mergeInto(
+        bridge,
+        owner,
+        isCurrent: isCurrent,
+      );
+      if (!isCurrent()) return;
+      _refreshFriends();
+      _showSnack(
+        [
+          'Imported ${result.added}',
+          if (result.existing > 0) 'existing ${result.existing}',
+          if (result.skipped > 0) 'skipped ${result.skipped}',
+        ].join(', '),
+      );
+    } on FormatException {
+      if (isCurrent()) {
+        _showSnack('Could not read this chta friend list (32 MB maximum).');
+      }
+    } catch (_) {
+      if (isCurrent()) _showSnack('Could not ${action.name} friends.');
+    } finally {
+      if (mounted) setState(() => _transferringFriends = false);
+    }
+  }
+
+  void _showSnack(String message) =>
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+
+  Future<void> _friendAction(_FriendAction action, ContactView contact) async {
+    switch (action) {
+      case _FriendAction.details:
+        await showContactDetailsSheet(context, contact);
+      case _FriendAction.alias:
+        await _editAlias(contact);
+      case _FriendAction.verify:
+        final confirmed = await _dialog<bool>(
+          (context) => AlertDialog(
+            scrollable: true,
+            title: Text('Verify ${contact.displayName}'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Compare this fingerprint with your friend.'),
+                const SizedBox(height: 12),
+                SelectableText(contact.fingerprint),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Fingerprint matches'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted) return;
+        try {
+          final contacts = await widget.bridge.markContactVerified(
+            contact.identityId,
+          );
+          if (mounted) _refreshFriends(contacts);
+        } catch (_) {
+          if (mounted) _showSnack('Could not verify this friend.');
+        }
+      case _FriendAction.remove:
+        final confirmed = await _dialog<bool>(
+          (context) => AlertDialog(
+            title: const Text('Remove friend?'),
+            content: Text(contact.displayName),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Remove'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted) return;
+        try {
+          final contacts = await widget.bridge.removeContact(
+            contact.identityId,
+          );
+          if (mounted) _refreshFriends(contacts);
+        } catch (_) {
+          if (mounted) _showSnack('Could not remove this friend.');
+        }
+    }
+  }
+
   Widget _shareCard(String card) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -570,9 +744,20 @@ class _ContactsPageState extends State<ContactsPage> {
           return const Center(child: CircularProgressIndicator());
         }
         final (card, contacts) = snapshot.data!;
+        final query = _friendSearch.text.trim().toLowerCase();
+        final visible = query.isEmpty
+            ? contacts
+            : contacts
+                  .where(
+                    (contact) =>
+                        contact.displayName.toLowerCase().contains(query) ||
+                        contact.signedName.toLowerCase().contains(query),
+                  )
+                  .toList();
         return ListView.builder(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          itemCount: contacts.length + 1,
+          itemCount: visible.length + 1,
           itemBuilder: (context, index) {
             if (index == 0) {
               return Column(
@@ -590,143 +775,156 @@ class _ContactsPageState extends State<ContactsPage> {
                       controller: requests,
                       onAccepted: widget.onChat,
                     ),
-                  Text(
-                    'Friends',
-                    style: Theme.of(context).textTheme.titleLarge,
+                  _friendsHeader(
+                    hasFriends: contacts.isNotEmpty,
+                    hasResults: visible.isNotEmpty,
                   ),
-                  if (contacts.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 24),
-                      child: Text('No friends yet.'),
-                    ),
                 ],
               );
             }
-            return _friendCard(contacts[index - 1]);
+            return _friendRow(visible[index - 1]);
           },
         );
       },
     ),
   );
 
-  Widget _friendCard(ContactView contact) => Card(
-    key: ValueKey(contact.identityId),
-    child: Padding(
-      padding: const EdgeInsets.all(10),
-      child: Column(
+  Widget _friendsHeader({required bool hasFriends, required bool hasResults}) =>
+      Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
-            key: Key('friend-header-${contact.identityId}'),
             children: [
-              ProfileAvatar(
-                key: Key('friend-avatar-${contact.identityId}'),
-                radius: 18,
-                name: contact.displayName,
-                avatarBase64:
-                    (widget.peerHistory?.withCachedAvatar(contact) ?? contact)
-                        .avatarBase64,
-              ),
-              const SizedBox(width: 8),
               Expanded(
-                child: Tooltip(
-                  message: contact.displayName,
-                  child: Text(
-                    contact.displayName,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
+                child: Text(
+                  'Friends',
+                  style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
-              IconButtonTheme(
-                data: IconButtonThemeData(
-                  style: IconButton.styleFrom(
-                    minimumSize: const Size(44, 44),
-                    maximumSize: const Size(44, 44),
-                    padding: EdgeInsets.zero,
-                    iconSize: 20,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              PopupMenuButton<_FriendListAction>(
+                tooltip: 'Friend list options',
+                enabled: !_transferringFriends,
+                onSelected: _transferFriendList,
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: _FriendListAction.import,
+                    child: Text('Import friends'),
                   ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      key: Key('edit-alias-${contact.identityId}'),
-                      tooltip: 'Set alias for ${contact.signedName}',
-                      onPressed: () => _editAlias(contact),
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                    IconButton(
-                      key: Key('chat-contact-${contact.identityId}'),
-                      tooltip: contact.verified
-                          ? 'Chat with ${contact.displayName}'
-                          : 'Verify fingerprint before chatting',
-                      onPressed: contact.verified
-                          ? () => widget.onChat(contact)
-                          : null,
-                      icon: const Icon(Icons.chat_bubble_outline),
-                    ),
-                    if (contact.verified)
-                      IconButton(
-                        tooltip: 'Remove',
-                        onPressed: () async {
-                          await widget.bridge.removeContact(contact.identityId);
-                          _refreshFriends();
-                        },
-                        icon: const Icon(Icons.delete_outline),
-                      )
-                    else
-                      SizedBox.square(
-                        dimension: 44,
-                        child: PopupMenuButton<String>(
-                          tooltip: 'More friend actions',
-                          icon: const Icon(Icons.more_vert, size: 20),
-                          padding: EdgeInsets.zero,
-                          onSelected: (action) async {
-                            if (action == 'verify') {
-                              await widget.bridge.markContactVerified(
-                                contact.identityId,
-                              );
-                            } else {
-                              await widget.bridge.removeContact(
-                                contact.identityId,
-                              );
-                            }
-                            if (mounted) _refreshFriends();
-                          },
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(
-                              value: 'verify',
-                              child: Text('Fingerprint checked in person'),
-                            ),
-                            PopupMenuItem(
-                              value: 'remove',
-                              child: Text('Remove friend'),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
+                  PopupMenuItem(
+                    value: _FriendListAction.export,
+                    enabled: hasFriends,
+                    child: const Text('Export friends'),
+                  ),
+                ],
               ),
             ],
           ),
-          const SizedBox(height: 4),
-          SelectableText(
-            'Signed name: ${contact.signedName}\n'
-            '${contact.verified ? 'Identity verified' : 'Fingerprint not verified'}\n'
-            '${contact.fingerprint}\n${contact.identityId}',
-            key: Key('friend-details-${contact.identityId}'),
-            style: TextStyle(
-              fontSize: 12,
-              height: 1.35,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+          if (hasFriends)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: TextField(
+                key: const Key('friend-search'),
+                controller: _friendSearch,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  hintText: 'Search friends',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: _friendSearch.text.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: 'Clear search',
+                          onPressed: () => setState(_friendSearch.clear),
+                          icon: const Icon(Icons.close),
+                        ),
+                ),
+              ),
             ),
+          if (!hasResults)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Text(
+                hasFriends ? 'No matching friends.' : 'No friends yet.',
+              ),
+            ),
+        ],
+      );
+
+  Widget _friendRow(ContactView contact) {
+    final friend = widget.peerHistory?.withCachedAvatar(contact) ?? contact;
+    final palette = Theme.of(context).colorScheme;
+    return ListTile(
+      key: ValueKey(friend.identityId),
+      contentPadding: const EdgeInsetsDirectional.only(start: 4),
+      minLeadingWidth: 36,
+      horizontalTitleGap: 12,
+      onTap: () => showContactDetailsSheet(context, friend),
+      leading: ProfileAvatar(
+        key: Key('friend-avatar-${friend.identityId}'),
+        radius: 18,
+        name: friend.displayName,
+        avatarBase64: friend.avatarBase64,
+      ),
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(
+              friend.displayName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+          if (friend.verified) ...[
+            const SizedBox(width: 6),
+            Tooltip(
+              message: 'Identity verified',
+              child: Icon(
+                Icons.verified_outlined,
+                size: 15,
+                color: palette.primary,
+              ),
+            ),
+          ],
+        ],
+      ),
+      subtitle: friend.verified ? null : const Text('Verify fingerprint'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (friend.verified)
+            IconButton(
+              key: Key('chat-contact-${friend.identityId}'),
+              tooltip: 'Chat with ${friend.displayName}',
+              onPressed: () => widget.onChat(friend),
+              icon: const Icon(Icons.chat_bubble_outline, size: 20),
+            ),
+          PopupMenuButton<_FriendAction>(
+            tooltip: 'More friend actions',
+            icon: const Icon(Icons.more_vert, size: 20),
+            onSelected: (action) => _friendAction(action, friend),
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: _FriendAction.details,
+                child: Text('Contact details'),
+              ),
+              PopupMenuItem(
+                key: Key('edit-alias-${friend.identityId}'),
+                value: _FriendAction.alias,
+                child: const Text('Edit alias'),
+              ),
+              if (!friend.verified)
+                const PopupMenuItem(
+                  value: _FriendAction.verify,
+                  child: Text('Verify fingerprint'),
+                ),
+              const PopupMenuItem(
+                value: _FriendAction.remove,
+                child: Text('Remove friend'),
+              ),
+            ],
           ),
         ],
       ),
-    ),
-  );
+    );
+  }
 }

@@ -577,15 +577,14 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.textContaining('Signed name: Alice'), findsOneWidget);
-    expect(find.textContaining('Identity verified'), findsOneWidget);
+    expect(find.byTooltip('Identity verified'), findsOneWidget);
 
-    await tester.ensureVisible(
-      find.byKey(const Key('edit-alias-did:cht:alice')),
-    );
+    final actions = find.byTooltip('More friend actions');
+    await tester.ensureVisible(actions);
+    await tester.tap(actions);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('edit-alias-did:cht:alice')));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(find.text('Edit alias'), findsOneWidget);
     await tester.enterText(
       find.byKey(const Key('contact-alias-input')),
@@ -596,7 +595,6 @@ void main() {
 
     expect(bridge.savedContacts.single.alias, 'Work Alice');
     expect(find.text('Work Alice'), findsOneWidget);
-    expect(find.textContaining('Signed name: Alice'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('chat-contact-did:cht:alice')));
     await tester.pump();

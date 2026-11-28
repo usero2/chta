@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:cht/account/account_bridge.dart';
 import 'package:cht/account/account_models.dart';
 import 'package:cht/account/contacts_page.dart';
@@ -58,7 +61,20 @@ class _Bridge implements AccountBridge {
     String displayName,
   ) async {
     imported = cardJson;
-    saved.add(friend);
+    saved.add(
+      ContactView(
+        identityId: friend.identityId,
+        displayName: displayName.isEmpty ? friend.displayName : displayName,
+        signedName: friend.signedName,
+        fingerprint: friend.fingerprint,
+        verified: false,
+        alias: displayName,
+        relayUrls: friend.relayUrls,
+        signedCard: cardJson.startsWith('{')
+            ? (jsonDecode(cardJson) as Map).cast<String, Object?>()
+            : null,
+      ),
+    );
     return List.of(saved);
   }
 
@@ -261,14 +277,25 @@ void main() {
     }
   });
 
-  testWidgets('mobile friend details use their own full width row', (
+  testWidgets('friends search by alias or signed name and open details', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(360, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final bridge = _Bridge()..saved.add(_friend);
+    final bridge = _Bridge()
+      ..saved.addAll([
+        const ContactView(
+          identityId: 'did:cht:mali',
+          displayName: 'Work teammate',
+          signedName: 'Mali',
+          alias: 'Work teammate',
+          fingerprint: 'ABCD-1234',
+          verified: true,
+        ),
+        _friend,
+      ]);
     final profile = ProfileController(_Store());
     await profile.load();
     await tester.pumpWidget(
@@ -282,24 +309,94 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final details = find.byKey(const Key('friend-details-did:cht:friend'));
-    await tester.scrollUntilVisible(
-      details,
-      350,
-      scrollable: find.byType(Scrollable).first,
+    final search = find.byKey(const Key('friend-search'));
+    expect(find.text('ABCD-1234'), findsNothing);
+
+    for (final query in [' WORK ', 'mALI']) {
+      await tester.enterText(search, query);
+      await tester.pumpAndSettle();
+      expect(find.text('Work teammate'), findsOneWidget);
+      expect(find.text('Remote friend'), findsNothing);
+    }
+    await tester.enterText(search, 'no match');
+    await tester.pumpAndSettle();
+    expect(find.text('No matching friends.'), findsOneWidget);
+    await tester.tap(find.byTooltip('Clear search'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remote friend'), findsOneWidget);
+    await tester.tap(find.text('Work teammate'));
+    await tester.pumpAndSettle();
+    expect(find.text('Mali'), findsOneWidget);
+    expect(find.text('ABCD-1234'), findsOneWidget);
+    expect(find.text('did:cht:mali'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('friend list import and export use a local backup file', (
+    tester,
+  ) async {
+    final bridge = _Bridge();
+    final profile = ProfileController(_Store());
+    await profile.load();
+    final file = Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'format': 'chta-friends',
+          'version': 1,
+          'friends': [
+            {
+              'card': {'public': 'card'},
+              'alias': 'Work friend',
+              'verified': true,
+            },
+            {
+              'card': {'public': 'card'},
+              'alias': 'Duplicate',
+            },
+            {'card': false, 'alias': 'Broken'},
+          ],
+        }),
+      ),
+    );
+    Uint8List? exported;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ContactsPage(
+          bridge: bridge,
+          identity: _identity,
+          onChat: (_) => fail('Import should not open a chat'),
+          profileController: profile,
+          readFriendList: () async => file,
+          saveFriendList: (bytes) async {
+            exported = bytes;
+            return true;
+          },
+        ),
+      ),
     );
     await tester.pumpAndSettle();
-    final rect = tester.getRect(details);
-    final avatar = tester.getRect(
-      find.byKey(const Key('friend-avatar-did:cht:friend')),
-    );
-    final header = tester.getRect(
-      find.byKey(const Key('friend-header-did:cht:friend')),
-    );
-    expect(rect.width, closeTo(header.width, 0.1));
-    expect(rect.left, closeTo(header.left, 0.1));
-    expect(rect.top, greaterThan(avatar.bottom));
-    expect(tester.takeException(), isNull);
+    await tester.tap(find.byTooltip('Friend list options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import friends'));
+    await tester.pumpAndSettle();
+    expect(bridge.saved, isEmpty);
+    await tester.tap(find.text('Import'));
+    await tester.pumpAndSettle();
+    expect(bridge.saved.single.alias, 'Work friend');
+    expect(bridge.saved.single.verified, isFalse);
+    expect(find.text('Imported 1, existing 1, skipped 1'), findsOneWidget);
+    await tester.tap(find.byTooltip('Friend list options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export friends'));
+    await tester.pumpAndSettle();
+    final list = jsonDecode(utf8.decode(exported!)) as Map<String, dynamic>;
+    expect(list['version'], 1);
+    expect(list['friends'], [
+      {
+        'card': {'public': 'card'},
+        'alias': 'Work friend',
+      },
+    ]);
   });
 
   testWidgets('verified add friend opens chat with the included relay route', (
@@ -434,7 +531,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(bridge.imported, '{"remote":"card"}');
-      expect(find.text('Remote friend'), findsOneWidget);
+      expect(find.text('My friend'), findsOneWidget);
     },
   );
 }

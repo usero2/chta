@@ -45,6 +45,7 @@ class ContactView {
     this.avatarBase64 = '',
     this.relayUrls = const [],
     this.capabilities = const [],
+    this.signedCard,
   }) : signedName = signedName ?? displayName;
 
   factory ContactView.fromJson(Map<String, Object?> json) => ContactView(
@@ -54,6 +55,7 @@ class ContactView {
     verified: json['verified']! as bool,
     signedName: json['signedName'] as String?,
     alias: json['alias'] as String? ?? '',
+    signedCard: (json['card'] as Map?)?.cast<String, Object?>(),
     relayUrls:
         (((json['card'] as Map?)?['relayUrls'] ?? json['relayUrls']) as List? ??
                 const [])
@@ -78,6 +80,7 @@ class ContactView {
   final String avatarBase64;
   final List<String> relayUrls;
   final List<String> capabilities;
+  final Map<String, Object?>? signedCard;
 
   ContactView withAvatar(String avatar) => ContactView(
     identityId: identityId,
@@ -89,5 +92,6 @@ class ContactView {
     avatarBase64: avatar,
     relayUrls: relayUrls,
     capabilities: capabilities,
+    signedCard: signedCard,
   );
 }
